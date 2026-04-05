@@ -1,0 +1,255 @@
+name: Jobs Deploy Prod
+run-name: Jobs Deploy Prod / ${{ github.event_name }} / ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: Full container image reference with digest
+        required: true
+        type: string
+      control_plane_ref:
+        description: Optional control-plane ref for traceability
+        required: false
+        type: string
+      reason:
+        description: Why this rollout is being performed
+        required: false
+        type: string
+  repository_dispatch:
+    types:
+      - deploy_runtime
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: jobs-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy-prod:
+    name: deploy-prod
+    runs-on: ubuntu-22.04
+    environment:
+      name: prod
+    env:
+      DISPATCH_IMAGE_DIGEST: ${{ github.event.client_payload.image_digest }}
+      DISPATCH_CONTROL_PLANE_REF: ${{ github.event.client_payload.control_plane_ref }}
+      DISPATCH_REASON: ${{ github.event.client_payload.reason }}
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_PULL_IDENTITY_NAME: ${{ vars.ACR_PULL_IDENTITY_NAME || 'asset-allocation-acr-pull-mi' }}
+      CONTAINER_APPS_ENVIRONMENT_NAME: ${{ vars.CONTAINER_APPS_ENVIRONMENT_NAME || 'asset-allocation-env' }}
+      SERVICE_ACCOUNT_NAME: ${{ vars.SERVICE_ACCOUNT_NAME || 'asset-allocation-sa' }}
+      AZURE_STORAGE_ACCOUNT_NAME: ${{ vars.AZURE_STORAGE_ACCOUNT_NAME }}
+      AZURE_CONTAINER_COMMON: ${{ vars.AZURE_CONTAINER_COMMON }}
+      AZURE_CONTAINER_BRONZE: ${{ vars.AZURE_CONTAINER_BRONZE }}
+      AZURE_CONTAINER_SILVER: ${{ vars.AZURE_CONTAINER_SILVER }}
+      AZURE_CONTAINER_GOLD: ${{ vars.AZURE_CONTAINER_GOLD }}
+      AZURE_FOLDER_MARKET: ${{ vars.AZURE_FOLDER_MARKET }}
+      AZURE_FOLDER_FINANCE: ${{ vars.AZURE_FOLDER_FINANCE }}
+      AZURE_FOLDER_EARNINGS: ${{ vars.AZURE_FOLDER_EARNINGS }}
+      AZURE_FOLDER_TARGETS: ${{ vars.AZURE_FOLDER_TARGETS }}
+      ASSET_ALLOCATION_API_BASE_URL: ${{ secrets.ASSET_ALLOCATION_API_BASE_URL }}
+      ASSET_ALLOCATION_API_SCOPE: ${{ secrets.ASSET_ALLOCATION_API_SCOPE }}
+      ALPHA_VANTAGE_EARNINGS_FRESH_DAYS: ${{ vars.ALPHA_VANTAGE_EARNINGS_FRESH_DAYS }}
+      ALPHA_VANTAGE_FINANCE_FRESH_DAYS: ${{ vars.ALPHA_VANTAGE_FINANCE_FRESH_DAYS }}
+      ALPHA_VANTAGE_MAX_WORKERS: ${{ vars.ALPHA_VANTAGE_MAX_WORKERS }}
+      ALPHA_VANTAGE_TIMEOUT_SECONDS: ${{ vars.ALPHA_VANTAGE_TIMEOUT_SECONDS }}
+      MASSIVE_FINANCE_FRESH_DAYS: ${{ vars.MASSIVE_FINANCE_FRESH_DAYS }}
+      MASSIVE_MAX_WORKERS: ${{ vars.MASSIVE_MAX_WORKERS }}
+      MASSIVE_TIMEOUT_SECONDS: ${{ vars.MASSIVE_TIMEOUT_SECONDS }}
+      BACKFILL_START_DATE: ${{ vars.BACKFILL_START_DATE }}
+      DEBUG_SYMBOLS: ${{ vars.DEBUG_SYMBOLS }}
+      JOB_STARTUP_API_CONTAINER_APPS: ${{ vars.JOB_STARTUP_API_CONTAINER_APPS }}
+      RANKING_START_DATE: ${{ vars.RANKING_START_DATE }}
+      RANKING_END_DATE: ${{ vars.RANKING_END_DATE }}
+      RANKING_STRATEGY_NAME: ${{ vars.RANKING_STRATEGY_NAME }}
+      SILVER_MARKET_JOB: ${{ vars.SILVER_MARKET_JOB || 'silver-market-job' }}
+      SILVER_FINANCE_JOB: ${{ vars.SILVER_FINANCE_JOB || 'silver-finance-job' }}
+      SILVER_PRICE_TARGET_JOB: ${{ vars.SILVER_PRICE_TARGET_JOB || 'silver-price-target-job' }}
+      SILVER_EARNINGS_JOB: ${{ vars.SILVER_EARNINGS_JOB || 'silver-earnings-job' }}
+      GOLD_MARKET_JOB: ${{ vars.GOLD_MARKET_JOB || 'gold-market-job' }}
+      GOLD_FINANCE_JOB: ${{ vars.GOLD_FINANCE_JOB || 'gold-finance-job' }}
+      GOLD_PRICE_TARGET_JOB: ${{ vars.GOLD_PRICE_TARGET_JOB || 'gold-price-target-job' }}
+      GOLD_EARNINGS_JOB: ${{ vars.GOLD_EARNINGS_JOB || 'gold-earnings-job' }}
+      AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+      NASDAQ_API_KEY: ${{ secrets.NASDAQ_API_KEY }}
+      POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Resolve rollout inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_digest="${{ inputs.image_digest }}"
+          control_plane_ref="${{ inputs.control_plane_ref }}"
+          reason="${{ inputs.reason }}"
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+            image_digest="${DISPATCH_IMAGE_DIGEST}"
+            control_plane_ref="${DISPATCH_CONTROL_PLANE_REF}"
+            reason="${DISPATCH_REASON}"
+          fi
+          : "${image_digest:?image_digest is required}"
+          echo "image_digest=${image_digest}" >> "$GITHUB_OUTPUT"
+          echo "control_plane_ref=${control_plane_ref}" >> "$GITHUB_OUTPUT"
+          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Azure resource identifiers
+        id: azure
+        shell: bash
+        run: |
+          set -euo pipefail
+          az config set extension.use_dynamic_install=yes_without_prompt > /dev/null
+          identity_id="$(az identity show --name "${ACR_PULL_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --query id -o tsv)"
+          identity_client_id="$(az identity show --name "${ACR_PULL_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --query clientId -o tsv)"
+          env_id="/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/managedEnvironments/${CONTAINER_APPS_ENVIRONMENT_NAME}"
+          echo "identity_id=${identity_id}" >> "$GITHUB_OUTPUT"
+          echo "identity_client_id=${identity_client_id}" >> "$GITHUB_OUTPUT"
+          echo "environment_id=${env_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Capture current job images
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/rendered
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          resource_group = "${RESOURCE_GROUP}"
+          images = {}
+          for manifest in sorted(Path("deploy").glob("job_*.yaml")):
+              job_name = manifest.stem.replace("job_", "").replace("_", "-") + "-job"
+              try:
+                  output = subprocess.check_output(
+                      [
+                          "az",
+                          "containerapp",
+                          "job",
+                          "show",
+                          "--name",
+                          job_name,
+                          "--resource-group",
+                          resource_group,
+                          "--query",
+                          "properties.template.containers[0].image",
+                          "-o",
+                          "tsv",
+                      ],
+                      text=True,
+                  ).strip()
+              except subprocess.CalledProcessError:
+                  output = ""
+              images[job_name] = output
+          Path("artifacts/previous-job-images.json").write_text(json.dumps(images, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Render and apply job manifests
+        env:
+          JOB_IMAGE: ${{ steps.inputs.outputs.image_digest }}
+          ACR_PULL_IDENTITY_RESOURCE_ID: ${{ steps.azure.outputs.identity_id }}
+          ACR_PULL_IDENTITY_CLIENT_ID: ${{ steps.azure.outputs.identity_client_id }}
+          CONTAINER_APPS_ENVIRONMENT_ID: ${{ steps.azure.outputs.environment_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          deploy_dir = Path("deploy")
+          rendered_dir = Path("artifacts/rendered")
+          rendered_dir.mkdir(parents=True, exist_ok=True)
+
+          for manifest in sorted(deploy_dir.glob("job_*.yaml")):
+              rendered = manifest.read_text(encoding="utf-8")
+              for key, value in os.environ.items():
+                  rendered = rendered.replace("${" + key + "}", value)
+              rendered_path = rendered_dir / manifest.name
+              rendered_path.write_text(rendered, encoding="utf-8")
+
+              lines = rendered.splitlines()
+              name_line = next(line for line in lines if line.startswith("name: "))
+              job_name = name_line.split(":", 1)[1].strip()
+
+              exists = subprocess.run(
+                  ["az", "containerapp", "job", "show", "--name", job_name, "--resource-group", os.environ["RESOURCE_GROUP"]],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+              ).returncode == 0
+              command = ["az", "containerapp", "job", "update" if exists else "create", "--name", job_name, "--resource-group", os.environ["RESOURCE_GROUP"], "--yaml", str(rendered_path)]
+              subprocess.check_call(command)
+          PY
+
+      - name: Verify deployed job images
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+
+          expected = "${{ steps.inputs.outputs.image_digest }}"
+          resource_group = "${RESOURCE_GROUP}"
+          for manifest in sorted(Path("artifacts/rendered").glob("job_*.yaml")):
+              name_line = next(line for line in manifest.read_text(encoding="utf-8").splitlines() if line.startswith("name: "))
+              job_name = name_line.split(":", 1)[1].strip()
+              actual = subprocess.check_output(
+                  [
+                      "az",
+                      "containerapp",
+                      "job",
+                      "show",
+                      "--name",
+                      job_name,
+                      "--resource-group",
+                      resource_group,
+                      "--query",
+                      "properties.template.containers[0].image",
+                      "-o",
+                      "tsv",
+                  ],
+                  text=True,
+              ).strip()
+              if actual != expected:
+                  raise SystemExit(f"{job_name} image mismatch: expected {expected}, found {actual}")
+          PY
+
+      - name: Upload rendered manifests and rollback data
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: jobs-deploy-support
+          path: |
+            artifacts/rendered/*
+            artifacts/previous-job-images.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write deployment summary
+        shell: bash
+        run: |
+          {
+            echo "## Jobs deploy"
+            echo ""
+            echo "- Image: \`${{ steps.inputs.outputs.image_digest }}\`"
+            echo "- Control-plane ref: \`${{ steps.inputs.outputs.control_plane_ref || 'not provided' }}\`"
+            echo "- Rendered manifests: \`artifacts/rendered/*\`"
+            echo "- Previous job images: \`artifacts/previous-job-images.json\`"
+            echo "- Rollback: rerun this workflow with a previous image digest"
+            echo "- Reason: \`${{ steps.inputs.outputs.reason || 'not provided' }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

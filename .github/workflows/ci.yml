@@ -1,0 +1,102 @@
+name: Jobs CI
+run-name: Jobs CI / ${{ github.event_name }} / ${{ github.ref_name }}
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jobs-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-lint:
+    name: workflow-lint
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: actionlint
+        uses: rhysd/actionlint@393031adb9afb225ee52ae2ccd7a5af5525e03e8 # v1.7.11
+
+  build-test:
+    name: build-test
+    runs-on: ubuntu-22.04
+    env:
+      TEST_MODE: "1"
+      LOG_FORMAT: "TEXT"
+      LOG_LEVEL: "INFO"
+      AZURE_STORAGE_ACCOUNT_NAME: localdev
+      AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key;EndpointSuffix=core.windows.net
+      AZURE_CONTAINER_COMMON: common
+      ASSET_ALLOCATION_API_BASE_URL: https://control-plane.example
+      ASSET_ALLOCATION_API_SCOPE: api://asset-allocation
+      POSTGRES_DSN: postgresql://user:pass@localhost:5432/asset_allocation?sslmode=disable
+    steps:
+      - name: Checkout jobs repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: asset-allocation-jobs
+
+      - name: Checkout contracts repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ vars.CONTRACTS_REPOSITORY || format('{0}/asset-allocation-contracts', github.repository_owner) }}
+          ref: ${{ vars.CONTRACTS_REF || 'main' }}
+          path: asset-allocation-contracts
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            asset-allocation-jobs/requirements.lock.txt
+            asset-allocation-jobs/requirements-dev.lock.txt
+            asset-allocation-jobs/pyproject.toml
+            asset-allocation-contracts/python/pyproject.toml
+
+      - name: Install test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r asset-allocation-jobs/requirements.lock.txt
+          python -m pip install -r asset-allocation-jobs/requirements-dev.lock.txt
+          python -m pip install -e asset-allocation-contracts/python
+          python -m pip install -e asset-allocation-jobs --no-deps
+          python -m pip check
+
+      - name: Run ruff
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd asset-allocation-jobs
+          python -m ruff check .
+
+      - name: Run jobs HTTP contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd asset-allocation-jobs
+          python -m pytest \
+            tests/core/test_control_plane_transport.py \
+            tests/core/test_strategy_repository.py \
+            tests/core/test_ranking_repository.py \
+            tests/core/test_universe_repository.py \
+            tests/core/test_regime_repository.py \
+            tests/core/test_backtest_repository.py \
+            -q
+
+      - name: Build jobs image smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --file asset-allocation-jobs/Dockerfile --tag asset-allocation-jobs:ci-smoke .

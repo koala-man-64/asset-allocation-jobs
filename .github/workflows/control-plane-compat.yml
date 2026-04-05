@@ -1,0 +1,117 @@
+name: Jobs Control Plane Compatibility
+run-name: Jobs Control Plane Compat / ${{ github.event_name }} / ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      control_plane_ref:
+        description: Control-plane ref or SHA to validate against
+        required: false
+        default: main
+        type: string
+  repository_dispatch:
+    types:
+      - control_plane_released
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jobs-control-plane-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  control-plane-compat:
+    name: control-plane-compat
+    runs-on: ubuntu-22.04
+    env:
+      TEST_MODE: "1"
+      LOG_FORMAT: "TEXT"
+      LOG_LEVEL: "INFO"
+      AZURE_STORAGE_ACCOUNT_NAME: localdev
+      AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key;EndpointSuffix=core.windows.net
+      AZURE_CONTAINER_COMMON: common
+      ASSET_ALLOCATION_API_BASE_URL: https://control-plane.example
+      ASSET_ALLOCATION_API_SCOPE: api://asset-allocation
+      POSTGRES_DSN: postgresql://user:pass@localhost:5432/asset_allocation?sslmode=disable
+      DISPATCH_CONTROL_PLANE_SHA: ${{ github.event.client_payload.control_plane_sha }}
+      DISPATCH_CONTRACTS_SHA: ${{ github.event.client_payload.contracts_sha }}
+    steps:
+      - name: Resolve refs
+        id: refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          control_plane_ref="${{ inputs.control_plane_ref }}"
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+            control_plane_ref="${DISPATCH_CONTROL_PLANE_SHA}"
+          fi
+          control_plane_ref="${control_plane_ref:-main}"
+          contracts_ref="${DISPATCH_CONTRACTS_SHA:-main}"
+          echo "control_plane_ref=${control_plane_ref}" >> "$GITHUB_OUTPUT"
+          echo "contracts_ref=${contracts_ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout jobs repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: asset-allocation-jobs
+
+      - name: Checkout contracts repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ vars.CONTRACTS_REPOSITORY || format('{0}/asset-allocation-contracts', github.repository_owner) }}
+          ref: ${{ steps.refs.outputs.contracts_ref }}
+          path: asset-allocation-contracts
+
+      - name: Checkout control-plane repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ vars.CONTROL_PLANE_REPOSITORY || format('{0}/asset-allocation-control-plane', github.repository_owner) }}
+          ref: ${{ steps.refs.outputs.control_plane_ref }}
+          path: asset-allocation-control-plane
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Install compatibility dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r asset-allocation-jobs/requirements.lock.txt
+          python -m pip install -r asset-allocation-jobs/requirements-dev.lock.txt
+          python -m pip install -e asset-allocation-contracts/python
+          python -m pip install -e asset-allocation-jobs --no-deps
+
+      - name: Export control-plane contract artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python asset-allocation-control-plane/scripts/export_contract_artifacts.py
+
+      - name: Run jobs compatibility suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd asset-allocation-jobs
+          python -m pytest \
+            tests/core/test_control_plane_transport.py \
+            tests/core/test_strategy_repository.py \
+            tests/core/test_ranking_repository.py \
+            tests/core/test_universe_repository.py \
+            tests/core/test_regime_repository.py \
+            tests/core/test_backtest_repository.py \
+            -q
+
+      - name: Write compatibility summary
+        shell: bash
+        run: |
+          {
+            echo "## Jobs control-plane compatibility"
+            echo ""
+            echo "- Control-plane ref: \`${{ steps.refs.outputs.control_plane_ref }}\`"
+            echo "- Contracts ref: \`${{ steps.refs.outputs.contracts_ref }}\`"
+            echo "- Result: passed"
+          } >> "${GITHUB_STEP_SUMMARY}"
