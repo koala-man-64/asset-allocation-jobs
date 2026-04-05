@@ -27,4 +27,6 @@ Canonical workflows live under `.github/workflows/`.
 - `deploy-prod.yml` is the only workflow allowed to apply `deploy/job_*.yaml`.
 - `control-plane-compat.yml` validates jobs against a candidate or released control-plane ref.
 - `trigger-jobs.yml` is the only manual ACA job trigger workflow.
-- `DEPLOYMENT_SETUP.md` is the canonical deploy/operate/rollback runbook.
+- `scripts/setup-env.ps1` builds repo-local `.env.web` using Azure and git discovery where possible.
+- `scripts/sync-all-to-github.ps1` syncs the `.env.web` surface into repo vars and secrets.
+- `DEPLOYMENT_SETUP.md` is the canonical deploy, operate, and rollback runbook.

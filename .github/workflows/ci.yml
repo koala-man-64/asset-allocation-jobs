@@ -81,6 +81,13 @@ jobs:
           cd asset-allocation-jobs
           python -m ruff check .
 
+      - name: Run env-contract static tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd asset-allocation-jobs
+          python -m pytest tests/test_env_contract.py tests/test_workflow_runtime_ownership.py tests/test_azure_provisioning_scripts.py -q
+
       - name: Run jobs HTTP contract tests
         shell: bash
         run: |
