@@ -116,11 +116,8 @@ function Get-GitOwner {
 function Get-ItemsFromAzure {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $items = Invoke-JsonCommand -FilePath "az" -ArgumentList $Arguments
-    if ($items) {
-        Write-Output -NoEnumerate @($items)
-        return
-    }
-    Write-Output -NoEnumerate @()
+    if ($null -eq $items) { return $null }
+    return @($items)
 }
 
 function Get-UserAssignedIdentities {
