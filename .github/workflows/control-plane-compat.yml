@@ -88,6 +88,7 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install -r asset-allocation-jobs/requirements.lock.txt
+          python -m pip install -r asset-allocation-control-plane/requirements.lock.txt
           python -m pip install -r asset-allocation-jobs/requirements-dev.lock.txt
           python - <<'PY' > asset-allocation-jobs/shared-python-deps.txt
           import tomllib
@@ -130,4 +131,3 @@ jobs:
             echo "- Control-plane ref: \`${{ steps.refs.outputs.control_plane_ref }}\`"
             echo "- Result: passed"
           } >> "${GITHUB_STEP_SUMMARY}"
-
