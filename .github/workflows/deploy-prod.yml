@@ -96,9 +96,11 @@ jobs:
             reason="${DISPATCH_REASON}"
           fi
           : "${image_digest:?image_digest is required}"
-          echo "image_digest=${image_digest}" >> "$GITHUB_OUTPUT"
-          echo "control_plane_ref=${control_plane_ref}" >> "$GITHUB_OUTPUT"
-          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+          {
+            echo "image_digest=${image_digest}"
+            echo "control_plane_ref=${control_plane_ref}"
+            echo "reason=${reason}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Azure login
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
@@ -116,9 +118,11 @@ jobs:
           identity_id="$(az identity show --name "${ACR_PULL_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --query id -o tsv)"
           identity_client_id="$(az identity show --name "${ACR_PULL_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --query clientId -o tsv)"
           env_id="/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/managedEnvironments/${CONTAINER_APPS_ENVIRONMENT_NAME}"
-          echo "identity_id=${identity_id}" >> "$GITHUB_OUTPUT"
-          echo "identity_client_id=${identity_client_id}" >> "$GITHUB_OUTPUT"
-          echo "environment_id=${env_id}" >> "$GITHUB_OUTPUT"
+          {
+            echo "identity_id=${identity_id}"
+            echo "identity_client_id=${identity_client_id}"
+            echo "environment_id=${env_id}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Capture current job images
         shell: bash

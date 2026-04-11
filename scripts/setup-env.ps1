@@ -116,8 +116,11 @@ function Get-GitOwner {
 function Get-ItemsFromAzure {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     $items = Invoke-JsonCommand -FilePath "az" -ArgumentList $Arguments
-    if ($items) { return @($items) }
-    return @()
+    if ($items) {
+        Write-Output -NoEnumerate @($items)
+        return
+    }
+    Write-Output -NoEnumerate @()
 }
 
 function Get-UserAssignedIdentities {
@@ -149,7 +152,7 @@ function Get-StorageAccounts {
 }
 
 function Select-PreferredName {
-    param([Parameter(Mandatory = $true)]$Items, [Parameter(Mandatory = $true)][string]$Preferred, [string[]]$Contains = @())
+    param($Items, [Parameter(Mandatory = $true)][string]$Preferred, [string[]]$Contains = @())
     $list = @($Items)
     if ($list.Count -eq 0) { return "" }
     $exact = @($list | Where-Object { $_.name -eq $Preferred } | Select-Object -First 1)

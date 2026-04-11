@@ -49,15 +49,15 @@ foreach ($key in ($contractMap.Keys | Sort-Object)) {
     $value = if ($envMap.ContainsKey($key)) { $envMap[$key] } else { "" }
     if ($storage -eq "var") { $expectedVars.Add($key) } else { $expectedSecrets.Add($key) }
     if ([string]::IsNullOrWhiteSpace($value)) {
-        Write-Host "Skipping empty $storage: $key" -ForegroundColor Yellow
+        Write-Host "Skipping empty ${storage}: $key" -ForegroundColor Yellow
         continue
     }
     if ($DryRun) {
-        Write-Host "[DRY RUN] Would set $storage: $key"
+        Write-Host "[DRY RUN] Would set ${storage}: $key"
         continue
     }
     if ($storage -eq "var") { $value | gh variable set $key } else { $value | gh secret set $key }
-    Write-Host "Synced $storage: $key" -ForegroundColor Green
+    Write-Host "Synced ${storage}: $key" -ForegroundColor Green
 }
 
 function Remove-UnexpectedItems {
@@ -66,11 +66,11 @@ function Remove-UnexpectedItems {
     $unexpected = @($remote | Where-Object { $_ -and $_ -notin $Expected } | Sort-Object -Unique)
     foreach ($name in $unexpected) {
         if ($DryRun) {
-            Write-Host "[DRY RUN] Would delete unexpected $Kind: $name"
+            Write-Host "[DRY RUN] Would delete unexpected ${Kind}: $name"
             continue
         }
         gh $Kind delete $name
-        Write-Host "Deleted unexpected $Kind: $name" -ForegroundColor Yellow
+        Write-Host "Deleted unexpected ${Kind}: $name" -ForegroundColor Yellow
     }
 }
 
