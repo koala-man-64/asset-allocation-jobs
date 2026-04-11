@@ -3,7 +3,7 @@ import pytest
 
 from core import core as core_module
 from core import delta_core
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 from tasks.price_target_data import gold_price_target_data as gold
 from tasks.common.gold_output_contracts import GOLD_PRICE_TARGET_OUTPUT_COLUMNS
 

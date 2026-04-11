@@ -2,8 +2,6 @@
 
 ## Development Setup
 
-### Python
-
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -12,34 +10,17 @@ python3 -m pip install -e .
 python3 -m pip install -r requirements-dev.txt
 ```
 
-Use Python 3.14 for local backend work so local installs match CI and container images.
-
-### UI
-
-```bash
-cd ui
-pnpm install
-```
+Use Python 3.14 for local jobs-runtime work so local installs match CI and container images.
 
 ## Day-to-Day Checks
 
-### Backend
-
 ```bash
-python3 -m ruff check .
-python3 -m pytest -q
+python3 scripts/run_quality_gate.py lint-python
+python3 scripts/run_quality_gate.py test-fast
+python3 scripts/run_quality_gate.py test-full
 ```
 
-### UI
-
-```bash
-cd ui
-pnpm lint
-pnpm exec vitest run --coverage
-pnpm build
-```
-
-CI runs the UI checks in a Node 20 container and the backend checks on Python 3.14.
+`.github/workflows/ci.yml` runs the jobs-owned validation path. Use `.github/workflows/security.yml` for dependency and supply-chain checks.
 
 ## Dependency Governance
 
@@ -60,16 +41,16 @@ python3 scripts/dependency_governance.py check --report artifacts/dependency_gov
 
 ## Docs and Config Changes
 
-- Update `.env.template` when you add, rename, or remove environment variables.
-- Update the root docs and targeted runbooks when you change application behavior, deployment knobs, or operator workflows.
-- Treat `/api/docs` and `/api/openapi.json` as the source of truth for live API routes.
+- Update `docs/ops/env-contract.csv` when you add, rename, or remove GitHub variables or secrets.
+- Update `.env.template` only for contract rows where `template=true`.
+- Treat `asset-allocation-control-plane` and `asset-allocation-ui` as owners of local API and UI implementation docs. This repo should describe them only as external dependencies.
 - If you add, remove, or rename repo-local agents under `.codex/skills`, update `AGENTS.md` in the same change.
 
 ## Pull Requests
 
-- Keep changes scoped.
+- Keep changes scoped to jobs-owned runtime, monitoring, deployment, provider, and integration surfaces.
 - Add or update tests for behavior changes.
-- Call out secret, auth, data migration, or deployment impacts when you touch `deploy/`, runtime config, auth, or provider integration code.
+- Call out auth, storage, Postgres, job-manifest, or cross-repo compatibility impacts when you touch `deploy/`, runtime config, or control-plane transport code.
 
 ## Evidence
 
@@ -79,9 +60,10 @@ python3 scripts/dependency_governance.py check --report artifacts/dependency_gov
 - `requirements-dev.txt`
 - `requirements-dev.lock.txt`
 - `scripts/dependency_governance.py`
-- `.github/workflows/run_tests.yml`
-- `.github/workflows/dependency_governance.yml`
+- `scripts/run_quality_gate.py`
+- `.github/workflows/ci.yml`
+- `.github/workflows/security.yml`
 - `pytest.ini`
+- `docs/ops/env-contract.csv`
 - `.env.template`
-- `api/service/app.py`
-- `ui/package.json`
+- `DEPLOYMENT_SETUP.md`

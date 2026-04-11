@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from tasks.market_data import silver_market_data as silver
 from core import delta_core
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 
 @pytest.fixture
 def unique_ticker():

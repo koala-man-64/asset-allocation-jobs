@@ -35,8 +35,6 @@ local.settings.json
 # --- Project Specific ---
 # Data Directory
 data/
-!ui/src/data/
-!ui/src/data/**
 tmp/
 artifacts/**
 
@@ -45,18 +43,10 @@ node_modules/
 **/node_modules/
 package-lock.json
 **/package-lock.json
-ui/dist/
-ui/.vite/
-ui/.pnpm-store/
-ui/coverage/
-ui/.eslintcache
 pnpm-debug.log*
 npm-debug.log*
 yarn-error.log*
 *.tsbuildinfo
-asset_allocation/ui2.0/dist/
-asset_allocation/ui2.0/.vite/
-asset_allocation/ui2.0/.pnpm-store/
 
 # --- Tooling / Test Artifacts ---
 docs/signoffs/

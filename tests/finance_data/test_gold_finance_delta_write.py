@@ -4,7 +4,7 @@ import pytest
 from core import core as core_module
 from core import delta_core
 from core.postgres import PostgresError
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 from tasks.finance_data import gold_finance_data
 
 EXPECTED_GOLD_FINANCE_COLUMNS = list(gold_finance_data._GOLD_FINANCE_PIOTROSKI_COLUMNS)

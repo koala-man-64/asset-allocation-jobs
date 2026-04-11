@@ -3,6 +3,41 @@ from __future__ import annotations
 from pathlib import Path
 
 
+STALE_RUNTIME_PATHS = (
+    "api",
+    "ui",
+    "tests/api",
+    "tests/tools/test_ui_lockfile_integrity.py",
+    "tests/architecture/test_system_facade_guard.py",
+    "docker-compose.yml",
+    "docker-compose.debug.yml",
+    "deploy/app_api.yaml",
+    "deploy/app_api_public.yaml",
+    "scripts/run_api_dev.py",
+    "scripts/check_ui_api_drift_guards.py",
+    "scripts/validate_deploy_inputs.py",
+    "scripts/verify_ui_api_health.py",
+    "audit_snapshot.json",
+)
+
+STALE_DRIFT_REFERENCES = (
+    "lint-ui",
+    "typecheck-ui",
+    "test-ui",
+    'path_glob: "api/**"',
+    "api/service/app.py",
+)
+
+STALE_DOC_REFERENCES = (
+    ".github/workflows/run_tests.yml",
+    ".github/workflows/dependency_governance.yml",
+    "api/service/app.py",
+    "ui/package.json",
+    "deploy/app_api.yaml",
+    "/config.js",
+)
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -14,6 +49,7 @@ def test_jobs_has_only_current_runtime_workflows() -> None:
         "control-plane-compat.yml",
         "deploy-prod.yml",
         "release.yml",
+        "runtime-common-compat.yml",
         "security.yml",
         "trigger-jobs.yml",
     }
@@ -24,3 +60,25 @@ def test_jobs_deployment_docs_point_to_control_plane_for_shared_bootstrap() -> N
     text = (repo_root() / "DEPLOYMENT_SETUP.md").read_text(encoding="utf-8")
     assert "asset-allocation-control-plane" in text
     assert "scripts\\ops\\provision\\provision_azure.ps1" in text
+
+
+def test_jobs_repo_does_not_ship_control_plane_or_ui_assets() -> None:
+    root = repo_root()
+    for relative_path in STALE_RUNTIME_PATHS:
+        assert not (root / relative_path).exists(), f"unexpected stale path present: {relative_path}"
+
+
+def test_codedrift_config_is_jobs_only() -> None:
+    text = (repo_root() / ".codedrift.yml").read_text(encoding="utf-8")
+    for stale_reference in STALE_DRIFT_REFERENCES:
+        assert stale_reference not in text
+    assert "python3 scripts/run_quality_gate.py test-fast" in text
+    assert "python3 scripts/run_quality_gate.py test-full" in text
+
+
+def test_contributor_and_security_docs_reference_live_jobs_assets_only() -> None:
+    root = repo_root()
+    for path in ("CONTRIBUTING.md", "SECURITY.md"):
+        text = (root / path).read_text(encoding="utf-8")
+        for stale_reference in STALE_DOC_REFERENCES:
+            assert stale_reference not in text, f"{path} still references stale asset: {stale_reference}"

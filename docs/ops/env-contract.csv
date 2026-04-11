@@ -52,3 +52,5 @@ ASSET_ALLOCATION_API_SCOPE,secret,secret,secret_store,true,Managed-identity scop
 AZURE_STORAGE_CONNECTION_STRING,secret,secret,secret_store,true,Storage connection string. Never auto-discovered.
 NASDAQ_API_KEY,secret,secret,secret_store,true,Nasdaq API key. Never auto-discovered.
 POSTGRES_DSN,secret,secret,secret_store,true,Jobs Postgres connection string. Never auto-discovered.
+PYTHON_PACKAGE_INDEX_URL,secret,secret,secret_store,false,Optional primary Python package index for CI and release workflows.
+PYTHON_PACKAGE_EXTRA_INDEX_URL,secret,secret,secret_store,false,Optional extra Python package index for CI and release workflows.

@@ -382,7 +382,7 @@ def _run_market_reconciliation(*, silver_container: str, gold_container: str) ->
 
     from core import core as mdc
     from core import delta_core
-    from core.pipeline import DataPaths
+    from asset_allocation_contracts.paths import DataPaths
 
     silver_client = mdc.get_storage_client(silver_container)
     gold_client = mdc.get_storage_client(gold_container)
@@ -1164,7 +1164,7 @@ def _run_alpha26_market_gold(
     """
 
     from core import core as mdc
-    from core.pipeline import DataPaths
+    from asset_allocation_contracts.paths import DataPaths
     from core import delta_core
 
     backfill_start = pd.to_datetime(backfill_start_iso).normalize() if backfill_start_iso else None

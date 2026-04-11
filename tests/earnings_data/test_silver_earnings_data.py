@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 from unittest.mock import patch
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 from tasks.earnings_data import silver_earnings_data as silver
 
 

@@ -1,9 +1,19 @@
 # System Status Freshness Contract
 
-- The system status page reads a single authoritative payload from `GET /api/system/status-view`.
-- `systemHealth` in that payload is live-refreshed for the page query cadence.
-- Medallion-domain job runtime state and status inside that payload are overlaid from a live Azure job execution/resource check on every status-view request, using the same anchored-active-execution behavior as the console stream.
-- `metadataSnapshot` in that payload is served from the persisted snapshot document, not from a bulk live metadata scan.
-- Metadata-changing artifact publishers must write through the shared domain artifact publish path so the persisted snapshot documents are refreshed on every successful publish.
-- Manual job triggers still use client-side optimistic overrides until the backend catches up and the status view reflects the run.
-- Metadata-changing actions emit `DOMAIN_METADATA_SNAPSHOT_CHANGED`, which invalidates the status view and legacy snapshot queries.
+This document describes the jobs-side contribution to the system status experience. The endpoint and page implementation live outside this repo.
+
+## Ownership
+
+- `asset-allocation-control-plane` owns `/api/system/status-view`, `/api/system/health`, auth, and payload composition.
+- `asset-allocation-ui` owns the page, query cadence, and client-side rendering.
+- `asset-allocation-jobs` owns the job/resource data, artifacts, and logs that the control-plane reads when composing freshness and recent-job state.
+
+## Jobs-Side Expectations
+
+- Metadata-changing publishers in this repo must write through the shared artifact publish path so downstream snapshot documents stay current.
+- Job executions and resource health signals emitted by jobs must remain consistent with the control-plane freshness overlay logic.
+- Cross-repo references in this document are integration boundaries, not local implementation paths.
+
+## Historical Note
+
+Earlier versions of this document described the page and endpoint as if they lived in this repo. That is no longer true after the repo split.

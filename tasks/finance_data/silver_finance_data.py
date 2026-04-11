@@ -24,7 +24,7 @@ from tasks.finance_data.silver_parsing import (
     _utc_today,
     resample_daily_ffill,
 )
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 from core import bronze_bucketing
 from core import domain_artifacts
 from core import layer_bucketing

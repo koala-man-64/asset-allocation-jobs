@@ -453,7 +453,7 @@ def _project_gold_finance_piotroski_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _gold_finance_alpha26_bucket_path(bucket: str) -> str:
-    from core.pipeline import DataPaths
+    from asset_allocation_contracts.paths import DataPaths
 
     return DataPaths.get_gold_finance_alpha26_bucket_path(bucket)
 
@@ -522,7 +522,7 @@ def _load_gold_finance_bucket_template(
 def _run_finance_reconciliation(*, silver_container: str, gold_container: str) -> tuple[int, int]:
     from core import core as mdc
     from core import delta_core
-    from core.pipeline import DataPaths
+    from asset_allocation_contracts.paths import DataPaths
 
     silver_client = mdc.get_storage_client(silver_container)
     gold_client = mdc.get_storage_client(gold_container)
@@ -644,7 +644,7 @@ def _run_alpha26_finance_gold(
     index_path: Optional[str] = None
 
     for bucket in layer_bucketing.ALPHABET_BUCKETS:
-        from core.pipeline import DataPaths
+        from asset_allocation_contracts.paths import DataPaths
 
         silver_paths = {
             sub_domain: DataPaths.get_silver_finance_bucket_path(sub_domain, bucket)

@@ -24,9 +24,6 @@ dependencies = [
     "python-dateutil==2.9.0.post0",
     "psycopg==3.3.3",
     "psycopg-binary==3.3.3",
-    "fastapi==0.133.1",
-    "jinja2==3.1.6",
-    "uvicorn==0.41.0",
     "httpx==0.28.1",
     "asyncpg==0.31.0",
     "sqlalchemy==2.0.44",
@@ -37,6 +34,7 @@ dependencies = [
     "PyYAML==6.0.3",
     "pydantic==2.12.5",
     "asset-allocation-contracts==0.1.0",
+    "asset-allocation-runtime-common==0.1.0",
 ]
 
 [project.optional-dependencies]

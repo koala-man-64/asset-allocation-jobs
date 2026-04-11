@@ -31,6 +31,26 @@ def _task_imports(path: Path) -> list[str]:
     return sorted(set(imports))
 
 
+def _forbidden_imports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        imported_names = {alias.name for alias in node.names}
+        if node.module == "core.pipeline" and "DataPaths" in imported_names:
+            offenders.append(f"{path.relative_to(REPO_ROOT)} -> from core.pipeline import DataPaths")
+        legacy_regime_imports = sorted(
+            {"DEFAULT_REGIME_MODEL_NAME", "RegimePolicy"} & imported_names
+        )
+        if node.module == "core.regime" and legacy_regime_imports:
+            offenders.append(
+                f"{path.relative_to(REPO_ROOT)} -> "
+                f"from core.regime import {', '.join(legacy_regime_imports)}"
+            )
+    return offenders
+
+
 def test_api_has_no_direct_tasks_imports() -> None:
     offenders: list[str] = []
     for path in _python_files_under("api"):
@@ -55,4 +75,12 @@ def test_core_has_no_direct_tasks_imports() -> None:
         imports = _task_imports(path)
         if imports:
             offenders.append(f"{path.relative_to(REPO_ROOT)} -> {imports}")
+    assert offenders == []
+
+
+def test_repo_has_no_legacy_contract_facade_imports() -> None:
+    offenders: list[str] = []
+    for package in ("core", "tasks", "tests"):
+        for path in _python_files_under(package):
+            offenders.extend(_forbidden_imports(path))
     assert offenders == []

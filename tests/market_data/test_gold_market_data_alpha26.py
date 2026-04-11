@@ -5,7 +5,7 @@ import pytest
 
 from core import core as core_module
 from core import delta_core as delta_core_module
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 from core.postgres import PostgresError
 from tasks.market_data import gold_market_data as gold
 from core.gold_sync_contracts import GoldSyncResult

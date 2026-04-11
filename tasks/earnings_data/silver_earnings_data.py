@@ -7,7 +7,7 @@ import pandas as pd
 from core import core as mdc
 from core import config as cfg
 from core import delta_core
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 from core import bronze_bucketing
 from core import domain_artifacts
 from core import layer_bucketing

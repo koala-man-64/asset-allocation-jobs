@@ -23,7 +23,7 @@ from core.backtest_repository import BacktestRepository
 from core.postgres import connect
 from core.ranking_engine import service as ranking_service
 from core.ranking_engine.contracts import RankingSchemaConfig
-from core.regime import DEFAULT_REGIME_MODEL_NAME, RegimePolicy
+from asset_allocation_contracts.regime import DEFAULT_REGIME_MODEL_NAME, RegimePolicy
 from core.regime_repository import RegimeRepository
 from core.ranking_repository import RankingRepository
 from core.strategy_engine import StrategyConfig, UniverseDefinition

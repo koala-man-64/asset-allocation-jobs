@@ -2,7 +2,7 @@ import pytest
 import pandas as pd
 from core import core as core_module
 from core import delta_core
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 from core.postgres import PostgresError
 from tasks.earnings_data import gold_earnings_data as gold
 from tasks.common.gold_output_contracts import GOLD_EARNINGS_OUTPUT_COLUMNS

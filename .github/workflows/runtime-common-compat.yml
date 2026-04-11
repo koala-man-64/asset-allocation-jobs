@@ -1,28 +1,28 @@
-name: Jobs Control Plane Compatibility
-run-name: Jobs Control Plane Compat / ${{ github.event_name }} / ${{ github.ref_name }}
+name: Jobs Runtime Common Compatibility
+run-name: Jobs Runtime Common Compat / ${{ github.event_name }} / ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
     inputs:
-      control_plane_ref:
-        description: Control-plane ref or SHA to validate against
+      runtime_common_ref:
+        description: Runtime-common ref or SHA to validate
         required: false
         default: main
         type: string
   repository_dispatch:
     types:
-      - control_plane_released
+      - runtime_common_released
 
 permissions:
   contents: read
 
 concurrency:
-  group: jobs-control-plane-compat-${{ github.ref }}
+  group: jobs-runtime-common-compat-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  control-plane-compat:
-    name: control-plane-compat
+  runtime-common-compat:
+    name: runtime-common-compat
     runs-on: ubuntu-22.04
     env:
       TEST_MODE: "1"
@@ -34,31 +34,32 @@ jobs:
       ASSET_ALLOCATION_API_BASE_URL: https://control-plane.example
       ASSET_ALLOCATION_API_SCOPE: api://asset-allocation
       POSTGRES_DSN: postgresql://user:pass@localhost:5432/asset_allocation?sslmode=disable
-      DISPATCH_CONTROL_PLANE_SHA: ${{ github.event.client_payload.control_plane_sha }}
+      DISPATCH_RUNTIME_COMMON_SHA: ${{ github.event.client_payload.runtime_common_sha }}
+      DISPATCH_RUNTIME_COMMON_REF: ${{ github.event.client_payload.runtime_common_ref }}
     steps:
-      - name: Resolve control-plane ref
-        id: refs
+      - name: Resolve runtime-common ref
+        id: runtime-common
         shell: bash
         run: |
           set -euo pipefail
-          control_plane_ref="${{ inputs.control_plane_ref }}"
+          ref="${{ inputs.runtime_common_ref }}"
           if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
-            control_plane_ref="${DISPATCH_CONTROL_PLANE_SHA}"
+            ref="${DISPATCH_RUNTIME_COMMON_SHA:-${DISPATCH_RUNTIME_COMMON_REF}}"
           fi
-          control_plane_ref="${control_plane_ref:-main}"
-          echo "control_plane_ref=${control_plane_ref}" >> "$GITHUB_OUTPUT"
+          ref="${ref:-main}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout jobs repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           path: asset-allocation-jobs
 
-      - name: Checkout control-plane repository
+      - name: Checkout runtime-common repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: ${{ vars.CONTROL_PLANE_REPOSITORY || format('{0}/asset-allocation-control-plane', github.repository_owner) }}
-          ref: ${{ steps.refs.outputs.control_plane_ref }}
-          path: asset-allocation-control-plane
+          repository: ${{ format('{0}/asset-allocation-runtime-common', github.repository_owner) }}
+          ref: ${{ steps.runtime-common.outputs.ref }}
+          path: asset-allocation-runtime-common
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -95,39 +96,26 @@ jobs:
 
           pyproject = tomllib.loads(Path("asset-allocation-jobs/pyproject.toml").read_text(encoding="utf-8"))
           for dependency in pyproject["project"]["dependencies"]:
-              if dependency.startswith("asset-allocation-"):
+              if dependency.startswith("asset-allocation-") and not dependency.startswith("asset-allocation-runtime-common=="):
                   print(dependency)
           PY
           python -m pip install -r asset-allocation-jobs/shared-python-deps.txt
+          python -m pip install -e asset-allocation-runtime-common/python
           python -m pip install -e asset-allocation-jobs --no-deps
-
-      - name: Export control-plane contract artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          python asset-allocation-control-plane/scripts/automation/export_contract_artifacts.py
 
       - name: Run jobs compatibility suite
         shell: bash
         run: |
           set -euo pipefail
           cd asset-allocation-jobs
-          python -m pytest \
-            tests/core/test_control_plane_transport.py \
-            tests/core/test_strategy_repository.py \
-            tests/core/test_ranking_repository.py \
-            tests/core/test_universe_repository.py \
-            tests/core/test_regime_repository.py \
-            tests/core/test_backtest_repository.py \
-            -q
+          python -m pytest tests/test_multirepo_dependency_contract.py tests/core/test_control_plane_transport.py -q
 
       - name: Write compatibility summary
         shell: bash
         run: |
           {
-            echo "## Jobs control-plane compatibility"
+            echo "## Jobs runtime-common compatibility"
             echo ""
-            echo "- Control-plane ref: \`${{ steps.refs.outputs.control_plane_ref }}\`"
+            echo "- Runtime-common ref: \`${{ steps.runtime-common.outputs.ref }}\`"
             echo "- Result: passed"
           } >> "${GITHUB_STEP_SUMMARY}"
-

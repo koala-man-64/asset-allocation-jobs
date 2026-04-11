@@ -9,6 +9,7 @@ from pathlib import Path
 ALLOWED_CLASSES = {"deploy_var", "secret"}
 ALLOWED_STORAGE = {"var", "secret"}
 ALLOWED_SOURCES = {"deploy_config", "secret_store"}
+ALLOWED_TEMPLATE_FLAGS = {"true", "false"}
 WORKFLOW_VAR_PATTERN = re.compile(r"\bvars\.([A-Z][A-Z0-9_]+)\b")
 WORKFLOW_SECRET_PATTERN = re.compile(r"\bsecrets\.([A-Z][A-Z0-9_]+)\b")
 
@@ -23,8 +24,13 @@ def contract_rows() -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def contract_map() -> dict[str, dict[str, str]]:
-    return {row["name"]: row for row in contract_rows()}
+def template_contract_rows() -> list[dict[str, str]]:
+    return [row for row in contract_rows() if row["template"] == "true"]
+
+
+def contract_map(rows: list[dict[str, str]] | None = None) -> dict[str, dict[str, str]]:
+    selected_rows = contract_rows() if rows is None else rows
+    return {row["name"]: row for row in selected_rows}
 
 
 def env_keys(path: Path) -> set[str]:
@@ -67,11 +73,16 @@ def test_contract_rows_are_well_formed() -> None:
         assert row["class"] in ALLOWED_CLASSES
         assert row["github_storage"] in ALLOWED_STORAGE
         assert row["source_of_truth"] in ALLOWED_SOURCES
-        assert row["template"] == "true"
+        assert row["template"] in ALLOWED_TEMPLATE_FLAGS
 
 
 def test_template_matches_contract_surface() -> None:
-    assert env_keys(repo_root() / ".env.template") == set(contract_map())
+    assert env_keys(repo_root() / ".env.template") == set(contract_map(template_contract_rows()))
+
+
+def test_non_template_rows_stay_out_of_env_template() -> None:
+    non_template_names = {row["name"] for row in contract_rows() if row["template"] == "false"}
+    assert env_keys(repo_root() / ".env.template").isdisjoint(non_template_names)
 
 
 def test_workflow_refs_are_documented() -> None:

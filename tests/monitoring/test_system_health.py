@@ -3,19 +3,13 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
 
-from api.service.app import create_app
-from api.service.auth import AuthContext, AuthError
-from api.endpoints import system as system_endpoint
 from monitoring.delta_log import find_latest_delta_version
 from monitoring import system_health
-from monitoring.ttl_cache import CacheGetResult
 from monitoring.ttl_cache import TtlCache
-from tests.api._client import get_test_client
 
 
 def test_find_latest_delta_version_finds_highest_contiguous() -> None:
@@ -126,106 +120,6 @@ def test_make_job_portal_url_uses_resource_anchor() -> None:
         "https://portal.azure.com/#resource/subscriptions/sub"
         "/resourceGroups/rg/providers/Microsoft.App/jobs/myjob/overview"
     )
-
-
-@pytest.mark.asyncio
-async def test_system_health_public_when_no_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("API_OIDC_ISSUER", raising=False)
-    monkeypatch.delenv("API_OIDC_AUDIENCE", raising=False)
-
-    app = create_app()
-    async with get_test_client(app) as client:
-        resp = await client.get("/api/system/health")
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert set(payload.keys()) >= {"overall", "dataLayers", "recentJobs", "alerts"}
-
-
-@pytest.mark.asyncio
-async def test_system_health_requires_oidc_when_configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("API_OIDC_ISSUER", "https://issuer.example.com")
-    monkeypatch.setenv("API_OIDC_AUDIENCE", "asset-allocation-api")
-
-    app = create_app()
-    async with get_test_client(app) as client:
-        def authenticate_headers(headers: Dict[str, str]) -> AuthContext:
-            if headers.get("authorization") != "Bearer token":
-                raise AuthError(status_code=401, detail="Unauthorized.", www_authenticate="Bearer")
-            return AuthContext(mode="oidc", subject="user-123", claims={"sub": "user-123"})
-
-        monkeypatch.setattr(app.state.auth, "authenticate_headers", authenticate_headers)
-        resp = await client.get("/api/system/health")
-        assert resp.status_code == 401
-
-        resp2 = await client.get("/api/system/health", headers={"Authorization": "Bearer token"})
-        assert resp2.status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_system_health_sanitizes_non_finite_signal_values(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-
-    class FakeCache:
-        def get(self, refresh_fn: Any, *, force_refresh: bool = False) -> CacheGetResult[Dict[str, Any]]:
-            return CacheGetResult(
-                value={
-                    "overall": "degraded",
-                    "dataLayers": [],
-                    "recentJobs": [],
-                    "alerts": [],
-                    "resources": [
-                        {
-                            "name": "asset-allocation-api",
-                            "resourceType": "Microsoft.App/containerApps",
-                            "status": "warning",
-                            "lastChecked": "2026-03-12T00:00:00Z",
-                            "details": "metric anomaly",
-                            "signals": [
-                                {
-                                    "name": "CpuUsage",
-                                    "value": float("nan"),
-                                    "unit": "Percent",
-                                    "timestamp": "2026-03-12T00:00:00Z",
-                                    "status": "unknown",
-                                    "source": "metrics",
-                                },
-                                {
-                                    "name": "MemoryUsage",
-                                    "value": float("inf"),
-                                    "unit": "Bytes",
-                                    "timestamp": "2026-03-12T00:00:00Z",
-                                    "status": "unknown",
-                                    "source": "metrics",
-                                },
-                                {
-                                    "name": "Requests",
-                                    "value": 42.0,
-                                    "unit": "count",
-                                    "timestamp": "2026-03-12T00:00:00Z",
-                                    "status": "healthy",
-                                    "source": "metrics",
-                                },
-                            ],
-                        }
-                    ],
-                },
-                cache_hit=True,
-                refresh_error=None,
-            )
-
-    monkeypatch.setattr(system_endpoint, "get_system_health_cache", lambda request: FakeCache())
-
-    app = create_app()
-    async with get_test_client(app) as client:
-        resp = await client.get("/api/system/health")
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    signals = payload["resources"][0]["signals"]
-    assert signals[0]["value"] is None
-    assert signals[1]["value"] is None
-    assert signals[2]["value"] == 42.0
 
 
 def test_system_health_control_plane_redacts_resource_ids(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from core.pipeline import DataPaths
+from asset_allocation_contracts.paths import DataPaths
 from tasks.price_target_data import silver_price_target_data as silver
 
 

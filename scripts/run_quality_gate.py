@@ -9,7 +9,19 @@ import subprocess
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-UI_ROOT = REPO_ROOT / "ui"
+
+FAST_TESTS = [
+    "tests/test_env_contract.py",
+    "tests/test_workflow_runtime_ownership.py",
+    "tests/test_azure_provisioning_scripts.py",
+    "tests/test_multirepo_dependency_contract.py",
+    "tests/core/test_control_plane_transport.py",
+    "tests/core/test_strategy_repository.py",
+    "tests/core/test_ranking_repository.py",
+    "tests/core/test_universe_repository.py",
+    "tests/core/test_regime_repository.py",
+    "tests/core/test_backtest_repository.py",
+]
 
 
 def resolve_python() -> str:
@@ -23,21 +35,7 @@ def resolve_python() -> str:
     return sys.executable
 
 
-def resolve_ui_bin(name: str) -> pathlib.Path:
-    suffixes = [".CMD", ".cmd"] if os.name == "nt" else [""]
-    for suffix in suffixes:
-        candidate = UI_ROOT / "node_modules" / ".bin" / f"{name}{suffix}"
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(f"Unable to find UI tool '{name}' under {UI_ROOT / 'node_modules' / '.bin'}")
-
-
 def run(argv: list[str], cwd: pathlib.Path) -> int:
-    if os.name == "nt" and pathlib.Path(argv[0]).suffix.lower() == ".cmd":
-        command = subprocess.list2cmdline([str(part) for part in argv])
-        completed = subprocess.run(["cmd.exe", "/d", "/s", "/c", command], cwd=str(cwd), check=False)
-        return completed.returncode
-
     completed = subprocess.run([str(part) for part in argv], cwd=str(cwd), check=False)
     return completed.returncode
 
@@ -48,24 +46,8 @@ def build_command(gate: str) -> tuple[list[str], pathlib.Path]:
         "lint-python": ([python, "-m", "ruff", "check", "."], REPO_ROOT),
         "format-python": ([python, "-m", "ruff", "format", "."], REPO_ROOT),
         "lint-fix-python": ([python, "-m", "ruff", "check", "--fix", "."], REPO_ROOT),
-        "lint-ui": ([str(resolve_ui_bin("eslint")), "src", "--report-unused-disable-directives"], UI_ROOT),
-        "typecheck-ui": ([str(resolve_ui_bin("tsc")), "--noEmit"], UI_ROOT),
-        "test-fast-api": (
-            [
-                python,
-                "-m",
-                "pytest",
-                "-q",
-                "tests/tasks",
-                "tests/market_data",
-                "tests/finance_data",
-                "tests/earnings_data",
-                "tests/price_target_data",
-            ],
-            REPO_ROOT,
-        ),
-        "test-full-api": ([python, "-m", "pytest", "-q"], REPO_ROOT),
-        "test-ui": ([str(resolve_ui_bin("vitest")), "run"], UI_ROOT),
+        "test-fast": ([python, "-m", "pytest", "-q", *FAST_TESTS], REPO_ROOT),
+        "test-full": ([python, "-m", "pytest", "-q"], REPO_ROOT),
     }
     if gate not in gates:
         available = ", ".join(sorted(gates))

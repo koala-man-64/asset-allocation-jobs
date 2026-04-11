@@ -5,16 +5,11 @@ standards:
   format: []
   lint:
     - "python3 scripts/run_quality_gate.py lint-python"
-    - "python3 scripts/run_quality_gate.py lint-ui"
-    - "python3 scripts/check_ui_api_drift_guards.py"
-  typecheck:
-    - "python3 scripts/run_quality_gate.py typecheck-ui"
+  typecheck: []
   test_fast:
-    - "python3 scripts/run_quality_gate.py test-fast-api"
-    - "python3 scripts/run_quality_gate.py test-ui"
+    - "python3 scripts/run_quality_gate.py test-fast"
   test_full:
-    - "python3 scripts/run_quality_gate.py test-full-api"
-    - "python3 scripts/run_quality_gate.py test-ui"
+    - "python3 scripts/run_quality_gate.py test-full"
   format_fix:
     - "python3 scripts/run_quality_gate.py format-python"
   lint_fix:
@@ -22,16 +17,28 @@ standards:
 
 architecture:
   layers:
-    - name: "api"
-      path_glob: "api/**"
-      forbid_imports_from:
-        - "ui/**"
+    - name: "core"
+      path_glob: "core/**"
+      allow_imports_from:
+        - "core/**"
+        - "monitoring/**"
+        - "alpha_vantage/**"
+        - "massive_provider/**"
+        - "alpaca/**"
+    - name: "monitoring"
+      path_glob: "monitoring/**"
+      allow_imports_from:
+        - "core/**"
+        - "monitoring/**"
     - name: "tasks"
       path_glob: "tasks/**"
       allow_imports_from:
         - "core/**"
-        - "tasks/**"
         - "monitoring/**"
+        - "alpha_vantage/**"
+        - "massive_provider/**"
+        - "alpaca/**"
+        - "tasks/**"
   blessed_patterns:
     - "Idempotent storage reconciliation flows"
     - "Environment-driven runtime configuration"
@@ -44,10 +51,11 @@ dependencies:
 
 api:
   public_globs:
-    - "api/endpoints/**"
-    - "api/service/settings.py"
-    - "api/service/app.py"
+    - "core/control_plane_transport.py"
+    - "core/*repository*.py"
     - "core/runtime_config.py"
+    - "deploy/job_*.yaml"
+    - "tasks/**"
   breaking_change_policy: "strict"
 
 thresholds:
@@ -68,11 +76,16 @@ auto_remediate:
   enabled: false
   max_files_changed: 50
   safe_directories:
-    - "api/**"
+    - "alpaca/**"
+    - "alpha_vantage/**"
     - "core/**"
+    - "deploy/**"
+    - "docs/**"
+    - "massive_provider/**"
+    - "monitoring/**"
+    - "scripts/**"
     - "tasks/**"
     - "tests/**"
-    - "docs/**"
     - ".github/workflows/**"
   commands:
     - "python3 -m ruff format ."
@@ -82,7 +95,8 @@ risk_controls:
   protected_globs:
     - "deploy/sql/postgres/migrations/**"
     - "infra/**"
-    - ".github/workflows/deploy.yml"
+    - ".github/workflows/deploy-prod.yml"
+    - ".github/workflows/trigger-jobs.yml"
   require_tests_passing_before_automerge: true
 
 reporting:

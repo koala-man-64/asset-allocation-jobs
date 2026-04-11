@@ -45,13 +45,6 @@ jobs:
         with:
           path: asset-allocation-jobs
 
-      - name: Checkout contracts repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ${{ vars.CONTRACTS_REPOSITORY || format('{0}/asset-allocation-contracts', github.repository_owner) }}
-          ref: ${{ vars.CONTRACTS_REF || 'main' }}
-          path: asset-allocation-contracts
-
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -61,7 +54,23 @@ jobs:
             asset-allocation-jobs/requirements.lock.txt
             asset-allocation-jobs/requirements-dev.lock.txt
             asset-allocation-jobs/pyproject.toml
-            asset-allocation-contracts/python/pyproject.toml
+
+      - name: Configure optional pip indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ secrets.PYTHON_PACKAGE_INDEX_URL }}" ] || [ -n "${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}" ]; then
+            cat > "${RUNNER_TEMP}/pip.conf" <<EOF
+          [global]
+          EOF
+            if [ -n "${{ secrets.PYTHON_PACKAGE_INDEX_URL }}" ]; then
+              echo "index-url = ${{ secrets.PYTHON_PACKAGE_INDEX_URL }}" >> "${RUNNER_TEMP}/pip.conf"
+            fi
+            if [ -n "${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}" ]; then
+              echo "extra-index-url = ${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}" >> "${RUNNER_TEMP}/pip.conf"
+            fi
+            echo "PIP_CONFIG_FILE=${RUNNER_TEMP}/pip.conf" >> "$GITHUB_ENV"
+          fi
 
       - name: Install test dependencies
         shell: bash
@@ -70,7 +79,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r asset-allocation-jobs/requirements.lock.txt
           python -m pip install -r asset-allocation-jobs/requirements-dev.lock.txt
-          python -m pip install -e asset-allocation-contracts/python
+          python - <<'PY' > asset-allocation-jobs/shared-python-deps.txt
+          import tomllib
+          from pathlib import Path
+
+          pyproject = tomllib.loads(Path("asset-allocation-jobs/pyproject.toml").read_text(encoding="utf-8"))
+          for dependency in pyproject["project"]["dependencies"]:
+              if dependency.startswith("asset-allocation-"):
+                  print(dependency)
+          PY
+          python -m pip install -r asset-allocation-jobs/shared-python-deps.txt
           python -m pip install -e asset-allocation-jobs --no-deps
           python -m pip check
 
@@ -86,7 +104,12 @@ jobs:
         run: |
           set -euo pipefail
           cd asset-allocation-jobs
-          python -m pytest tests/test_env_contract.py tests/test_workflow_runtime_ownership.py tests/test_azure_provisioning_scripts.py -q
+          python -m pytest \
+            tests/test_env_contract.py \
+            tests/test_workflow_runtime_ownership.py \
+            tests/test_azure_provisioning_scripts.py \
+            tests/test_multirepo_dependency_contract.py \
+            -q
 
       - name: Run jobs HTTP contract tests
         shell: bash
@@ -102,8 +125,40 @@ jobs:
             tests/core/test_backtest_repository.py \
             -q
 
+      - name: Write optional Docker pip config
+        id: pipconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          path="${RUNNER_TEMP}/docker-pip.conf"
+          rm -f "${path}"
+          if [ -n "${{ secrets.PYTHON_PACKAGE_INDEX_URL }}" ] || [ -n "${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}" ]; then
+            cat > "${path}" <<EOF
+          [global]
+          EOF
+            if [ -n "${{ secrets.PYTHON_PACKAGE_INDEX_URL }}" ]; then
+              echo "index-url = ${{ secrets.PYTHON_PACKAGE_INDEX_URL }}" >> "${path}"
+            fi
+            if [ -n "${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}" ]; then
+              echo "extra-index-url = ${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}" >> "${path}"
+            fi
+          fi
+          if [ -s "${path}" ]; then
+            echo "path=${path}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build jobs image smoke
         shell: bash
         run: |
           set -euo pipefail
-          docker build --file asset-allocation-jobs/Dockerfile --tag asset-allocation-jobs:ci-smoke .
+          build_args=(
+            --file asset-allocation-jobs/Dockerfile
+            --tag asset-allocation-jobs:ci-smoke
+            --build-arg "CONTRACTS_VERSION=0.1.0"
+            --build-arg "RUNTIME_COMMON_VERSION=0.1.0"
+          )
+          if [ -n "${{ steps.pipconfig.outputs.path }}" ]; then
+            build_args+=(--secret "id=pipconfig,src=${{ steps.pipconfig.outputs.path }}")
+          fi
+          DOCKER_BUILDKIT=1 docker build "${build_args[@]}" .
+

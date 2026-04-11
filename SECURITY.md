@@ -8,41 +8,39 @@ If GitHub Security Advisories are not available for this repo, report the issue 
 
 ## Authentication and Authorization
 
-- Production deploys must configure `API_OIDC_ISSUER`, `API_OIDC_AUDIENCE`, `UI_OIDC_CLIENT_ID`, `UI_OIDC_AUTHORITY`, `UI_OIDC_SCOPES`, `UI_OIDC_REDIRECT_URI`, and `ASSET_ALLOCATION_API_SCOPE`.
-- OIDC auth validates issuer and audience and can require scopes and roles. The service discovers JWKS from the issuer unless `API_OIDC_JWKS_URL` is set explicitly.
-- The UI receives its runtime auth and API base URL settings from `/config.js`.
-- Browser OIDC requires an explicit absolute `UI_OIDC_REDIRECT_URI`; deployed environments should use `https://.../auth/callback`.
-- Local development can fall back to anonymous access only when no auth providers are configured and the runtime is local. Deployed environments do not allow anonymous auth.
+- Jobs call the control-plane over HTTP using `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE`.
+- `core/api_gateway_auth.py` acquires bearer tokens with Azure credentials and should fail closed when required auth inputs are missing.
+- GitHub Actions deploy and trigger workflows authenticate to Azure with OIDC variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`.
 
 ## Secrets and Identities
 
-- Do not commit secrets. `.gitignore` excludes `.env` and `.env.*`, while `.env.template` is the checked-in contract.
-- Public ACA deploy manifests use Entra OIDC for browser and bronze-job auth.
+- Do not commit secrets. `.gitignore` excludes `.env` and `.env.*`, while `.env.template` documents only template-backed local inputs.
+- `docs/ops/env-contract.csv` is the source of truth for GitHub variable and secret names, including workflow-only secrets that stay out of `.env.template`.
 - Azure deployment uses a user-assigned managed identity for registry pulls and platform access.
 
-## Response Hardening and Input Validation
+## Runtime Hardening
 
-- API middleware sets `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`.
-- `API_CSP` controls the Content Security Policy header when set.
-- CORS origins are parsed from `API_CORS_ALLOW_ORIGINS`; wildcard `*` is removed when credentials are enabled.
-- `api/service/security.py` validates run IDs, artifact names, local paths, and ADLS container/path inputs for filesystem- and artifact-related operations.
+- This repository does not own a browser surface or a local API service. Security-sensitive runtime code lives in jobs, transport, provider, and deployment paths only.
+- `core/control_plane_transport.py` validates required control-plane configuration before outbound calls.
+- `deploy/job_*.yaml` is the only deployable manifest surface owned by this repo.
 
 ## Dependency Hygiene
 
 - Runtime dependencies are pinned in `pyproject.toml`, `requirements.txt`, and `requirements.lock.txt`.
-- CI and supply-chain workflows consume `requirements.lock.txt` and `requirements-dev.lock.txt`.
+- CI and security workflows consume the lockfiles and the dependency governance script.
 - Run `python3 scripts/dependency_governance.py check --report artifacts/dependency_governance_report.json` before merging dependency changes.
 
 ## Evidence
 
 - `.gitignore`
 - `.env.template`
-- `api/service/app.py`
-- `api/service/settings.py`
-- `api/service/auth.py`
-- `api/service/security.py`
-- `deploy/app_api.yaml`
-- `.github/workflows/run_tests.yml`
-- `.github/workflows/supply_chain_security.yml`
-- `.github/workflows/dependency_governance.yml`
+- `docs/ops/env-contract.csv`
+- `core/api_gateway_auth.py`
+- `core/control_plane_transport.py`
+- `deploy/job_backtests.yaml`
+- `.github/workflows/ci.yml`
+- `.github/workflows/security.yml`
+- `.github/workflows/deploy-prod.yml`
 - `scripts/dependency_governance.py`
+- `tests/test_env_contract.py`
+- `tests/core/test_control_plane_transport.py`
