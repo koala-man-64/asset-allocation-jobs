@@ -151,11 +151,19 @@ function Get-StorageAccounts {
 function Select-PreferredName {
     param($Items, [Parameter(Mandatory = $true)][string]$Preferred, [string[]]$Contains = @())
     $list = @($Items)
-    if ($list.Count -eq 0) { return "" }
-    $exact = @($list | Where-Object { $_.name -eq $Preferred } | Select-Object -First 1)
+    $namedItems = @(
+        $list |
+            Where-Object {
+                $null -ne $_ -and
+                $_.PSObject.Properties.Match("name").Count -gt 0 -and
+                -not [string]::IsNullOrWhiteSpace([string]$_.name)
+            }
+    )
+    if ($namedItems.Count -eq 0) { return "" }
+    $exact = @($namedItems | Where-Object { $_.name -eq $Preferred } | Select-Object -First 1)
     if ($exact.Count -gt 0) { return $exact[0].name }
     foreach ($needle in $Contains) {
-        $match = @($list | Where-Object { $_.name -like "*$needle*" } | Select-Object -First 1)
+        $match = @($namedItems | Where-Object { $_.name -like "*$needle*" } | Select-Object -First 1)
         if ($match.Count -gt 0) { return $match[0].name }
     }
     return $Preferred
@@ -226,7 +234,16 @@ function Resolve-DiscoveredValue {
         "JOB_STARTUP_API_CONTAINER_APPS" { return (New-Resolution -Value "asset-allocation-api" -Source "default") }
         "AZURE_CLIENT_ID" {
             $identities = @(Get-UserAssignedIdentities)
-            $candidate = @($identities | Where-Object { $_.name -like "*job*" -or $_.name -like "*github*" -or $_.name -like "*gha*" } | Select-Object -First 1)
+            $candidate = @(
+                $identities |
+                    Where-Object {
+                        $null -ne $_ -and
+                        $_.PSObject.Properties.Match("name").Count -gt 0 -and
+                        $_.PSObject.Properties.Match("clientId").Count -gt 0 -and
+                        ($_.name -like "*job*" -or $_.name -like "*github*" -or $_.name -like "*gha*")
+                    } |
+                    Select-Object -First 1
+            )
             if (@($candidate).Count -gt 0 -and $candidate[0].clientId) { return (New-Resolution -Value $candidate[0].clientId -Source "azure") }
         }
     }
