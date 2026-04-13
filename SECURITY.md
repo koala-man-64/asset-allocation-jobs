@@ -27,7 +27,7 @@ If GitHub Security Advisories are not available for this repo, report the issue 
 ## Dependency Hygiene
 
 - Runtime dependencies are pinned in `pyproject.toml`, `requirements.txt`, and `requirements.lock.txt`.
-- CI and security workflows consume the lockfiles and the dependency governance script.
+- `quality.yml` consumes the lockfiles and the dependency governance script.
 - Run `python3 scripts/dependency_governance.py check --report artifacts/dependency_governance_report.json` before merging dependency changes.
 
 ## Evidence
@@ -38,8 +38,7 @@ If GitHub Security Advisories are not available for this repo, report the issue 
 - `core/api_gateway_auth.py`
 - `core/control_plane_transport.py`
 - `deploy/job_backtests.yaml`
-- `.github/workflows/ci.yml`
-- `.github/workflows/security.yml`
+- `.github/workflows/quality.yml`
 - `.github/workflows/deploy-prod.yml`
 - `scripts/dependency_governance.py`
 - `tests/test_env_contract.py`

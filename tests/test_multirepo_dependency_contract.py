@@ -1,16 +1,37 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tomllib
 
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def shared_dependencies() -> dict[str, str]:
+    pyproject = tomllib.loads((repo_root() / "pyproject.toml").read_text(encoding="utf-8"))
+    shared: dict[str, str] = {}
+    for dependency in pyproject["project"]["dependencies"]:
+        if dependency.startswith("asset-allocation-"):
+            name, version = dependency.split("==", 1)
+            shared[name] = version
+    return shared
+
+
 def test_pyproject_pins_shared_packages() -> None:
-    text = (repo_root() / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'asset-allocation-contracts==0.1.0' in text
-    assert 'asset-allocation-runtime-common==0.1.0' in text
+    shared = shared_dependencies()
+    assert shared["asset-allocation-contracts"]
+    assert shared["asset-allocation-runtime-common"]
+
+
+def test_python_dependency_manifests_stay_in_sync() -> None:
+    shared = shared_dependencies()
+    requirements = (repo_root() / "requirements.txt").read_text(encoding="utf-8")
+    lockfile = (repo_root() / "requirements.lock.txt").read_text(encoding="utf-8")
+    assert f"asset-allocation-contracts=={shared['asset-allocation-contracts']}" in requirements
+    assert f"asset-allocation-contracts=={shared['asset-allocation-contracts']}" in lockfile
+    assert f"asset-allocation-runtime-common=={shared['asset-allocation-runtime-common']}" in requirements
+    assert f"asset-allocation-runtime-common=={shared['asset-allocation-runtime-common']}" in lockfile
 
 
 def test_jobs_dockerfile_does_not_copy_sibling_repos() -> None:
@@ -21,17 +42,30 @@ def test_jobs_dockerfile_does_not_copy_sibling_repos() -> None:
     assert '"asset-allocation-runtime-common==${RUNTIME_COMMON_VERSION}"' in text
 
 
-def test_normal_ci_and_release_workflows_do_not_checkout_sibling_repos() -> None:
-    for name in ("ci.yml", "release.yml"):
+def test_quality_and_release_workflows_do_not_checkout_sibling_repos() -> None:
+    for name in ("quality.yml", "release.yml"):
         text = (repo_root() / ".github" / "workflows" / name).read_text(encoding="utf-8")
         assert "Checkout contracts repository" not in text
         assert "Checkout runtime-common repository" not in text
 
+    quality = (repo_root() / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    release = (repo_root() / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    for text in (quality, release):
+        assert "scripts/workflows/resolve_shared_versions.py" in text
+        assert "setup-python-jobs" in text
+        assert '${{ steps.shared.outputs.contracts_version }}' in text
+        assert '${{ steps.shared.outputs.runtime_common_version }}' in text
 
-def test_compatibility_workflows_are_the_only_place_cross_repo_checkout_is_allowed() -> None:
-    control_plane_compat = (repo_root() / ".github" / "workflows" / "control-plane-compat.yml").read_text(encoding="utf-8")
-    runtime_common_compat = (
-        repo_root() / ".github" / "workflows" / "runtime-common-compat.yml"
-    ).read_text(encoding="utf-8")
-    assert "Checkout control-plane repository" in control_plane_compat
-    assert "Checkout runtime-common repository" in runtime_common_compat
+
+def test_compatibility_workflow_is_the_only_place_cross_repo_checkout_is_allowed() -> None:
+    compatibility = (repo_root() / ".github" / "workflows" / "compatibility.yml").read_text(encoding="utf-8")
+    assert "Checkout control-plane repository" in compatibility
+    assert "Checkout runtime-common repository" in compatibility
+
+
+def test_contracts_adoption_workflow_pins_dispatched_version() -> None:
+    adoption = (repo_root() / ".github" / "workflows" / "contracts-adoption.yml").read_text(encoding="utf-8")
+    assert "contracts_released" in adoption
+    assert "contents: write" in adoption
+    assert "requirements.lock.txt" in adoption
+    assert "git push origin HEAD:${{ steps.inputs.outputs.target_branch }}" in adoption

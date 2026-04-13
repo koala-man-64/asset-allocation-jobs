@@ -26,12 +26,12 @@ Jobs now own only jobs-side runtime assets.
 
 Use only these workflow entry points:
 
-1. `.github/workflows/ci.yml`
-2. `.github/workflows/security.yml`
+1. `.github/workflows/quality.yml`
+2. `.github/workflows/compatibility.yml`
 3. `.github/workflows/release.yml`
 4. `.github/workflows/deploy-prod.yml`
-5. `.github/workflows/control-plane-compat.yml`
-6. `.github/workflows/trigger-jobs.yml`
+5. `.github/workflows/trigger-jobs.yml`
+6. `.github/workflows/contracts-adoption.yml`
 
 `deploy-prod.yml` applies only `deploy/job_*.yaml`.
 
@@ -41,8 +41,9 @@ Use only these workflow entry points:
 
 - Build exactly one jobs image digest with `release.yml`.
 - Deploy that digest across ACA Jobs with `deploy-prod.yml`.
-- Run `control-plane-compat.yml` whenever the control-plane release dispatches `control_plane_released` or when validating an explicit control-plane ref manually.
+- Run `compatibility.yml` whenever the control-plane or runtime-common release dispatches their compatibility events, or when validating an explicit dependency ref manually.
 - Use `trigger-jobs.yml` for ad hoc operator-driven starts after deployment.
+- Use `contracts-adoption.yml` to pin a released `asset-allocation-contracts` version into repo manifests.
 
 ## Shared Azure Foundation
 
@@ -106,8 +107,9 @@ GitHub variables:
 
 ## Troubleshoot
 
-- If `ci.yml` fails, verify the sibling contracts repo is available to the runner and that `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE` are set for the HTTP client tests.
-- If `release.yml` fails to build the image, verify Docker is building from the shared workspace root and that the sibling contracts repo was checked out.
+- If `quality.yml` fails, verify `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE` are set for the HTTP client tests and that any private package indexes are configured in GitHub secrets.
+- If `compatibility.yml` fails, verify the target control-plane or runtime-common ref exists and that the workflow can install the published shared packages required by the jobs repo.
+- If `release.yml` fails to build the image, verify Docker is building from the shared workspace root and that shared package versions resolve cleanly from `pyproject.toml`.
 - If `deploy-prod.yml` fails during apply, inspect `artifacts/rendered/*` to confirm only `Microsoft.App/jobs` resources were rendered.
 - If `deploy-prod.yml` verifies the wrong image, inspect `artifacts/previous-job-images.json` and the job image queries returned by Azure CLI.
 - If `trigger-jobs.yml` fails, verify the selected job name exists in `AssetAllocationRG` and that the `prod` environment has valid Azure OIDC settings.
@@ -129,8 +131,9 @@ GitHub variables:
 ## Evidence
 
 - `.github/workflows/deploy-prod.yml`
-- `.github/workflows/control-plane-compat.yml`
+- `.github/workflows/compatibility.yml`
 - `.github/workflows/trigger-jobs.yml`
+- `.github/workflows/contracts-adoption.yml`
 - `deploy/job_backtests.yaml`
 - `deploy/job_bronze_market_data.yaml`
 - `deploy/job_gold_regime_data.yaml`

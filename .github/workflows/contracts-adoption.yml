@@ -1,0 +1,108 @@
+name: Jobs Contracts Adoption
+run-name: Jobs Contracts Adoption / ${{ github.event_name }} / ${{ github.event.client_payload.contracts_version || inputs.contracts_version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      contracts_version:
+        description: Contracts package version to pin
+        required: true
+        type: string
+  repository_dispatch:
+    types:
+      - contracts_released
+
+permissions:
+  contents: write
+
+concurrency:
+  group: jobs-contracts-adoption-${{ github.event.repository.default_branch || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  adopt-contracts:
+    name: adopt-contracts
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Resolve adoption inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          contracts_version="${{ inputs.contracts_version }}"
+          target_branch="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
+            contracts_version="${{ github.event.client_payload.contracts_version }}"
+            target_branch="${{ github.event.repository.default_branch }}"
+          fi
+          : "${contracts_version:?contracts_version is required either as workflow input or repository_dispatch payload}"
+          {
+            echo "contracts_version=${contracts_version}"
+            echo "target_branch=${target_branch}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout jobs repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.inputs.outputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Update contracts dependency manifests
+        env:
+          CONTRACTS_VERSION: ${{ steps.inputs.outputs.contracts_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["CONTRACTS_VERSION"]
+          patterns = {
+              Path("pyproject.toml"): r'asset-allocation-contracts==[^"]+',
+              Path("requirements.txt"): r"asset-allocation-contracts==[^\r\n]+",
+              Path("requirements.lock.txt"): r"asset-allocation-contracts==[^\r\n]+",
+          }
+
+          for path, pattern in patterns.items():
+              text = path.read_text(encoding="utf-8")
+              updated, replacements = re.subn(
+                  pattern,
+                  f"asset-allocation-contracts=={version}",
+                  text,
+                  count=1,
+              )
+              if replacements != 1:
+                  raise SystemExit(f"Expected exactly one contracts dependency in {path}.")
+              path.write_text(updated, encoding="utf-8")
+          PY
+
+      - name: Verify dependency contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pytest tests/test_multirepo_dependency_contract.py -q
+
+      - name: Commit pinned contracts version
+        env:
+          CONTRACTS_VERSION: ${{ steps.inputs.outputs.contracts_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- pyproject.toml requirements.txt requirements.lock.txt; then
+            echo "Contracts version already pinned to ${CONTRACTS_VERSION}."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml requirements.txt requirements.lock.txt
+          git commit -m "chore: adopt contracts ${CONTRACTS_VERSION}"
+          git push origin HEAD:${{ steps.inputs.outputs.target_branch }}

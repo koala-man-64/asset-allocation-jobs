@@ -1,0 +1,75 @@
+name: setup-python-jobs
+description: Set up Python and optional private package indexes for jobs workflows.
+
+inputs:
+  python-version:
+    description: Python version to install.
+    required: false
+    default: "3.14"
+  cache:
+    description: Cache backend to configure for setup-python.
+    required: false
+    default: ""
+  cache-dependency-path:
+    description: Dependency files used to scope the Python package cache.
+    required: false
+    default: ""
+  python-package-index-url:
+    description: Optional private primary package index URL.
+    required: false
+    default: ""
+  python-package-extra-index-url:
+    description: Optional private extra package index URL.
+    required: false
+    default: ""
+
+outputs:
+  pip-config-path:
+    description: Path to the generated pip config file when private indexes are configured.
+    value: ${{ steps.pip-config.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      if: ${{ inputs.cache == '' }}
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Set up Python with cache
+      if: ${{ inputs.cache != '' }}
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: ${{ inputs.cache }}
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+    - name: Configure optional pip indexes
+      id: pip-config
+      shell: bash
+      env:
+        PYTHON_PACKAGE_INDEX_URL: ${{ inputs.python-package-index-url }}
+        PYTHON_PACKAGE_EXTRA_INDEX_URL: ${{ inputs.python-package-extra-index-url }}
+      run: |
+        set -euo pipefail
+        path="${RUNNER_TEMP}/pip.conf"
+        rm -f "${path}"
+        echo "path=" >> "$GITHUB_OUTPUT"
+
+        if [ -z "${PYTHON_PACKAGE_INDEX_URL}" ] && [ -z "${PYTHON_PACKAGE_EXTRA_INDEX_URL}" ]; then
+          exit 0
+        fi
+
+        {
+          echo "[global]"
+          if [ -n "${PYTHON_PACKAGE_INDEX_URL}" ]; then
+            printf 'index-url = %s\n' "${PYTHON_PACKAGE_INDEX_URL}"
+          fi
+          if [ -n "${PYTHON_PACKAGE_EXTRA_INDEX_URL}" ]; then
+            printf 'extra-index-url = %s\n' "${PYTHON_PACKAGE_EXTRA_INDEX_URL}"
+          fi
+        } > "${path}"
+
+        echo "PIP_CONFIG_FILE=${path}" >> "$GITHUB_ENV"
+        echo "path=${path}" >> "$GITHUB_OUTPUT"

@@ -20,7 +20,7 @@ python3 scripts/run_quality_gate.py test-fast
 python3 scripts/run_quality_gate.py test-full
 ```
 
-`.github/workflows/ci.yml` runs the jobs-owned validation path. Use `.github/workflows/security.yml` for dependency and supply-chain checks.
+`.github/workflows/quality.yml` runs the jobs-owned validation path, dependency audits, and dependency-governance checks.
 
 ## Dependency Governance
 
@@ -61,8 +61,7 @@ python3 scripts/dependency_governance.py check --report artifacts/dependency_gov
 - `requirements-dev.lock.txt`
 - `scripts/dependency_governance.py`
 - `scripts/run_quality_gate.py`
-- `.github/workflows/ci.yml`
-- `.github/workflows/security.yml`
+- `.github/workflows/quality.yml`
 - `pytest.ini`
 - `docs/ops/env-contract.csv`
 - `.env.template`

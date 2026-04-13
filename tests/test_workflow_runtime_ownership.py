@@ -45,12 +45,11 @@ def repo_root() -> Path:
 def test_jobs_has_only_current_runtime_workflows() -> None:
     workflow_dir = repo_root() / ".github" / "workflows"
     expected = {
-        "ci.yml",
-        "control-plane-compat.yml",
+        "compatibility.yml",
+        "contracts-adoption.yml",
         "deploy-prod.yml",
+        "quality.yml",
         "release.yml",
-        "runtime-common-compat.yml",
-        "security.yml",
         "trigger-jobs.yml",
     }
     assert {path.name for path in workflow_dir.glob("*.yml")} == expected

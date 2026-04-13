@@ -104,8 +104,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `monitoring/`
 - `deploy/job_*.yaml`
 - `.github/workflows/trigger-jobs.yml`
-- `.github/workflows/control-plane-compat.yml`
-- `.github/workflows/runtime-common-compat.yml`
+- `.github/workflows/compatibility.yml`
 
 ### Unverified / Needs confirmation
 
@@ -148,7 +147,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `tasks/common/job_trigger.py`
 - `tasks/backtesting/worker.py`
 - `tasks/ranking/platinum_rankings.py`
-- `.github/workflows/ci.yml`
+- `.github/workflows/quality.yml`
 
 ### Unverified / Needs confirmation
 
@@ -268,7 +267,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `tasks/common/job_entrypoint.py`
 - `tasks/common/job_trigger.py`
 - `deploy/job_*.yaml`
-- `.github/workflows/ci.yml`
+- `.github/workflows/quality.yml`
 - `.github/workflows/release.yml`
 - `.github/workflows/deploy-prod.yml`
 - `.github/workflows/trigger-jobs.yml`
@@ -288,13 +287,12 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 
 ### Allowed workflows
 
-- `ci.yml`: required validation path for PRs and `main`.
-- `security.yml`: dependency audit and governance checks.
+- `quality.yml`: required validation path for PRs and `main`, plus scheduled dependency audit and governance checks.
+- `compatibility.yml`: validate jobs against a candidate or released control-plane or runtime-common ref.
 - `release.yml`: image build, push, and release-manifest publication.
 - `deploy-prod.yml`: apply and verify `deploy/job_*.yaml`.
-- `control-plane-compat.yml`: validate jobs against a candidate or released control-plane ref.
-- `runtime-common-compat.yml`: validate jobs against a candidate runtime-common ref.
 - `trigger-jobs.yml`: the only manual production job-start path.
+- `contracts-adoption.yml`: pin a released contracts version into repo dependency manifests.
 
 ### Deployment ownership
 
@@ -313,13 +311,12 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `README.md`
 - `DEPLOYMENT_SETUP.md`
 - `Dockerfile`
-- `.github/workflows/ci.yml`
-- `.github/workflows/security.yml`
+- `.github/workflows/quality.yml`
 - `.github/workflows/release.yml`
 - `.github/workflows/deploy-prod.yml`
-- `.github/workflows/control-plane-compat.yml`
-- `.github/workflows/runtime-common-compat.yml`
+- `.github/workflows/compatibility.yml`
 - `.github/workflows/trigger-jobs.yml`
+- `.github/workflows/contracts-adoption.yml`
 - `tasks/monitoring/check_readiness.py`
 
 ### Unverified / Needs confirmation
@@ -340,7 +337,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 
 #### Required CI gate
 
-- `.github/workflows/ci.yml` is the canonical validation path for PRs and `main`.
+- `.github/workflows/quality.yml` is the canonical validation path for PRs and `main`.
 
 #### Environment and deploy contract
 
@@ -376,7 +373,7 @@ These encode design intent around runtime-surface boundaries and compatibility f
 
 ### Evidence
 
-- `.github/workflows/ci.yml`
+- `.github/workflows/quality.yml`
 - `tests/test_env_contract.py`
 - `tests/test_workflow_runtime_ownership.py`
 - `tests/test_azure_provisioning_scripts.py`
@@ -388,7 +385,7 @@ These encode design intent around runtime-surface boundaries and compatibility f
 ### Unverified / Needs confirmation
 
 - No reviewed gate currently proves this master design contract stays synchronized with the executable contract.
-- The architecture test suite is not currently part of the required CI path described in `ci.yml`.
+- The architecture test suite is not currently part of the required CI path described in `quality.yml`.
 
 ## 9. Historical Lineage And Known Legacy References
 
