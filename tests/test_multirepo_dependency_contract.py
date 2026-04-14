@@ -57,15 +57,11 @@ def test_quality_and_release_workflows_do_not_checkout_sibling_repos() -> None:
         assert '${{ steps.shared.outputs.runtime_common_version }}' in text
 
 
-def test_compatibility_workflow_is_the_only_place_cross_repo_checkout_is_allowed() -> None:
-    compatibility = (repo_root() / ".github" / "workflows" / "compatibility.yml").read_text(encoding="utf-8")
-    assert "Checkout control-plane repository" in compatibility
-    assert "Checkout runtime-common repository" in compatibility
-
-
-def test_contracts_adoption_workflow_pins_dispatched_version() -> None:
-    adoption = (repo_root() / ".github" / "workflows" / "contracts-adoption.yml").read_text(encoding="utf-8")
-    assert "contracts_released" in adoption
-    assert "contents: write" in adoption
-    assert "requirements.lock.txt" in adoption
-    assert "git push origin HEAD:${{ steps.inputs.outputs.target_branch }}" in adoption
+def test_integration_workflow_is_the_only_place_cross_repo_checkout_and_contract_adoption_are_allowed() -> None:
+    integration = (repo_root() / ".github" / "workflows" / "integration.yml").read_text(encoding="utf-8")
+    assert "Checkout control-plane repository" in integration
+    assert "Checkout runtime-common repository" in integration
+    assert "contracts_released" in integration
+    assert "contents: write" in integration
+    assert "requirements.lock.txt" in integration
+    assert "git push origin HEAD:${{ steps.inputs.outputs.target_branch }}" in integration

@@ -31,7 +31,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `alpaca/`, `alpha_vantage/`, `massive_provider/`: provider integration surfaces used by job flows.
 - `monitoring/`: job-relevant readiness, resource health, control-plane wake-up, and system-health support modules used by runtime operations.
 - `deploy/job_*.yaml`: Azure Container Apps Jobs resources owned and deployed by this repo.
-- `.github/workflows/`: CI, release, deploy, compatibility, and manual trigger workflows for the jobs runtime.
+- `.github/workflows/`: CI, release, deploy, and integration workflows for the jobs runtime.
 - `docs/ops/env-contract.*`: authoritative runtime configuration contract for repo variables and secrets.
 
 ### Out of scope
@@ -93,9 +93,9 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 ### Trigger modes
 
 - Scheduled Azure Container Apps Jobs via `deploy/job_*.yaml`.
-- Manual production triggering only through `.github/workflows/trigger-jobs.yml`.
+- Manual production triggering only through `python scripts/ops/trigger_job.py --job <job-key> --resource-group <resource-group>`.
 - Local execution through `python -m tasks...` entrypoints.
-- Compatibility workflows for control-plane and runtime-common contract validation.
+- `integration.yml` for control-plane and runtime-common compatibility validation plus contracts adoption.
 
 ### Evidence
 
@@ -103,8 +103,8 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `core/`
 - `monitoring/`
 - `deploy/job_*.yaml`
-- `.github/workflows/trigger-jobs.yml`
-- `.github/workflows/compatibility.yml`
+- `.github/workflows/integration.yml`
+- `scripts/ops/trigger_job.py`
 
 ### Unverified / Needs confirmation
 
@@ -243,11 +243,11 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
   - `POSTGRES_DSN`
 - Secrets are never auto-discovered by the repo-local env bootstrap flow; existing values are reused or securely prompted.
 
-### Workflow-gated mutating operations
+### Workflow- and runbook-gated mutating operations
 
 - `deploy-prod.yml` is the only approved workflow that applies `deploy/job_*.yaml`.
-- `trigger-jobs.yml` is the only approved manual job-start path.
-- Cross-job starts and control-plane wake-ups are RBAC-sensitive operations and must remain env-driven and workflow-controlled.
+- `scripts/ops/trigger_job.py` is the approved manual job-start path.
+- Cross-job starts and control-plane wake-ups are RBAC-sensitive operations and must remain env-driven and runbook-controlled.
 - Build-time private package configuration uses a BuildKit secret mount and must not be baked into source, image layers, or plain Docker build args.
 
 ### Logging boundary
@@ -270,7 +270,8 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `.github/workflows/quality.yml`
 - `.github/workflows/release.yml`
 - `.github/workflows/deploy-prod.yml`
-- `.github/workflows/trigger-jobs.yml`
+- `.github/workflows/integration.yml`
+- `scripts/ops/trigger_job.py`
 
 ### Unverified / Needs confirmation
 
@@ -288,11 +289,10 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 ### Allowed workflows
 
 - `quality.yml`: required validation path for PRs and `main`, plus scheduled dependency audit and governance checks.
-- `compatibility.yml`: validate jobs against a candidate or released control-plane or runtime-common ref.
+- `integration.yml`: cross-repo compatibility validation and contracts adoption.
 - `release.yml`: image build, push, and release-manifest publication.
 - `deploy-prod.yml`: apply and verify `deploy/job_*.yaml`.
-- `trigger-jobs.yml`: the only manual production job-start path.
-- `contracts-adoption.yml`: pin a released contracts version into repo dependency manifests.
+- `scripts/ops/trigger_job.py`: the approved manual production job-start path.
 
 ### Deployment ownership
 
@@ -314,9 +314,8 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `.github/workflows/quality.yml`
 - `.github/workflows/release.yml`
 - `.github/workflows/deploy-prod.yml`
-- `.github/workflows/compatibility.yml`
-- `.github/workflows/trigger-jobs.yml`
-- `.github/workflows/contracts-adoption.yml`
+- `.github/workflows/integration.yml`
+- `scripts/ops/trigger_job.py`
 - `tasks/monitoring/check_readiness.py`
 
 ### Unverified / Needs confirmation
@@ -427,7 +426,8 @@ Update this document in the same PR whenever any of the following change materia
 - `tasks/` job entrypoints, sequencing, or medallion flow.
 - `core/` ownership boundaries or cross-repo client behavior.
 - `deploy/job_*.yaml` or deployment ownership assumptions.
-- `.github/workflows/*` that change validation, release, deploy, trigger, or compatibility behavior.
+- `.github/workflows/*` that change validation, release, deploy, or integration behavior.
+- `scripts/ops/trigger_job.py` when the approved manual job-start path changes.
 - `docs/ops/env-contract.*` or the secrets/vars split.
 - provider integration behavior that changes runtime or data-flow expectations.
 - architecture or contract tests that change the executable design boundary.

@@ -10,7 +10,7 @@ If GitHub Security Advisories are not available for this repo, report the issue 
 
 - Jobs call the control-plane over HTTP using `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE`.
 - `core/api_gateway_auth.py` acquires bearer tokens with Azure credentials and should fail closed when required auth inputs are missing.
-- GitHub Actions deploy and trigger workflows authenticate to Azure with OIDC variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`.
+- GitHub Actions release and deploy workflows authenticate to Azure with OIDC variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`.
 
 ## Secrets and Identities
 

@@ -23,6 +23,20 @@ FAST_TESTS = [
     "tests/core/test_backtest_repository.py",
 ]
 
+CONTROL_PLANE_COMPAT_TESTS = [
+    "tests/core/test_control_plane_transport.py",
+    "tests/core/test_strategy_repository.py",
+    "tests/core/test_ranking_repository.py",
+    "tests/core/test_universe_repository.py",
+    "tests/core/test_regime_repository.py",
+    "tests/core/test_backtest_repository.py",
+]
+
+RUNTIME_COMMON_COMPAT_TESTS = [
+    "tests/test_multirepo_dependency_contract.py",
+    "tests/core/test_control_plane_transport.py",
+]
+
 
 def resolve_python() -> str:
     candidates = [
@@ -47,6 +61,8 @@ def build_command(gate: str) -> tuple[list[str], pathlib.Path]:
         "format-python": ([python, "-m", "ruff", "format", "."], REPO_ROOT),
         "lint-fix-python": ([python, "-m", "ruff", "check", "--fix", "."], REPO_ROOT),
         "test-fast": ([python, "-m", "pytest", "-q", *FAST_TESTS], REPO_ROOT),
+        "test-control-plane-compat": ([python, "-m", "pytest", "-q", *CONTROL_PLANE_COMPAT_TESTS], REPO_ROOT),
+        "test-runtime-common-compat": ([python, "-m", "pytest", "-q", *RUNTIME_COMMON_COMPAT_TESTS], REPO_ROOT),
         "test-full": ([python, "-m", "pytest", "-q"], REPO_ROOT),
     }
     if gate not in gates:

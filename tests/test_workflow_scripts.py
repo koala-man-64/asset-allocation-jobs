@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import subprocess
+from types import ModuleType
+
+import pytest
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def load_module(relative_path: str, module_name: str) -> ModuleType:
+    path = repo_root() / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"Could not load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_install_jobs_dependencies_excludes_selected_shared_package(tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/install_jobs_dependencies.py", "install_jobs_dependencies")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "\n".join(
+            [
+                "[project]",
+                'dependencies = ["asset-allocation-contracts==1.2.3", "asset-allocation-runtime-common==4.5.6", "pandas==1.0.0"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    specs = module.shared_dependency_specs(pyproject, {"asset-allocation-runtime-common"})
+
+    assert specs == ["asset-allocation-contracts==1.2.3"]
+
+
+def test_pin_contracts_version_updates_dependency_manifests(tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/pin_contracts_version.py", "pin_contracts_version")
+    (tmp_path / "pyproject.toml").write_text('asset-allocation-contracts==0.1.0"\n', encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("asset-allocation-contracts==0.1.0\n", encoding="utf-8")
+    (tmp_path / "requirements.lock.txt").write_text("asset-allocation-contracts==0.1.0\n", encoding="utf-8")
+
+    module.pin_contracts_version(repo_root=tmp_path, contracts_version="9.9.9")
+
+    assert 'asset-allocation-contracts==9.9.9"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert "asset-allocation-contracts==9.9.9" in (tmp_path / "requirements.txt").read_text(encoding="utf-8")
+    assert "asset-allocation-contracts==9.9.9" in (tmp_path / "requirements.lock.txt").read_text(encoding="utf-8")
+
+
+def test_write_release_manifest_writes_expected_shape(tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/write_release_manifest.py", "write_release_manifest")
+    manifest = module.build_manifest(
+        repo="owner/repo",
+        git_sha="abc123",
+        image_ref="registry/image:tag",
+        image_digest="registry/image@sha256:deadbeef",
+        contracts_version="1.0.0",
+        runtime_common_version="2.0.0",
+        jobs_version="3.0.0",
+    )
+    output_path = tmp_path / "artifacts" / "release-manifest.json"
+
+    module.write_release_manifest(output_path, manifest)
+
+    written = output_path.read_text(encoding="utf-8")
+    assert '"repo": "owner/repo"' in written
+    assert '"image_digest": "registry/image@sha256:deadbeef"' in written
+    assert '"contracts": "1.0.0"' in written
+
+
+def test_build_jobs_image_pushes_and_emits_outputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/build_jobs_image.py", "build_jobs_image")
+    commands: list[list[str]] = []
+
+    def fake_run(command, check, env=None):
+        assert check is True
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "inspect_image_digest", lambda image_ref: f"{image_ref}@sha256:1234")
+
+    output_path = tmp_path / "github_output.txt"
+    outputs = module.build_jobs_image(
+        dockerfile="Dockerfile",
+        image_ref="registry/image:tag",
+        contracts_version="1.0.0",
+        runtime_common_version="2.0.0",
+        context=".",
+        pip_config_path="C:/tmp/pip.conf",
+        push=True,
+        github_output=str(output_path),
+    )
+
+    assert commands[0][:4] == ["docker", "build", "--file", "Dockerfile"]
+    assert commands[1] == ["docker", "push", "registry/image:tag"]
+    assert outputs["image_digest"] == "registry/image:tag@sha256:1234"
+    assert "image_ref=registry/image:tag" in output_path.read_text(encoding="utf-8")
+    assert "image_digest=registry/image:tag@sha256:1234" in output_path.read_text(encoding="utf-8")
+
+
+def test_capture_current_job_images_uses_manifest_names(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/capture_current_job_images.py", "capture_current_job_images")
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir()
+    (deploy_dir / "job_one.yaml").write_text("name: first-job\n", encoding="utf-8")
+    (deploy_dir / "job_two.yaml").write_text("name: second-job\n", encoding="utf-8")
+
+    def fake_run(command, check, capture_output, text):
+        job_name = command[5]
+        if job_name == "first-job":
+            return subprocess.CompletedProcess(command, 0, stdout="image-one\n")
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    images = module.capture_current_job_images(deploy_dir=deploy_dir, resource_group="rg")
+
+    assert images == {"first-job": "image-one", "second-job": ""}
+
+
+def test_render_and_apply_manifests_renders_env_and_uses_update_or_create(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir()
+    rendered_dir = tmp_path / "rendered"
+    (deploy_dir / "job_existing.yaml").write_text("name: existing-job\nimage: ${JOB_IMAGE}\n", encoding="utf-8")
+    (deploy_dir / "job_new.yaml").write_text("name: new-job\nimage: ${JOB_IMAGE}\n", encoding="utf-8")
+
+    exists_results = iter([True, False])
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "manifest_exists", lambda **_: next(exists_results))
+    monkeypatch.setattr(module.subprocess, "check_call", lambda command: commands.append(list(command)))
+
+    module.render_and_apply_manifests(
+        deploy_dir=deploy_dir,
+        rendered_dir=rendered_dir,
+        resource_group="rg",
+        environment={"JOB_IMAGE": "registry/image@sha256:1234"},
+    )
+
+    assert "registry/image@sha256:1234" in (rendered_dir / "job_existing.yaml").read_text(encoding="utf-8")
+    assert commands[0][3] == "update"
+    assert commands[1][3] == "create"
+
+
+def test_verify_deployed_job_images_detects_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/verify_deployed_job_images.py", "verify_deployed_job_images")
+    rendered_dir = tmp_path / "rendered"
+    rendered_dir.mkdir()
+    (rendered_dir / "job_one.yaml").write_text("name: first-job\n", encoding="utf-8")
+
+    monkeypatch.setattr(module, "query_job_image", lambda **_: "registry/image@sha256:wrong")
+
+    with pytest.raises(SystemExit, match="image mismatch"):
+        module.verify_deployed_job_images(
+            rendered_dir=rendered_dir,
+            resource_group="rg",
+            expected_image="registry/image@sha256:expected",
+        )
+
+
+def test_run_security_governance_invokes_expected_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/run_security_governance.py", "run_security_governance")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "run", lambda command, allow_failure=False: commands.append(list(command)))
+
+    module.run_security_governance(tmp_path / "artifacts")
+
+    assert commands[0][:4] == [module.sys.executable, "-m", "pip", "install"]
+    assert ["pip-audit", "--strict", "-r", "requirements.lock.txt"] in commands
+    assert any("scripts/dependency_governance.py" in part for command in commands for part in command)
+
+
+def test_trigger_job_uses_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/ops/trigger_job.py", "trigger_job")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, check: commands.append(list(command)) or subprocess.CompletedProcess(command, 0),
+    )
+
+    resolved = module.start_job(
+        job_key="silver_market",
+        resource_group="rg",
+        environment={"SILVER_MARKET_JOB": "custom-silver-market-job"},
+    )
+
+    assert resolved == "custom-silver-market-job"
+    assert commands == [
+        [
+            "az",
+            "containerapp",
+            "job",
+            "start",
+            "--name",
+            "custom-silver-market-job",
+            "--resource-group",
+            "rg",
+        ]
+    ]

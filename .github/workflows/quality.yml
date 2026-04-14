@@ -39,8 +39,8 @@ jobs:
       - name: actionlint
         uses: rhysd/actionlint@393031adb9afb225ee52ae2ccd7a5af5525e03e8 # v1.7.11
 
-  build-test:
-    name: build-test
+  runtime-quality:
+    name: runtime-quality
     if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.mode != 'security')
     runs-on: ubuntu-22.04
     env:
@@ -76,54 +76,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -r asset-allocation-jobs/requirements.lock.txt
-          python -m pip install -r asset-allocation-jobs/requirements-dev.lock.txt
-          python - <<'PY' > asset-allocation-jobs/shared-python-deps.txt
-          import tomllib
-          from pathlib import Path
-
-          pyproject = tomllib.loads(Path("asset-allocation-jobs/pyproject.toml").read_text(encoding="utf-8"))
-          for dependency in pyproject["project"]["dependencies"]:
-              if dependency.startswith("asset-allocation-"):
-                  print(dependency)
-          PY
-          python -m pip install -r asset-allocation-jobs/shared-python-deps.txt
-          python -m pip install -e asset-allocation-jobs --no-deps
-          python -m pip check
+          python asset-allocation-jobs/scripts/workflows/install_jobs_dependencies.py \
+            --jobs-path asset-allocation-jobs \
+            --requirements asset-allocation-jobs/requirements.lock.txt \
+            --include-dev-lockfile \
+            --editable-no-deps asset-allocation-jobs \
+            --pip-check
 
       - name: Run ruff
         shell: bash
         run: |
           set -euo pipefail
           cd asset-allocation-jobs
-          python -m ruff check .
+          python scripts/run_quality_gate.py lint-python
 
-      - name: Run env-contract static tests
+      - name: Run fast quality tests
         shell: bash
         run: |
           set -euo pipefail
           cd asset-allocation-jobs
-          python -m pytest \
-            tests/test_env_contract.py \
-            tests/test_workflow_runtime_ownership.py \
-            tests/test_azure_provisioning_scripts.py \
-            tests/test_multirepo_dependency_contract.py \
-            -q
-
-      - name: Run jobs HTTP contract tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd asset-allocation-jobs
-          python -m pytest \
-            tests/core/test_control_plane_transport.py \
-            tests/core/test_strategy_repository.py \
-            tests/core/test_ranking_repository.py \
-            tests/core/test_universe_repository.py \
-            tests/core/test_regime_repository.py \
-            tests/core/test_backtest_repository.py \
-            -q
+          python scripts/run_quality_gate.py test-fast
 
       - name: Resolve shared package versions
         id: shared
@@ -138,18 +110,26 @@ jobs:
         run: |
           set -euo pipefail
           build_args=(
-            --file asset-allocation-jobs/Dockerfile
-            --tag asset-allocation-jobs:ci-smoke
-            --build-arg "CONTRACTS_VERSION=${{ steps.shared.outputs.contracts_version }}"
-            --build-arg "RUNTIME_COMMON_VERSION=${{ steps.shared.outputs.runtime_common_version }}"
+            python
+            asset-allocation-jobs/scripts/workflows/build_jobs_image.py
+            --dockerfile
+            asset-allocation-jobs/Dockerfile
+            --image-ref
+            asset-allocation-jobs:ci-smoke
+            --contracts-version
+            "${{ steps.shared.outputs.contracts_version }}"
+            --runtime-common-version
+            "${{ steps.shared.outputs.runtime_common_version }}"
+            --context
+            .
           )
           if [ -n "${{ steps.python.outputs.pip-config-path }}" ]; then
-            build_args+=(--secret "id=pipconfig,src=${{ steps.python.outputs.pip-config-path }}")
+            build_args+=(--pip-config-path "${{ steps.python.outputs.pip-config-path }}")
           fi
-          DOCKER_BUILDKIT=1 docker build "${build_args[@]}" .
+          "${build_args[@]}"
 
-  python-dependency-audit:
-    name: python-dependency-audit
+  security-governance:
+    name: security-governance
     if: github.event_name == 'schedule' || github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode != 'ci')
     runs-on: ubuntu-22.04
     steps:
@@ -167,53 +147,20 @@ jobs:
           python-package-index-url: ${{ secrets.PYTHON_PACKAGE_INDEX_URL }}
           python-package-extra-index-url: ${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}
 
-      - name: Audit Python dependencies
+      - name: Run dependency audit and governance checks
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts
-          python -m pip install --upgrade pip
-          python -m pip install pip-audit
-          pip-audit -r requirements.lock.txt --format json -o artifacts/pip-audit-runtime.json || true
-          pip-audit -r requirements-dev.lock.txt --format json -o artifacts/pip-audit-dev.json || true
-          pip-audit --strict -r requirements.lock.txt
-          pip-audit --strict --ignore-vuln GHSA-5239-wwwm-4pmq -r requirements-dev.lock.txt
+          python scripts/workflows/run_security_governance.py --artifacts-dir artifacts
 
-      - name: Upload Python audit artifacts
+      - name: Upload security and governance artifacts
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: jobs-python-audit
-          path: artifacts/*
-          if-no-files-found: error
-          retention-days: 14
-
-  dependency-governance:
-    name: dependency-governance
-    if: github.event_name == 'schedule' || github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode != 'ci')
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python
-        uses: ./.github/actions/setup-python-jobs
-        with:
-          python-version: "3.14"
-          python-package-index-url: ${{ secrets.PYTHON_PACKAGE_INDEX_URL }}
-          python-package-extra-index-url: ${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}
-
-      - name: Run dependency governance checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          python scripts/dependency_governance.py check --report artifacts/dependency_governance_report.json
-
-      - name: Upload governance report
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: jobs-dependency-governance
-          path: artifacts/dependency_governance_report.json
+          name: jobs-security-governance
+          path: |
+            artifacts/pip-audit-runtime.json
+            artifacts/pip-audit-dev.json
+            artifacts/dependency_governance_report.json
           if-no-files-found: error
           retention-days: 14
