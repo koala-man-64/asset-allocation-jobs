@@ -1,5 +1,6 @@
 import pytest
 import os
+import importlib
 from unittest.mock import patch, MagicMock
 
 # Force hermetic test env so local shell/.env values cannot leak into unit tests.
@@ -55,7 +56,7 @@ containers = [
 ]
 for container in containers:
     os.environ.setdefault(container, "test-container")
-from core.blob_storage import BlobStorageClient
+
 
 @pytest.fixture(scope="session", autouse=True)
 def redirect_storage(tmp_path_factory):
@@ -71,10 +72,17 @@ def redirect_storage(tmp_path_factory):
         full_path.parent.mkdir(parents=True, exist_ok=True)
         return str(full_path)
 
-    with patch("core.delta_core.get_delta_table_uri", side_effect=mock_get_uri), \
-         patch("core.delta_core.get_delta_storage_options", return_value={}), \
-         patch("core.delta_core._ensure_container_exists", return_value=None):
+    try:
+        delta_core = importlib.import_module("core.delta_core")
+    except ImportError:
         yield temp_storage_root
+        return
+
+    with patch.object(delta_core, "get_delta_table_uri", side_effect=mock_get_uri), \
+         patch.object(delta_core, "get_delta_storage_options", return_value={}), \
+         patch.object(delta_core, "_ensure_container_exists", return_value=None):
+        yield temp_storage_root
+
 
 @pytest.fixture(scope="session")
 def azure_client():
@@ -82,6 +90,8 @@ def azure_client():
     Provides a Mocked BlobStorageClient for tests if actual Azure config is missing.
     In actual integration tests, this would use a real client.
     """
+    from core.blob_storage import BlobStorageClient
+
     mock_client = MagicMock(spec=BlobStorageClient)
     return mock_client
 
