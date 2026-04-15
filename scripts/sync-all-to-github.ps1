@@ -39,6 +39,18 @@ $contractMap = Load-EnvContract -Path $contractPath
 $undocumented = @($envMap.Keys | Where-Object { -not $contractMap.ContainsKey($_) } | Sort-Object -Unique)
 if ($undocumented.Count -gt 0) { throw ".env.web contains undocumented keys: $($undocumented -join ', ')" }
 
+$requiredControlPlaneSecrets = @(
+    "ASSET_ALLOCATION_API_BASE_URL",
+    "ASSET_ALLOCATION_API_SCOPE"
+)
+$missingControlPlaneSecrets = @(
+    $requiredControlPlaneSecrets |
+        Where-Object { -not $envMap.ContainsKey($_) -or [string]::IsNullOrWhiteSpace($envMap[$_]) }
+)
+if ($missingControlPlaneSecrets.Count -gt 0) {
+    throw ".env.web is missing required control-plane bootstrap secrets: $($missingControlPlaneSecrets -join ', '). Run scripts/setup-env.ps1 first."
+}
+
 $expectedVars = New-Object System.Collections.Generic.List[string]
 $expectedSecrets = New-Object System.Collections.Generic.List[string]
 foreach ($key in ($contractMap.Keys | Sort-Object)) {

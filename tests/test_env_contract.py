@@ -102,6 +102,17 @@ def test_sync_script_reads_repo_local_contract() -> None:
     assert 'Join-Path $repoRoot ".env.web"' in text
 
 
+def test_env_bootstrap_scripts_handle_control_plane_bootstrap_secrets() -> None:
+    setup_text = (repo_root() / "scripts" / "setup-env.ps1").read_text(encoding="utf-8")
+    sync_text = (repo_root() / "scripts" / "sync-all-to-github.ps1").read_text(encoding="utf-8")
+
+    assert "Test-CanAutoDiscoverSecretValue" in setup_text
+    assert '"ASSET_ALLOCATION_API_BASE_URL"' in setup_text
+    assert '"ASSET_ALLOCATION_API_SCOPE"' in setup_text
+    assert "ASSET_ALLOCATION_API_BASE_URL" in sync_text
+    assert "ASSET_ALLOCATION_API_SCOPE" in sync_text
+
+
 def test_setup_env_dry_run_reports_sources_without_prompting() -> None:
     script = repo_root() / "scripts" / "setup-env.ps1"
     completed = subprocess.run(

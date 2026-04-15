@@ -47,8 +47,8 @@ ALPHA_VANTAGE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Alpha Vantage ti
 MASSIVE_FINANCE_FRESH_DAYS,deploy_var,var,deploy_config,true,Massive finance freshness window.
 MASSIVE_MAX_WORKERS,deploy_var,var,deploy_config,true,Massive worker concurrency.
 MASSIVE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Massive timeout.
-ASSET_ALLOCATION_API_BASE_URL,secret,secret,secret_store,true,Control-plane base url used by jobs HTTP clients.
-ASSET_ALLOCATION_API_SCOPE,secret,secret,secret_store,true,Managed-identity scope used for jobs to control-plane auth.
+ASSET_ALLOCATION_API_BASE_URL,secret,secret,secret_store,true,Control-plane base url used by jobs HTTP clients. Auto-discovered from the asset-allocation-api ingress when available.
+ASSET_ALLOCATION_API_SCOPE,secret,secret,secret_store,true,Managed-identity scope used for jobs to control-plane auth. Auto-discovered from the asset-allocation-api Entra app when available.
 AZURE_STORAGE_CONNECTION_STRING,secret,secret,secret_store,true,Storage connection string. Never auto-discovered.
 NASDAQ_API_KEY,secret,secret,secret_store,true,Nasdaq API key. Never auto-discovered.
 POSTGRES_DSN,secret,secret,secret_store,true,Jobs Postgres connection string. Never auto-discovered.

@@ -37,6 +37,11 @@ STALE_DOC_REFERENCES = (
     "/config.js",
 )
 
+API_BOOTSTRAP_JOB_MANIFESTS = (
+    "job_backtests.yaml",
+    "job_platinum_rankings.yaml",
+)
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -71,6 +76,16 @@ def test_codedrift_config_is_jobs_only() -> None:
         assert stale_reference not in text
     assert "python3 scripts/run_quality_gate.py test-fast" in text
     assert "python3 scripts/run_quality_gate.py test-full" in text
+
+
+def test_api_backed_manual_jobs_define_control_plane_env_vars() -> None:
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name in API_BOOTSTRAP_JOB_MANIFESTS:
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        assert "name: ASSET_ALLOCATION_API_BASE_URL" in text, manifest_name
+        assert "value: ${ASSET_ALLOCATION_API_BASE_URL}" in text, manifest_name
+        assert "name: ASSET_ALLOCATION_API_SCOPE" in text, manifest_name
+        assert "value: ${ASSET_ALLOCATION_API_SCOPE}" in text, manifest_name
 
 
 def test_contributor_and_security_docs_reference_live_jobs_assets_only() -> None:

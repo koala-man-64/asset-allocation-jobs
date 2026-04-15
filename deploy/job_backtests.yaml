@@ -45,6 +45,10 @@ properties:
         secretRef: azure-storage-connection-string
       - name: AZURE_CONTAINER_COMMON
         value: ${AZURE_CONTAINER_COMMON}
+      - name: ASSET_ALLOCATION_API_BASE_URL
+        value: ${ASSET_ALLOCATION_API_BASE_URL}
+      - name: ASSET_ALLOCATION_API_SCOPE
+        value: ${ASSET_ALLOCATION_API_SCOPE}
       - name: POSTGRES_DSN
         secretRef: pg-dsn
       image: ${JOB_IMAGE}

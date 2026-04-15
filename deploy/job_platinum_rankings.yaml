@@ -37,6 +37,10 @@ properties:
         value: "true"
       - name: AZURE_CLIENT_ID
         value: ${ACR_PULL_IDENTITY_CLIENT_ID}
+      - name: ASSET_ALLOCATION_API_BASE_URL
+        value: ${ASSET_ALLOCATION_API_BASE_URL}
+      - name: ASSET_ALLOCATION_API_SCOPE
+        value: ${ASSET_ALLOCATION_API_SCOPE}
       - name: POSTGRES_DSN
         secretRef: pg-dsn
       - name: RANKING_STRATEGY_NAME

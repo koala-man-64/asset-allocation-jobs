@@ -195,6 +195,14 @@ function New-Resolution {
     return @{ Value = (Normalize-EnvValue -Value $Value); Source = $Source; PromptRequired = $PromptRequired }
 }
 
+function Test-CanAutoDiscoverSecretValue {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    return $Name -in @(
+        "ASSET_ALLOCATION_API_BASE_URL",
+        "ASSET_ALLOCATION_API_SCOPE"
+    )
+}
+
 function Resolve-DiscoveredValue {
     param([Parameter(Mandatory = $true)][string]$Key)
     switch ($Key) {
@@ -279,6 +287,14 @@ foreach ($row in $contractRows) {
     if ($overrideMap.ContainsKey($name) -and -not [string]::IsNullOrWhiteSpace($overrideMap[$name])) {
         $results.Add([pscustomobject]@{ Name = $name; Value = (Normalize-EnvValue -Value $overrideMap[$name]); Source = "prompted"; IsSecret = $isSecret; PromptRequired = $false })
         continue
+    }
+
+    if ($isSecret -and (Test-CanAutoDiscoverSecretValue -Name $name)) {
+        $discovered = Resolve-DiscoveredValue -Key $name
+        if (-not [string]::IsNullOrWhiteSpace($discovered.Value)) {
+            $results.Add([pscustomobject]@{ Name = $name; Value = $discovered.Value; Source = $discovered.Source; IsSecret = $true; PromptRequired = $false })
+            continue
+        }
     }
 
     if (-not $isSecret) {
