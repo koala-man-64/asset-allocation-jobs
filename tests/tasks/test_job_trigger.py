@@ -22,6 +22,7 @@ def test_ensure_api_awake_cloud_runtime_probes_health(monkeypatch: pytest.Monkey
     job_trigger.ensure_api_awake_from_env(required=True)
 
     assert probe_calls == ["http://asset-allocation-api/healthz"]
+    assert job_trigger.get_last_startup_api_wake_status()["recovered"] is False
 
 
 def test_ensure_api_awake_raises_when_required_and_base_url_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,6 +66,9 @@ def test_ensure_api_awake_starts_container_app_and_recovers(monkeypatch: pytest.
     job_trigger.ensure_api_awake_from_env(required=True)
 
     assert start_calls == [("asset-allocation-api", True)]
+    status = job_trigger.get_last_startup_api_wake_status()
+    assert status["healthy"] is True
+    assert status["recovered"] is True
 
 
 def test_ensure_api_awake_local_waits_for_local_health(monkeypatch: pytest.MonkeyPatch) -> None:

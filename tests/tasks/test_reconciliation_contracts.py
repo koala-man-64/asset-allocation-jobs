@@ -54,7 +54,12 @@ def _patch_gold_price_target_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _patch_gold_finance_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gold_finance, "collect_delta_silver_finance_symbols", lambda *, client: {"AAPL"})
-    monkeypatch.setattr(gold_finance, "collect_delta_market_symbols", lambda *, client, root_prefix: {"AAPL", "MSFT"})
+
+    def _collect_gold_finance_symbols(*, client, root_prefix):
+        assert root_prefix == gold_finance._GOLD_FINANCE_RECONCILIATION_ROOT_PREFIX
+        return {"AAPL", "MSFT"}
+
+    monkeypatch.setattr(gold_finance, "collect_delta_market_symbols", _collect_gold_finance_symbols)
 
 
 def _patch_gold_earnings_symbols(monkeypatch: pytest.MonkeyPatch) -> None:

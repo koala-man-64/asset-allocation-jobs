@@ -211,6 +211,123 @@ def test_compute_rankings_dataframe_intersects_strategy_and_ranking_universes(mo
     ]
 
 
+def test_compute_rankings_dataframe_excludes_null_piotroski_rows(monkeypatch) -> None:
+    strategy_universe = UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "market_data",
+                        "column": "close",
+                        "operator": "gt",
+                        "value": 10,
+                    }
+                ],
+            },
+        }
+    )
+    ranking_universe = UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "finance_data",
+                        "column": "piotroski_f_score",
+                        "operator": "gte",
+                        "value": 7,
+                    }
+                ],
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "core.ranking_engine.service.universe_service._load_gold_table_specs",
+        lambda _dsn: {},
+    )
+    monkeypatch.setattr("core.ranking_engine.service._resolve_strategy_universe", lambda _dsn, _config: strategy_universe)
+    monkeypatch.setattr("core.ranking_engine.service._resolve_ranking_universe", lambda _dsn, _schema: ranking_universe)
+    monkeypatch.setattr(
+        "core.ranking_engine.service._load_table_frames",
+        lambda _dsn, **kwargs: {
+            "market_data": pd.DataFrame(
+                {
+                    "date": [date(2026, 3, 7), date(2026, 3, 7)],
+                    "symbol": ["AAPL", "MSFT"],
+                    "market_data__close": [20.0, 22.0],
+                    "market_data__return_20d": [0.3, 0.2],
+                }
+            ),
+            "finance_data": pd.DataFrame(
+                {
+                    "date": [date(2026, 3, 7), date(2026, 3, 7)],
+                    "symbol": ["AAPL", "MSFT"],
+                    "finance_data__piotroski_f_score": [pd.NA, 8],
+                }
+            ),
+        },
+    )
+
+    ranked = _compute_rankings_dataframe(
+        "postgresql://test:test@localhost:5432/asset_allocation",
+        strategy_config=StrategyConfig.model_validate(
+            {
+                "universeConfigName": "large-cap-quality",
+                "rebalance": "monthly",
+                "longOnly": True,
+                "topN": 20,
+                "lookbackWindow": 63,
+                "holdingPeriod": 21,
+                "costModel": "default",
+                "intrabarConflictPolicy": "stop_first",
+                "exits": [],
+            }
+        ),
+        ranking_schema=RankingSchemaConfig.model_validate(
+            {
+                "universeConfigName": "quality-universe",
+                "groups": [
+                    {
+                        "name": "quality",
+                        "weight": 1,
+                        "factors": [
+                            {
+                                "name": "momentum",
+                                "table": "market_data",
+                                "column": "return_20d",
+                                "weight": 1,
+                                "direction": "desc",
+                                "missingValuePolicy": "exclude",
+                                "transforms": [],
+                            }
+                        ],
+                        "transforms": [],
+                    }
+                ],
+                "overallTransforms": [],
+            }
+        ),
+        start_date=date(2026, 3, 7),
+        end_date=date(2026, 3, 7),
+    )
+
+    assert ranked.to_dict("records") == [
+        {
+            "date": date(2026, 3, 7),
+            "symbol": "MSFT",
+            "score": 0.2,
+            "rank": 1,
+        }
+    ]
+
+
 class _FakeCursor:
     def __init__(self) -> None:
         self.execute_calls: list[tuple[str, tuple[object, ...] | None]] = []

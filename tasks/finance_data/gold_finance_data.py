@@ -1,6 +1,6 @@
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence, Tuple, Dict, Any, List, Optional
 
 import numpy as np
@@ -41,6 +41,21 @@ class BucketExecutionResult:
     status: str
     symbols_written: int
     watermark_updated: bool
+
+
+@dataclass(frozen=True)
+class GoldFinanceRunResult:
+    processed_buckets: int
+    skipped_unchanged: int
+    skipped_missing_source: int
+    hard_failures: int
+    watermarks_dirty: bool
+    alpha26_symbols: int
+    index_path: Optional[str]
+    full_symbols: int = 0
+    sparse_symbols: int = 0
+    omitted_symbols: int = 0
+    missing_subdomain_counts: dict[str, int] = field(default_factory=dict)
 
 
 _NUMBER_RE = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*([kKmMbBtT])?\s*$")
@@ -85,6 +100,7 @@ _OPTIONAL_OUTPUT_COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
     },
 }
 _GOLD_FINANCE_ALPHA26_SUBDOMAINS: Tuple[str, ...] = SILVER_FINANCE_SUBDOMAINS
+_GOLD_FINANCE_RECONCILIATION_ROOT_PREFIX = "finance"
 _GOLD_FINANCE_PIOTROSKI_COLUMNS: Tuple[str, ...] = (
     "date",
     "symbol",
@@ -103,6 +119,9 @@ _GOLD_FINANCE_PIOTROSKI_COLUMNS: Tuple[str, ...] = (
 _GOLD_FINANCE_FLOAT_COLUMNS: Tuple[str, ...] = tuple(VALUATION_FINANCE_COLUMNS)
 _GOLD_FINANCE_PIOTROSKI_INTEGER_COLUMNS: Tuple[str, ...] = tuple(
     column for column in _GOLD_FINANCE_PIOTROSKI_COLUMNS if column.startswith("piotroski_")
+)
+_GOLD_FINANCE_VALUE_COLUMNS: Tuple[str, ...] = tuple(
+    column for column in _GOLD_FINANCE_PIOTROSKI_COLUMNS if column not in {"date", "symbol"}
 )
 _FINANCE_POSTGRES_SCHEMA_REMEDIATION_HINT = (
     "Apply deploy/sql/postgres/migrations/0033_add_gold_finance_ratio_columns.sql "
@@ -452,6 +471,87 @@ def _project_gold_finance_piotroski_frame(df: pd.DataFrame) -> pd.DataFrame:
     return projected[list(_GOLD_FINANCE_PIOTROSKI_COLUMNS)].reset_index(drop=True)
 
 
+def _drop_empty_gold_finance_rows(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    projected = _project_gold_finance_piotroski_frame(df)
+    if projected.empty:
+        return projected
+
+    mask = projected[list(_GOLD_FINANCE_VALUE_COLUMNS)].notna().any(axis=1)
+    if not mask.any():
+        return projected.iloc[0:0].copy()
+    return projected.loc[mask].reset_index(drop=True)
+
+
+def _select_symbol_rows(df: Optional[pd.DataFrame], ticker: str) -> pd.DataFrame:
+    if df is None or df.empty or "symbol" not in df.columns:
+        return pd.DataFrame()
+    symbol_series = df["symbol"].astype("string").str.strip().str.upper()
+    return df.loc[symbol_series == ticker].copy()
+
+
+def _assemble_gold_finance_symbol_frame(
+    *,
+    ticker: str,
+    tables: dict[str, pd.DataFrame],
+    backfill_start: Optional[pd.Timestamp],
+) -> tuple[pd.DataFrame, str, list[str], Optional[dict[str, Any]]]:
+    source_frames: dict[str, pd.DataFrame] = {}
+    missing_subdomains: list[str] = []
+
+    for sub_domain in _GOLD_FINANCE_ALPHA26_SUBDOMAINS:
+        prepared = _prepare_optional_table(
+            _select_symbol_rows(tables.get(sub_domain), ticker),
+            ticker,
+            source_label=sub_domain,
+        )
+        source_frames[sub_domain] = prepared
+        if prepared.empty:
+            missing_subdomains.append(sub_domain)
+
+    base_dates = [
+        frame[["date", "symbol"]]
+        for frame in source_frames.values()
+        if frame is not None and not frame.empty
+    ]
+    if not base_dates:
+        return _empty_gold_finance_bucket_frame(), "omitted", missing_subdomains, None
+
+    merged = pd.concat(base_dates, ignore_index=True).drop_duplicates(
+        subset=["symbol", "date"],
+        keep="last",
+    )
+    for table, suffix in (
+        (source_frames["income_statement"], "_is"),
+        (source_frames["balance_sheet"], "_bs"),
+        (source_frames["cash_flow"], "_cf"),
+        (source_frames["valuation"], "_val"),
+    ):
+        merged = merged.merge(table, on=["symbol", "date"], how="left", suffixes=("", suffix))
+
+    preflight = _preflight_feature_schema(merged)
+    if preflight["missing_requirements"]:
+        projected = _drop_empty_gold_finance_rows(merged)
+        projected, _ = apply_backfill_start_cutoff(
+            projected,
+            date_col="date",
+            backfill_start=backfill_start,
+            context=f"gold finance alpha26 {ticker}",
+        )
+        status = "sparse" if projected is not None and not projected.empty else "omitted"
+        return _project_gold_finance_piotroski_frame(projected), status, missing_subdomains, preflight
+
+    df_features = compute_features(merged)
+    df_features, _ = apply_backfill_start_cutoff(
+        df_features,
+        date_col="date",
+        backfill_start=backfill_start,
+        context=f"gold finance alpha26 {ticker}",
+    )
+    projected = _drop_empty_gold_finance_rows(df_features)
+    status = "full" if not projected.empty else "omitted"
+    return projected, status, missing_subdomains, None
+
+
 def _gold_finance_alpha26_bucket_path(bucket: str) -> str:
     from asset_allocation_contracts.paths import DataPaths
 
@@ -532,7 +632,10 @@ def _run_finance_reconciliation(*, silver_container: str, gold_container: str) -
         raise RuntimeError("Gold finance reconciliation requires gold storage client.")
 
     silver_symbols = collect_delta_silver_finance_symbols(client=silver_client)
-    gold_symbols = collect_delta_market_symbols(client=gold_client, root_prefix="finance/buckets")
+    gold_symbols = collect_delta_market_symbols(
+        client=gold_client,
+        root_prefix=_GOLD_FINANCE_RECONCILIATION_ROOT_PREFIX,
+    )
     orphan_symbols, purge_stats = purge_orphan_rows_from_bucket_tables(
         upstream_symbols=silver_symbols,
         downstream_symbols=gold_symbols,
@@ -603,7 +706,7 @@ def _run_alpha26_finance_gold(
     gold_container: str,
     backfill_start_iso: Optional[str],
     watermarks: dict,
-) -> tuple[int, int, int, int, bool, int, Optional[str]]:
+) -> GoldFinanceRunResult:
     from core import core as mdc
     from core import delta_core
 
@@ -638,10 +741,25 @@ def _run_alpha26_finance_gold(
                 "failed=1 failed_symbols=0 failed_buckets=0 failed_finalization=1 "
                 "processed=0 skipped_unchanged=0 skipped_missing_source=0"
             )
-            return 0, 0, 0, 1, False, 0, None
+            return GoldFinanceRunResult(
+                processed_buckets=0,
+                skipped_unchanged=0,
+                skipped_missing_source=0,
+                hard_failures=1,
+                watermarks_dirty=False,
+                alpha26_symbols=0,
+                index_path=None,
+                missing_subdomain_counts={sub_domain: 0 for sub_domain in _GOLD_FINANCE_ALPHA26_SUBDOMAINS},
+            )
     sync_state = load_domain_sync_state(postgres_dsn, domain="finance") if postgres_dsn else {}
     bucket_results: list[BucketExecutionResult] = []
     index_path: Optional[str] = None
+    full_symbols = 0
+    sparse_symbols = 0
+    omitted_symbols = 0
+    missing_subdomain_symbols: dict[str, set[str]] = {
+        sub_domain: set() for sub_domain in _GOLD_FINANCE_ALPHA26_SUBDOMAINS
+    }
 
     for bucket in layer_bucketing.ALPHABET_BUCKETS:
         from asset_allocation_contracts.paths import DataPaths
@@ -684,8 +802,10 @@ def _run_alpha26_finance_gold(
             symbol for symbol, current_bucket in symbol_to_bucket.items() if current_bucket == bucket
         )
         df_gold_bucket: Optional[pd.DataFrame] = None
+        symbol_candidates: set[str] = set()
         bucket_symbol_to_bucket: dict[str, str] = {}
         bucket_symbol_failures = 0
+        bucket_symbol_inputs = 0
         template_schema_available = False
 
         if df_gold_bucket is None and silver_commit is None:
@@ -710,29 +830,15 @@ def _run_alpha26_finance_gold(
                     for sym in frame["symbol"].dropna().astype(str).tolist()
                     if str(sym).strip()
                 )
+            bucket_symbol_inputs = len(symbol_candidates)
 
             symbol_frames: list[pd.DataFrame] = []
             for ticker in sorted(symbol_candidates):
                 try:
-                    df_income = _prepare_table(
-                        tables.get("income_statement", pd.DataFrame()).query("symbol == @ticker").copy(),
-                        ticker,
-                        source_label="income_statement",
-                    )
-                    df_balance = _prepare_table(
-                        tables.get("balance_sheet", pd.DataFrame()).query("symbol == @ticker").copy(),
-                        ticker,
-                        source_label="balance_sheet",
-                    )
-                    df_cashflow = _prepare_table(
-                        tables.get("cash_flow", pd.DataFrame()).query("symbol == @ticker").copy(),
-                        ticker,
-                        source_label="cash_flow",
-                    )
-                    df_valuation = _prepare_optional_table(
-                        tables.get("valuation", pd.DataFrame()).query("symbol == @ticker").copy(),
-                        ticker,
-                        source_label="valuation",
+                    df_symbol, symbol_status, missing_subdomains, preflight = _assemble_gold_finance_symbol_frame(
+                        ticker=ticker,
+                        tables=tables,
+                        backfill_start=backfill_start,
                     )
                 except Exception as exc:
                     failed += 1
@@ -741,53 +847,30 @@ def _run_alpha26_finance_gold(
                     mdc.write_warning(f"Gold finance alpha26 source failed for {ticker}: {exc}")
                     continue
 
-                base_dates = []
-                for table in (df_income, df_balance, df_cashflow, df_valuation):
-                    if table.empty:
-                        continue
-                    base_dates.append(table[["date", "symbol"]])
-                keys = pd.concat(base_dates, ignore_index=True).drop_duplicates(
-                    subset=["symbol", "date"], keep="last"
-                )
+                for sub_domain in missing_subdomains:
+                    missing_subdomain_symbols.setdefault(sub_domain, set()).add(ticker)
 
-                merged = keys
-                for table, suffix in (
-                    (df_income, "_is"),
-                    (df_balance, "_bs"),
-                    (df_cashflow, "_cf"),
-                    (df_valuation, "_val"),
-                ):
-                    merged = merged.merge(table, on=["symbol", "date"], how="left", suffixes=("", suffix))
-
-                preflight = _preflight_feature_schema(merged)
-                if preflight["missing_requirements"]:
-                    failed += 1
-                    failed_symbols += 1
-                    bucket_symbol_failures += 1
-                    mdc.write_warning(
-                        "Gold finance alpha26 schema preflight failed for "
-                        f"{ticker}: missing={preflight['missing_requirements']} "
-                        f"available_columns={preflight['available_columns']}"
+                if symbol_status == "full":
+                    full_symbols += 1
+                elif symbol_status == "sparse":
+                    sparse_symbols += 1
+                    mdc.write_line(
+                        "gold_finance_symbol_status phase=alpha26 "
+                        f"ticker={ticker} status=sparse missing_subdomains={missing_subdomains} "
+                        f"missing_requirements={(preflight or {}).get('missing_requirements', [])}"
+                    )
+                else:
+                    omitted_symbols += 1
+                    mdc.write_line(
+                        "gold_finance_symbol_status phase=alpha26 "
+                        f"ticker={ticker} status=omitted reason=no_output_columns "
+                        f"missing_subdomains={missing_subdomains} "
+                        f"missing_requirements={(preflight or {}).get('missing_requirements', [])}"
                     )
                     continue
 
-                try:
-                    df_features = compute_features(merged)
-                    df_features, _ = apply_backfill_start_cutoff(
-                        df_features,
-                        date_col="date",
-                        backfill_start=backfill_start,
-                        context=f"gold finance alpha26 {ticker}",
-                    )
-                    if df_features is None or df_features.empty:
-                        continue
-                    symbol_frames.append(_project_gold_finance_piotroski_frame(df_features))
-                    bucket_symbol_to_bucket[ticker] = bucket
-                except Exception as exc:
-                    failed += 1
-                    failed_symbols += 1
-                    bucket_symbol_failures += 1
-                    mdc.write_warning(f"Gold finance alpha26 compute failed for {ticker}: {exc}")
+                symbol_frames.append(df_symbol)
+                bucket_symbol_to_bucket[ticker] = bucket
 
             if symbol_frames:
                 df_gold_bucket = _project_gold_finance_piotroski_frame(
@@ -822,10 +905,11 @@ def _run_alpha26_finance_gold(
             )
             mdc.write_line(
                 f"layer_handoff_status transition=silver_to_gold status=skipped bucket={bucket} "
-                "reason=empty_bucket_no_existing_schema symbols_in=0 symbols_out=0 failures=0"
+                f"reason=empty_bucket_no_existing_schema symbols_in={bucket_symbol_inputs} "
+                "symbols_out=0 failures=0"
             )
             mdc.write_line(
-                f"watermark_update_status layer=gold domain=finance bucket={bucket} "
+                f"watermark_update_status layer=gold domain=finance phase=checkpoint bucket={bucket} "
                 "status=blocked reason=empty_bucket_no_existing_schema"
             )
             bucket_results.append(
@@ -864,13 +948,13 @@ def _run_alpha26_finance_gold(
                     domain="finance",
                     bucket=bucket,
                     frame=write_decision.frame,
-                    scope_symbols=sorted(set(prior_bucket_symbols).union(bucket_symbol_to_bucket.keys())),
+                    scope_symbols=sorted(set(prior_bucket_symbols).union(symbol_candidates)),
                     source_commit=silver_commit,
                     dsn=postgres_dsn,
                 )
                 sync_state[bucket] = sync_state_cache_entry(sync_result)
                 mdc.write_line(
-                    "postgres_gold_sync_status "
+                    "postgres_gold_sync_status phase=postgres_sync "
                     f"domain=finance bucket={bucket} status={sync_result.status} "
                     f"rows_out={sync_result.row_count} symbols_out={sync_result.symbol_count} "
                     f"scope_symbols={sync_result.scope_symbol_count} source_commit={silver_commit}"
@@ -888,11 +972,11 @@ def _run_alpha26_finance_gold(
             mdc.write_error(f"Gold finance alpha26 write failed bucket={bucket} path={gold_path}: {exc}")
             mdc.write_line(
                 f"layer_handoff_status transition=silver_to_gold status=failed bucket={bucket} "
-                f"reason=write_failure symbols_in={len(bucket_symbol_to_bucket)} symbols_out=0 "
+                f"reason=write_failure symbols_in={bucket_symbol_inputs} symbols_out=0 "
                 f"failures={bucket_symbol_failures + 1}"
             )
             mdc.write_line(
-                f"watermark_update_status layer=gold domain=finance bucket={bucket} "
+                f"watermark_update_status layer=gold domain=finance phase=checkpoint bucket={bucket} "
                 "status=blocked reason=write_failure"
             )
             bucket_results.append(
@@ -935,7 +1019,7 @@ def _run_alpha26_finance_gold(
                 failed_buckets += 1
                 mdc.write_error(f"Gold finance alpha26 checkpoint failed bucket={bucket}: {exc}")
                 mdc.write_line(
-                    f"watermark_update_status layer=gold domain=finance bucket={bucket} "
+                    f"watermark_update_status layer=gold domain=finance phase=checkpoint bucket={bucket} "
                     "status=blocked reason=checkpoint_failure"
                 )
                 bucket_results.append(
@@ -952,18 +1036,19 @@ def _run_alpha26_finance_gold(
             watermarks_dirty = True
             watermark_updated = True
             mdc.write_line(
-                f"watermark_update_status layer=gold domain=finance bucket={bucket} status=updated reason=success"
+                f"watermark_update_status layer=gold domain=finance phase=checkpoint bucket={bucket} "
+                "status=updated reason=success"
             )
         else:
             symbol_to_bucket = updated_symbol_to_bucket
             mdc.write_line(
-                f"watermark_update_status layer=gold domain=finance bucket={bucket} "
+                f"watermark_update_status layer=gold domain=finance phase=checkpoint bucket={bucket} "
                 "status=blocked reason=missing_source_commit"
             )
         symbols_written = len(bucket_symbol_to_bucket)
         mdc.write_line(
             f"layer_handoff_status transition=silver_to_gold status=ok bucket={bucket} "
-            f"symbols_in={symbols_written + bucket_symbol_failures} "
+            f"symbols_in={bucket_symbol_inputs} "
             f"symbols_out={symbols_written} failures={bucket_symbol_failures}"
         )
         bucket_results.append(
@@ -997,19 +1082,37 @@ def _run_alpha26_finance_gold(
         f"failed_symbols={finalization.failed_symbols} failed_buckets={finalization.failed_buckets} "
         f"failed_finalization={finalization.failed_finalization}"
     )
-    return (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        finalization.failed,
-        watermarks_dirty,
-        len(symbol_to_bucket),
-        finalization.index_path,
+    missing_subdomain_counts = {
+        sub_domain: len(symbols)
+        for sub_domain, symbols in missing_subdomain_symbols.items()
+    }
+    mdc.write_line(
+        "gold_finance_phase_result layer=gold domain=finance phase=alpha26 "
+        f"status={'failed' if finalization.failed > 0 else 'ok'} "
+        f"processed_buckets={processed} skipped_unchanged={skipped_unchanged} "
+        f"skipped_missing_source={skipped_missing_source} full_symbols={full_symbols} "
+        f"sparse_symbols={sparse_symbols} omitted_symbols={omitted_symbols} "
+        f"missing_subdomain_counts={missing_subdomain_counts} hard_failures={finalization.failed}"
+    )
+    return GoldFinanceRunResult(
+        processed_buckets=processed,
+        skipped_unchanged=skipped_unchanged,
+        skipped_missing_source=skipped_missing_source,
+        hard_failures=finalization.failed,
+        watermarks_dirty=watermarks_dirty,
+        alpha26_symbols=len(symbol_to_bucket),
+        index_path=finalization.index_path,
+        full_symbols=full_symbols,
+        sparse_symbols=sparse_symbols,
+        omitted_symbols=omitted_symbols,
+        missing_subdomain_counts=missing_subdomain_counts,
     )
 
 
 def main() -> int:
     from core import core as mdc
+    from tasks.common.job_trigger import get_last_startup_api_wake_status
+
     mdc.log_environment_diagnostics()
     job_cfg = _build_job_config()
     backfill_start, _ = get_backfill_range()
@@ -1019,15 +1122,7 @@ def main() -> int:
     layer_bucketing.gold_layout_mode()
 		
     watermarks = load_watermarks("gold_finance_features")
-    (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        failed,
-        watermarks_dirty,
-        alpha26_symbols,
-        alpha26_index_path,
-    ) = _run_alpha26_finance_gold(
+    run_result = _run_alpha26_finance_gold(
         silver_container=job_cfg.silver_container,
         gold_container=job_cfg.gold_container,
         backfill_start_iso=backfill_start_iso,
@@ -1036,28 +1131,53 @@ def main() -> int:
     reconciliation_orphans = 0
     reconciliation_deleted_blobs = 0
     reconciliation_failed = 0
-    if failed == 0:
+    reconciliation_status = "skipped"
+    if run_result.hard_failures == 0:
         try:
             reconciliation_orphans, reconciliation_deleted_blobs = _run_finance_reconciliation(
                 silver_container=job_cfg.silver_container,
                 gold_container=job_cfg.gold_container,
             )
+            reconciliation_status = "ok"
+            mdc.write_line(
+                "reconciliation_result layer=gold domain=finance phase=reconciliation "
+                f"status=ok orphan_count={reconciliation_orphans} deleted_blobs={reconciliation_deleted_blobs}"
+            )
         except Exception as exc:
             reconciliation_failed = 1
+            reconciliation_status = "failed"
             mdc.write_error(f"Gold finance reconciliation failed: {exc}")
             mdc.write_line(
-                "reconciliation_result layer=gold domain=finance "
+                "reconciliation_result layer=gold domain=finance phase=reconciliation "
                 "status=failed orphan_count=unknown deleted_blobs=unknown cutoff_rows_dropped=unknown"
             )
-    if watermarks_dirty and reconciliation_failed == 0:
+    else:
+        mdc.write_line(
+            "reconciliation_result layer=gold domain=finance phase=reconciliation "
+            "status=skipped reason=alpha26_hard_failures"
+        )
+    if run_result.watermarks_dirty and reconciliation_failed == 0:
         save_watermarks("gold_finance_features", watermarks)
-    total_failed = failed + reconciliation_failed
+    total_failed = run_result.hard_failures + reconciliation_failed
+    startup_status = get_last_startup_api_wake_status()
+    missing_income_statement_symbols = int(run_result.missing_subdomain_counts.get("income_statement", 0))
+    missing_cash_flow_symbols = int(run_result.missing_subdomain_counts.get("cash_flow", 0))
     mdc.write_line(
-        "Gold finance alpha26 complete: "
-        f"processed_buckets={processed} skipped_unchanged={skipped_unchanged} "
-        f"skipped_missing_source={skipped_missing_source} symbols={alpha26_symbols} "
-        f"index_path={alpha26_index_path or 'unavailable'} reconciled_orphans={reconciliation_orphans} "
-        f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} failed={total_failed}"
+        "gold_finance_job_summary layer=gold domain=finance "
+        f"processed_buckets={run_result.processed_buckets} "
+        f"skipped_unchanged={run_result.skipped_unchanged} "
+        f"skipped_missing_source={run_result.skipped_missing_source} "
+        f"full_symbols={run_result.full_symbols} sparse_symbols={run_result.sparse_symbols} "
+        f"omitted_symbols={run_result.omitted_symbols} symbols={run_result.alpha26_symbols} "
+        f"missing_income_statement_symbols={missing_income_statement_symbols} "
+        f"missing_cash_flow_symbols={missing_cash_flow_symbols} "
+        f"hard_failures={run_result.hard_failures} "
+        f"index_path={run_result.index_path or 'unavailable'} "
+        f"reconciled_orphans={reconciliation_orphans} "
+        f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} "
+        f"reconciliation_status={reconciliation_status} "
+        f"startup_api_recovered={str(bool(startup_status.get('recovered', False))).lower()} "
+        f"failed={total_failed}"
     )
     return 0 if total_failed == 0 else 1
 

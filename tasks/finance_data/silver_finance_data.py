@@ -83,6 +83,7 @@ class _FinanceAlpha26FlushState:
     staged_rows: int = 0
     flush_count: int = 0
     written_symbols: int = 0
+    written_symbols_by_subdomain: Optional[dict[str, int]] = None
     index_path: Optional[str] = None
     column_count: Optional[int] = None
     cached_symbol_maps: Optional[dict[str, dict[str, str]]] = None
@@ -526,6 +527,10 @@ def _write_alpha26_finance_silver_buckets(
         except Exception as exc:
             mdc.write_warning(f"Silver finance metadata artifact write failed: {exc}")
     if recovery_state is not None:
+        recovery_state.written_symbols_by_subdomain = {
+            sub_domain: len(symbols_by_sub_domain.get(sub_domain, {}))
+            for sub_domain in _FINANCE_ALPHA26_SUBDOMAINS
+        }
         recovery_state.cached_symbol_maps = _copy_finance_symbol_maps(symbols_by_sub_domain)
         if recovery_state.index_recovery_source == "shared-index":
             recovery_state.index_recovery_source = None
@@ -1089,6 +1094,10 @@ def main() -> int:
     rows_written = sum(int(r.rows_written or 0) for r in all_results if r.status == "ok")
     alpha26_staged_rows = alpha26_flush_state.staged_rows
     alpha26_written_symbols = alpha26_flush_state.written_symbols
+    alpha26_written_symbols_by_subdomain = {
+        sub_domain: int((alpha26_flush_state.written_symbols_by_subdomain or {}).get(sub_domain, 0))
+        for sub_domain in _FINANCE_ALPHA26_SUBDOMAINS
+    }
     alpha26_index_path: Optional[str] = alpha26_flush_state.index_path
     alpha26_column_count: Optional[int] = alpha26_flush_state.column_count
     if failed == 0:
@@ -1102,6 +1111,11 @@ def main() -> int:
     reconciliation_failed = 0
 
     total_failed = failed + reconciliation_failed
+    mdc.write_line(
+        "silver_finance_run_summary layer=silver domain=finance phase=alpha26 "
+        f"subdomain_symbol_counts={alpha26_written_symbols_by_subdomain} "
+        f"alpha26_symbols={alpha26_written_symbols} alpha26_staged_rows={alpha26_staged_rows}"
+    )
     mdc.write_line(
         "Silver finance ingest complete: "
         f"attempts={attempts}, ok={processed}, skipped={skipped}, skippedNoData={skipped_no_data}, "

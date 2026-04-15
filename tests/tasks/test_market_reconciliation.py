@@ -49,6 +49,20 @@ def test_collect_delta_market_symbols_reads_from_layer_index(monkeypatch) -> Non
     assert symbols == {"AAPL", "MSFT"}
 
 
+def test_collect_delta_market_symbols_reads_finance_layer_index(monkeypatch) -> None:
+    monkeypatch.setattr(
+        layer_bucketing,
+        "load_layer_symbol_set",
+        lambda *, layer, domain, sub_domain=None: {"AAPL", "MSFT"}
+        if (layer, domain, sub_domain) == ("gold", "finance", None)
+        else set(),
+    )
+
+    symbols = collect_delta_market_symbols(client=object(), root_prefix="finance")
+
+    assert symbols == {"AAPL", "MSFT"}
+
+
 def test_purge_orphan_rows_from_bucket_tables_rewrites_and_deletes() -> None:
     saved: dict[str, pd.DataFrame] = {}
     deleted_paths: list[str] = []

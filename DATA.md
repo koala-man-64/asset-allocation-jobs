@@ -599,7 +599,7 @@ Rows are normalized directly from Bronze Massive `ratios` history, then resample
 
 Path: `finance/buckets/{bucket}`
 
-Gold finance computes a larger feature set internally, then persists the Piotroski output together with the valuation metrics carried from Silver.
+Gold finance computes Piotroski features when the required Silver statement inputs are available and always carries forward any valuation metrics available from Silver. Symbols can publish sparse rows: valuation fields stay populated when present, and Piotroski fields remain null when the required `income_statement`, `balance_sheet`, or `cash_flow` inputs are incomplete for that symbol/date.
 
 | Column | Type | Description |
 | --- | --- | --- |
@@ -632,7 +632,7 @@ Gold finance computes a larger feature set internally, then persists the Piotros
 | `piotroski_no_new_shares` | nullable int | `1` when shares outstanding did not increase versus four periods earlier. |
 | `piotroski_gross_margin_increase` | nullable int | `1` when trailing-twelve-month gross margin improved versus four periods earlier. |
 | `piotroski_asset_turnover_increase` | nullable int | `1` when trailing-twelve-month asset turnover improved versus four periods earlier. |
-| `piotroski_f_score` | nullable int | Sum of the nine Piotroski component flags. |
+| `piotroski_f_score` | nullable int | Sum of the nine Piotroski component flags; null when the required Silver statement inputs are unavailable. |
 
 Evidence:
 

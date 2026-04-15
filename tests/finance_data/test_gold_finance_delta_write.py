@@ -12,6 +12,29 @@ EXPECTED_GOLD_FINANCE_FLOAT_COLUMNS = list(gold_finance_data._GOLD_FINANCE_FLOAT
 EXPECTED_GOLD_FINANCE_INT_COLUMNS = list(gold_finance_data._GOLD_FINANCE_PIOTROSKI_INTEGER_COLUMNS)
 
 
+def _run_result(**overrides) -> gold_finance_data.GoldFinanceRunResult:
+    base = {
+        "processed_buckets": 1,
+        "skipped_unchanged": 0,
+        "skipped_missing_source": 0,
+        "hard_failures": 0,
+        "watermarks_dirty": True,
+        "alpha26_symbols": 1,
+        "index_path": "system/gold-index/finance/latest.parquet",
+        "full_symbols": 1,
+        "sparse_symbols": 0,
+        "omitted_symbols": 0,
+        "missing_subdomain_counts": {
+            "balance_sheet": 0,
+            "cash_flow": 0,
+            "income_statement": 0,
+            "valuation": 0,
+        },
+    }
+    base.update(overrides)
+    return gold_finance_data.GoldFinanceRunResult(**base)
+
+
 def test_build_job_config_reads_required_containers(monkeypatch):
     monkeypatch.setenv("AZURE_CONTAINER_SILVER", "silver")
     monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")
@@ -46,28 +69,20 @@ def test_run_alpha26_finance_gold_skips_empty_bucket_without_existing_schema(mon
     monkeypatch.setattr(delta_core, "get_delta_schema_columns", _fake_get_schema)
     monkeypatch.setattr(delta_core, "store_delta", _fake_store)
 
-    (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        failed,
-        watermarks_dirty,
-        alpha26_symbols,
-        index_path,
-    ) = gold_finance_data._run_alpha26_finance_gold(
+    result = gold_finance_data._run_alpha26_finance_gold(
         silver_container="silver",
         gold_container="gold",
         backfill_start_iso=None,
         watermarks={},
     )
 
-    assert processed == 0
-    assert skipped_unchanged == 0
-    assert skipped_missing_source == 1
-    assert failed == 0
-    assert watermarks_dirty is False
-    assert alpha26_symbols == 0
-    assert index_path == "index"
+    assert result.processed_buckets == 0
+    assert result.skipped_unchanged == 0
+    assert result.skipped_missing_source == 1
+    assert result.hard_failures == 0
+    assert result.watermarks_dirty is False
+    assert result.alpha26_symbols == 0
+    assert result.index_path == "index"
     assert captured["store_calls"] == 0
     assert captured["checked_paths"] == [target_path]
 
@@ -112,28 +127,20 @@ def test_run_alpha26_finance_gold_writes_empty_bucket_when_schema_exists(monkeyp
 
     monkeypatch.setattr(delta_core, "store_delta", _fake_store)
 
-    (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        failed,
-        watermarks_dirty,
-        alpha26_symbols,
-        index_path,
-    ) = gold_finance_data._run_alpha26_finance_gold(
+    result = gold_finance_data._run_alpha26_finance_gold(
         silver_container="silver",
         gold_container="gold",
         backfill_start_iso=None,
         watermarks={},
     )
 
-    assert processed == 1
-    assert skipped_unchanged == 0
-    assert skipped_missing_source == 1
-    assert failed == 0
-    assert watermarks_dirty is False
-    assert alpha26_symbols == 0
-    assert index_path == "index"
+    assert result.processed_buckets == 1
+    assert result.skipped_unchanged == 0
+    assert result.skipped_missing_source == 1
+    assert result.hard_failures == 0
+    assert result.watermarks_dirty is False
+    assert result.alpha26_symbols == 0
+    assert result.index_path == "index"
     assert captured["store_calls"] == 1
     assert captured["paths"] == [target_path]
     assert captured["mode"] == "overwrite"
@@ -280,28 +287,23 @@ def test_run_alpha26_finance_gold_projects_optional_valuation_metrics(monkeypatc
 
     monkeypatch.setattr(delta_core, "store_delta", _fake_store)
 
-    (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        failed,
-        watermarks_dirty,
-        alpha26_symbols,
-        index_path,
-    ) = gold_finance_data._run_alpha26_finance_gold(
+    result = gold_finance_data._run_alpha26_finance_gold(
         silver_container="silver",
         gold_container="gold",
         backfill_start_iso=None,
         watermarks={},
     )
 
-    assert processed == 1
-    assert skipped_unchanged == 0
-    assert skipped_missing_source == 0
-    assert failed == 0
-    assert watermarks_dirty is True
-    assert alpha26_symbols == 1
-    assert index_path == "index"
+    assert result.processed_buckets == 1
+    assert result.skipped_unchanged == 0
+    assert result.skipped_missing_source == 0
+    assert result.hard_failures == 0
+    assert result.watermarks_dirty is True
+    assert result.alpha26_symbols == 1
+    assert result.index_path == "index"
+    assert result.full_symbols == 1
+    assert result.sparse_symbols == 0
+    assert result.omitted_symbols == 0
     assert "market_cap" in list(captured["merged"].columns)
     assert "pe_ratio" in list(captured["merged"].columns)
     assert "price_to_book" in list(captured["merged"].columns)
@@ -313,6 +315,79 @@ def test_run_alpha26_finance_gold_projects_optional_valuation_metrics(monkeypatc
     assert captured["df"].loc[0, "pe_ratio"] == 20.0
     assert captured["df"].loc[0, "price_to_book"] == 5.0
     assert captured["df"].loc[0, "current_ratio"] == 1.4
+
+
+def test_run_alpha26_finance_gold_emits_sparse_valuation_only_rows(monkeypatch):
+    target_path = DataPaths.get_gold_finance_alpha26_bucket_path("A")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(gold_finance_data.layer_bucketing, "ALPHABET_BUCKETS", ("A",))
+    monkeypatch.setattr(gold_finance_data.layer_bucketing, "write_layer_symbol_index", lambda **_kwargs: "index")
+    monkeypatch.setattr(gold_finance_data, "save_watermarks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        delta_core,
+        "get_delta_last_commit",
+        lambda _container, path: 1 if "finance-data/" in path else None,
+    )
+    monkeypatch.setattr(delta_core, "get_delta_schema_columns", lambda *_args, **_kwargs: None)
+
+    date_value = pd.Timestamp("2024-01-01")
+    ticker = "AAPL"
+    valuation_df = pd.DataFrame(
+        {
+            "date": [date_value],
+            "symbol": [ticker],
+            "market_cap": [1_000_000.0],
+            "pe_ratio": [20.0],
+            "price_to_book": [5.0],
+            "current_ratio": [1.4],
+        }
+    )
+
+    def _fake_load_delta(_container: str, path: str):
+        if "valuation" in path:
+            return valuation_df
+        return pd.DataFrame()
+
+    monkeypatch.setattr(delta_core, "load_delta", _fake_load_delta)
+    compute_calls = {"count": 0}
+
+    def _unexpected_compute(_merged: pd.DataFrame) -> pd.DataFrame:
+        compute_calls["count"] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr(gold_finance_data, "compute_features", _unexpected_compute)
+
+    def _fake_store(df: pd.DataFrame, _container: str, path: str, mode: str = "overwrite", **_kwargs) -> None:
+        captured["path"] = path
+        captured["mode"] = mode
+        captured["df"] = df.copy()
+
+    monkeypatch.setattr(delta_core, "store_delta", _fake_store)
+
+    result = gold_finance_data._run_alpha26_finance_gold(
+        silver_container="silver",
+        gold_container="gold",
+        backfill_start_iso=None,
+        watermarks={},
+    )
+
+    assert result.processed_buckets == 1
+    assert result.hard_failures == 0
+    assert result.alpha26_symbols == 1
+    assert result.full_symbols == 0
+    assert result.sparse_symbols == 1
+    assert result.omitted_symbols == 0
+    assert result.missing_subdomain_counts["income_statement"] == 1
+    assert result.missing_subdomain_counts["cash_flow"] == 1
+    assert result.missing_subdomain_counts["balance_sheet"] == 1
+    assert result.missing_subdomain_counts["valuation"] == 0
+    assert compute_calls["count"] == 0
+    assert captured["path"] == target_path
+    assert captured["mode"] == "overwrite"
+    assert captured["df"].loc[0, "market_cap"] == 1_000_000.0
+    assert captured["df"].loc[0, "pe_ratio"] == 20.0
+    assert pd.isna(captured["df"].loc[0, "piotroski_f_score"])
 
 
 def test_run_alpha26_finance_gold_checkpoint_persists_index_and_defers_root_artifact(monkeypatch):
@@ -436,28 +511,20 @@ def test_run_alpha26_finance_gold_checkpoint_persists_index_and_defers_root_arti
     )
     monkeypatch.setattr(delta_core, "store_delta", lambda *_args, **_kwargs: None)
 
-    (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        failed,
-        watermarks_dirty,
-        alpha26_symbols,
-        index_path,
-    ) = gold_finance_data._run_alpha26_finance_gold(
+    result = gold_finance_data._run_alpha26_finance_gold(
         silver_container="silver",
         gold_container="gold",
         backfill_start_iso=None,
         watermarks={},
     )
 
-    assert processed == 1
-    assert skipped_unchanged == 0
-    assert skipped_missing_source == 0
-    assert failed == 0
-    assert watermarks_dirty is True
-    assert alpha26_symbols == 1
-    assert index_path == "system/gold-index/finance/latest.parquet"
+    assert result.processed_buckets == 1
+    assert result.skipped_unchanged == 0
+    assert result.skipped_missing_source == 0
+    assert result.hard_failures == 0
+    assert result.watermarks_dirty is True
+    assert result.alpha26_symbols == 1
+    assert result.index_path == "system/gold-index/finance/latest.parquet"
     assert index_calls["count"] == 1
     assert len(saved_watermarks) == 1
     assert saved_watermarks[0][0] == "gold_finance_features"
@@ -480,7 +547,7 @@ def test_run_alpha26_finance_gold_checkpoint_persists_index_and_defers_root_arti
     )
 
 
-def test_run_alpha26_finance_gold_preflight_blocks_missing_required_inputs(monkeypatch):
+def test_run_alpha26_finance_gold_omits_symbols_without_value_columns_when_required_inputs_missing(monkeypatch):
     monkeypatch.setattr(gold_finance_data.layer_bucketing, "ALPHABET_BUCKETS", ("A",))
     index_calls = {"count": 0}
     monkeypatch.setattr(
@@ -550,30 +617,26 @@ def test_run_alpha26_finance_gold_preflight_blocks_missing_required_inputs(monke
 
     monkeypatch.setattr(gold_finance_data, "compute_features", _unexpected_compute)
 
-    (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        failed,
-        watermarks_dirty,
-        alpha26_symbols,
-        index_path,
-    ) = gold_finance_data._run_alpha26_finance_gold(
+    result = gold_finance_data._run_alpha26_finance_gold(
         silver_container="silver",
         gold_container="gold",
         backfill_start_iso=None,
         watermarks={},
     )
 
-    assert processed == 0
-    assert skipped_unchanged == 0
-    assert skipped_missing_source == 0
-    assert failed == 1
-    assert watermarks_dirty is False
-    assert alpha26_symbols == 0
-    assert index_path is None
+    assert result.processed_buckets == 0
+    assert result.skipped_unchanged == 0
+    assert result.skipped_missing_source == 0
+    assert result.hard_failures == 0
+    assert result.watermarks_dirty is False
+    assert result.alpha26_symbols == 0
+    assert result.index_path == "index"
+    assert result.full_symbols == 0
+    assert result.sparse_symbols == 0
+    assert result.omitted_symbols == 1
+    assert result.missing_subdomain_counts["valuation"] == 1
     assert compute_calls["count"] == 0
-    assert index_calls["count"] == 0
+    assert index_calls["count"] == 1
 
 
 def test_run_alpha26_finance_gold_fails_closed_on_postgres_schema_drift(monkeypatch):
@@ -602,28 +665,20 @@ def test_run_alpha26_finance_gold_fails_closed_on_postgres_schema_drift(monkeypa
         lambda *_args, **_kwargs: store_calls.__setitem__("count", int(store_calls["count"]) + 1),
     )
 
-    (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        failed,
-        watermarks_dirty,
-        alpha26_symbols,
-        index_path,
-    ) = gold_finance_data._run_alpha26_finance_gold(
+    result = gold_finance_data._run_alpha26_finance_gold(
         silver_container="silver",
         gold_container="gold",
         backfill_start_iso=None,
         watermarks={},
     )
 
-    assert processed == 0
-    assert skipped_unchanged == 0
-    assert skipped_missing_source == 0
-    assert failed == 1
-    assert watermarks_dirty is False
-    assert alpha26_symbols == 0
-    assert index_path is None
+    assert result.processed_buckets == 0
+    assert result.skipped_unchanged == 0
+    assert result.skipped_missing_source == 0
+    assert result.hard_failures == 1
+    assert result.watermarks_dirty is False
+    assert result.alpha26_symbols == 0
+    assert result.index_path is None
     assert store_calls["count"] == 0
     assert index_calls["count"] == 0
     assert any(
@@ -654,7 +709,7 @@ def test_main_runs_finance_reconciliation_and_persists_watermarks(monkeypatch: p
     monkeypatch.setattr(
         gold_finance_data,
         "_run_alpha26_finance_gold",
-        lambda **_kwargs: (1, 0, 0, 0, True, 1, "system/gold-index/finance/latest.parquet"),
+        lambda **_kwargs: _run_result(),
     )
 
     def _run_reconciliation(*, silver_container: str, gold_container: str):
@@ -698,7 +753,7 @@ def test_main_fails_closed_when_finance_reconciliation_fails(monkeypatch: pytest
     monkeypatch.setattr(
         gold_finance_data,
         "_run_alpha26_finance_gold",
-        lambda **_kwargs: (1, 0, 0, 0, True, 1, "system/gold-index/finance/latest.parquet"),
+        lambda **_kwargs: _run_result(),
     )
     monkeypatch.setattr(
         gold_finance_data,

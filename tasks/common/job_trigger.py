@@ -23,6 +23,33 @@ _LOCAL_RUNTIME_MARKER_ENV_VARS = (
 )
 _LOCAL_API_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _LOCAL_API_BASE_URL = "http://127.0.0.1:9000"
+_LAST_STARTUP_API_WAKE_STATUS: dict[str, object] = {
+    "healthy": None,
+    "recovered": False,
+    "probe_attempts": 0,
+    "local_runtime": False,
+}
+
+
+def _set_last_startup_api_wake_status(
+    *,
+    healthy: Optional[bool],
+    recovered: bool,
+    probe_attempts: int,
+    local_runtime: bool,
+) -> None:
+    _LAST_STARTUP_API_WAKE_STATUS.update(
+        {
+            "healthy": healthy,
+            "recovered": recovered,
+            "probe_attempts": probe_attempts,
+            "local_runtime": local_runtime,
+        }
+    )
+
+
+def get_last_startup_api_wake_status() -> dict[str, object]:
+    return dict(_LAST_STARTUP_API_WAKE_STATUS)
 
 
 def _parse_bool(raw: Optional[str], *, default: bool) -> bool:
@@ -281,6 +308,12 @@ def _is_retryable(exc: Exception) -> bool:
 
 def ensure_api_awake_from_env(*, required: bool = True) -> None:
     local_runtime = _is_local_runtime()
+    _set_last_startup_api_wake_status(
+        healthy=None,
+        recovered=False,
+        probe_attempts=0,
+        local_runtime=local_runtime,
+    )
     if local_runtime:
         mdc.write_line("Skipping startup API wake/start logic in local runtime.")
         return
@@ -290,6 +323,12 @@ def ensure_api_awake_from_env(*, required: bool = True) -> None:
         message = "Startup API wake check failed: ASSET_ALLOCATION_API_BASE_URL is not configured."
         if required:
             mdc.write_error(message)
+            _set_last_startup_api_wake_status(
+                healthy=False,
+                recovered=False,
+                probe_attempts=0,
+                local_runtime=local_runtime,
+            )
             raise RuntimeError(message)
         mdc.write_line(message)
         return
@@ -299,6 +338,12 @@ def ensure_api_awake_from_env(*, required: bool = True) -> None:
         message = f"Startup API wake check failed: invalid ASSET_ALLOCATION_API_BASE_URL={base_url!r}."
         if required:
             mdc.write_error(message)
+            _set_last_startup_api_wake_status(
+                healthy=False,
+                recovered=False,
+                probe_attempts=0,
+                local_runtime=local_runtime,
+            )
             raise RuntimeError(message)
         mdc.write_warning(message)
         return
@@ -317,6 +362,12 @@ def ensure_api_awake_from_env(*, required: bool = True) -> None:
     for probe_attempt in range(1, probe_attempts + 1):
         healthy, detail = _probe_health(health_url=health_url, timeout_seconds=probe_timeout_seconds)
         if healthy:
+            _set_last_startup_api_wake_status(
+                healthy=True,
+                recovered=probe_attempt > 1,
+                probe_attempts=probe_attempt,
+                local_runtime=local_runtime,
+            )
             if probe_attempt == 1:
                 mdc.write_line(f"Startup API health probe succeeded ({detail}).")
             else:
@@ -360,7 +411,19 @@ def ensure_api_awake_from_env(*, required: bool = True) -> None:
     )
     if required:
         mdc.write_error(message)
+        _set_last_startup_api_wake_status(
+            healthy=False,
+            recovered=False,
+            probe_attempts=probe_attempts,
+            local_runtime=local_runtime,
+        )
         raise RuntimeError(message)
+    _set_last_startup_api_wake_status(
+        healthy=False,
+        recovered=False,
+        probe_attempts=probe_attempts,
+        local_runtime=local_runtime,
+    )
     mdc.write_warning(message)
 
 
