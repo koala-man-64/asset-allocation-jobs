@@ -53,7 +53,9 @@ def request_json(url: str, token: str) -> dict[str, Any]:
 
 
 def download_bytes(url: str, token: str) -> bytes:
-    request = Request(url, headers=api_headers(token))
+    request = Request(url)
+    for key, value in api_headers(token).items():
+        request.add_unredirected_header(key, value)
     with urlopen(request) as response:
         return response.read()
 

@@ -94,6 +94,7 @@ def test_read_release_manifest_extracts_manifest_from_artifact_zip(tmp_path: Pat
 def test_download_bytes_uses_github_api_headers(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_module("scripts/workflows/resolve_release_image_digest.py", "resolve_release_image_digest")
     seen_headers: dict[str, str] = {}
+    seen_unredirected_headers: dict[str, str] = {}
 
     class FakeResponse:
         def __enter__(self) -> "FakeResponse":
@@ -107,18 +108,21 @@ def test_download_bytes_uses_github_api_headers(monkeypatch: pytest.MonkeyPatch)
 
     def fake_urlopen(request):
         seen_headers.update(request.headers)
+        seen_unredirected_headers.update(request.unredirected_hdrs)
         return FakeResponse()
 
     monkeypatch.setattr(module, "urlopen", fake_urlopen)
 
     payload = module.download_bytes("https://github.example/artifacts/11.zip", "test-token")
     normalized_headers = {key.lower(): value for key, value in seen_headers.items()}
+    normalized_unredirected_headers = {key.lower(): value for key, value in seen_unredirected_headers.items()}
 
     assert payload == b"artifact-bytes"
-    assert normalized_headers["accept"] == "application/vnd.github+json"
-    assert normalized_headers["authorization"] == "Bearer test-token"
-    assert normalized_headers["x-github-api-version"] == module.API_VERSION
-    assert normalized_headers["user-agent"] == module.USER_AGENT
+    assert normalized_headers == {}
+    assert normalized_unredirected_headers["accept"] == "application/vnd.github+json"
+    assert normalized_unredirected_headers["authorization"] == "Bearer test-token"
+    assert normalized_unredirected_headers["x-github-api-version"] == module.API_VERSION
+    assert normalized_unredirected_headers["user-agent"] == module.USER_AGENT
 
 
 def test_resolve_release_image_uses_latest_successful_release_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
