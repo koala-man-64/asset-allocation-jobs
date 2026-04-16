@@ -261,12 +261,46 @@ def test_render_and_apply_manifests_renders_env_and_uses_update_or_create(
     assert commands[1][3] == "create"
 
 
+def test_render_and_apply_manifests_fails_on_unresolved_placeholders(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir()
+    rendered_dir = tmp_path / "rendered"
+    (deploy_dir / "job_broken.yaml").write_text(
+        "name: broken-job\nsubscription: ${AZURE_SUBSCRIPTION_ID}\nimage: ${JOB_IMAGE}\n",
+        encoding="utf-8",
+    )
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "manifest_exists", lambda **_: False)
+    monkeypatch.setattr(module.subprocess, "check_call", lambda command: commands.append(list(command)))
+
+    with pytest.raises(SystemExit, match="unresolved template variables: AZURE_SUBSCRIPTION_ID"):
+        module.render_and_apply_manifests(
+            deploy_dir=deploy_dir,
+            rendered_dir=rendered_dir,
+            resource_group="rg",
+            environment={"JOB_IMAGE": "registry/image@sha256:1234"},
+        )
+
+    assert commands == []
+    assert not (rendered_dir / "job_broken.yaml").exists()
+
+
 def test_deploy_prod_workflow_does_not_define_ranking_override_env_vars() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
     assert "RANKING_STRATEGY_NAME" not in workflow_text
     assert "RANKING_START_DATE" not in workflow_text
     assert "RANKING_END_DATE" not in workflow_text
+
+
+def test_deploy_prod_workflow_exports_subscription_id_for_manifest_rendering() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert "AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}" in workflow_text
 
 
 def test_verify_deployed_job_images_detects_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

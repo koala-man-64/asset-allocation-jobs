@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 import core.alpha_vantage_gateway_client as alpha_vantage_gateway_client_module
 from core.alpha_vantage_gateway_client import (
@@ -118,7 +119,17 @@ def test_get_earnings_calendar_csv_calls_calendar_route(monkeypatch):
     assert "horizon=6month" in str(observed["query"])
 
 
-def test_request_retries_after_504_with_extended_backoff(monkeypatch):
+@pytest.mark.parametrize(
+    ("status_code", "detail"),
+    [
+        (502, "bad gateway"),
+        (503, "service unavailable"),
+        (504, "gateway timeout"),
+    ],
+)
+def test_request_retries_after_retryable_gateway_status_with_extended_backoff(
+    monkeypatch, status_code, detail
+):
     counters = {"warmup": 0, "data": 0}
     sleep_calls: list[float] = []
 
@@ -129,7 +140,7 @@ def test_request_retries_after_504_with_extended_backoff(monkeypatch):
         if request.url.path == "/api/providers/alpha-vantage/listing-status":
             counters["data"] += 1
             if counters["data"] == 1:
-                return httpx.Response(504, text="gateway timeout")
+                return httpx.Response(status_code, text=detail)
             return httpx.Response(200, text="symbol,name\nAAPL,Apple\n")
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
@@ -164,7 +175,17 @@ def test_request_retries_after_504_with_extended_backoff(monkeypatch):
     assert sleep_calls == [120.0]
 
 
-def test_request_raises_after_exhausting_504_retry_budget(monkeypatch):
+@pytest.mark.parametrize(
+    ("status_code", "detail"),
+    [
+        (502, "bad gateway"),
+        (503, "service unavailable"),
+        (504, "gateway timeout"),
+    ],
+)
+def test_request_raises_after_exhausting_retryable_gateway_status_budget(
+    monkeypatch, status_code, detail
+):
     counters = {"warmup": 0, "data": 0}
     sleep_calls: list[float] = []
 
@@ -174,7 +195,7 @@ def test_request_raises_after_exhausting_504_retry_budget(monkeypatch):
             return httpx.Response(200, text="ok")
         if request.url.path == "/api/providers/alpha-vantage/listing-status":
             counters["data"] += 1
-            return httpx.Response(504, text="gateway timeout")
+            return httpx.Response(status_code, text=detail)
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
@@ -201,11 +222,11 @@ def test_request_raises_after_exhausting_504_retry_budget(monkeypatch):
         try:
             client.get_listing_status_csv()
         except AlphaVantageGatewayError as exc:
-            assert exc.status_code == 504
+            assert exc.status_code == status_code
             assert exc.payload == {
                 "path": "/api/providers/alpha-vantage/listing-status",
-                "status_code": 504,
-                "detail": "gateway timeout",
+                "status_code": status_code,
+                "detail": detail,
             }
         else:
             raise AssertionError("Expected AlphaVantageGatewayError after retries are exhausted.")

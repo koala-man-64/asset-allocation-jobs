@@ -689,6 +689,146 @@ def test_main_async_logs_invalid_payload_detail_preview_when_payload_missing(uni
     asyncio.run(run_test())
 
 
+def test_main_async_transient_gateway_errors_do_not_record_invalid_candidates(unique_ticker):
+    symbol = unique_ticker
+    mock_av = MagicMock()
+    mock_av.get_earnings_calendar_csv.return_value = (
+        "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n"
+    )
+
+    transient_error = bronze.AlphaVantageGatewayError(
+        "gateway unavailable",
+        status_code=502,
+        detail="bad gateway",
+        payload={
+            "path": "/api/providers/alpha-vantage/earnings",
+            "status_code": 502,
+            "detail": "bad gateway",
+        },
+    )
+
+    async def run_test():
+        with patch(
+            "tasks.earnings_data.bronze_earnings_data._validate_environment"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.resolve_backfill_start_date",
+            return_value=None,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.AlphaVantageGatewayClient.from_env",
+            return_value=mock_av,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.fetch_and_save_raw",
+            side_effect=transient_error,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.record_invalid_symbol_candidate"
+        ) as mock_record_invalid, patch(
+            "tasks.earnings_data.bronze_earnings_data.clear_invalid_candidate_marker"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data._write_alpha26_earnings_buckets",
+            return_value=(0, None),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data._delete_flat_symbol_blobs",
+            return_value=0,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_warning"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_line"
+        ):
+            mock_list_manager.is_blacklisted.return_value = False
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 1
+        mock_record_invalid.assert_not_called()
+        mock_list_manager.add_to_blacklist.assert_not_called()
+
+    asyncio.run(run_test())
+
+
+def test_main_async_retry_exhausted_transient_gateway_failure_fails_run(unique_ticker):
+    symbol = unique_ticker
+    mock_av = MagicMock()
+    mock_av.get_earnings_calendar_csv.return_value = (
+        "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n"
+    )
+
+    transient_error = bronze.AlphaVantageGatewayError(
+        "gateway unavailable",
+        status_code=503,
+        detail="service unavailable",
+        payload={
+            "path": "/api/providers/alpha-vantage/earnings",
+            "status_code": 503,
+            "detail": "service unavailable",
+        },
+    )
+
+    async def run_test():
+        with patch(
+            "tasks.earnings_data.bronze_earnings_data._validate_environment"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.resolve_backfill_start_date",
+            return_value=None,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.AlphaVantageGatewayClient.from_env",
+            return_value=mock_av,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.fetch_and_save_raw",
+            side_effect=transient_error,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.record_invalid_symbol_candidate"
+        ) as mock_record_invalid, patch(
+            "tasks.earnings_data.bronze_earnings_data.clear_invalid_candidate_marker"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data._write_alpha26_earnings_buckets",
+            return_value=(0, None),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data._delete_flat_symbol_blobs",
+            return_value=0,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_warning"
+        ) as mock_write_warning, patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_line"
+        ):
+            mock_list_manager.is_blacklisted.return_value = False
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 1
+        mock_record_invalid.assert_not_called()
+        warning_messages = [str(call.args[0]) for call in mock_write_warning.call_args_list if call.args]
+        assert any("Bronze AV earnings failure summary:" in message for message in warning_messages)
+        assert any("status=503" in message for message in warning_messages)
+
+    asyncio.run(run_test())
+
+
 def test_failure_bucket_key_includes_status_and_path():
     exc = bronze.AlphaVantageGatewayError(
         "gateway unavailable",
