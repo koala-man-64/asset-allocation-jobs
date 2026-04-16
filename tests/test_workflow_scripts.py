@@ -261,6 +261,51 @@ def test_render_and_apply_manifests_renders_env_and_uses_update_or_create(
     assert commands[1][3] == "create"
 
 
+def test_render_and_apply_manifests_supplies_repo_tag_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir()
+    rendered_dir = tmp_path / "rendered"
+    (deploy_dir / "job_tagged.yaml").write_text(
+        "\n".join(
+            [
+                "name: tagged-job",
+                "tags:",
+                "  owner: ${RESOURCE_TAG_OWNER}",
+                "  cost-center: ${RESOURCE_TAG_COST_CENTER}",
+                "  workload: ${RESOURCE_TAG_WORKLOAD}",
+                "  environment: ${RESOURCE_TAG_ENVIRONMENT}",
+                "image: ${JOB_IMAGE}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "manifest_exists", lambda **_: False)
+    monkeypatch.setattr(module.subprocess, "check_call", lambda command: commands.append(list(command)))
+
+    module.render_and_apply_manifests(
+        deploy_dir=deploy_dir,
+        rendered_dir=rendered_dir,
+        resource_group="rg",
+        environment={
+            "JOB_IMAGE": "registry/image@sha256:1234",
+            "GITHUB_REPOSITORY_OWNER": "koala-man-64",
+        },
+    )
+
+    rendered = (rendered_dir / "job_tagged.yaml").read_text(encoding="utf-8")
+    assert "owner: koala-man-64" in rendered
+    assert "cost-center: asset-allocation" in rendered
+    assert "workload: asset-allocation-jobs" in rendered
+    assert "environment: prod" in rendered
+    assert commands[0][3] == "create"
+
+
 def test_render_and_apply_manifests_fails_on_unresolved_placeholders(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -79,6 +79,14 @@ GitHub variables:
 - `SERVICE_ACCOUNT_NAME`
 - container, folder, job, and freshness variables from `docs/ops/env-contract.csv`
 
+Deployment manifest tags are repo-owned defaults, not GitHub variables.
+
+- `RESOURCE_TAG_OWNER` defaults to the GitHub repository owner when available, otherwise `asset-allocation`
+- `RESOURCE_TAG_COST_CENTER` defaults to `asset-allocation`
+- `RESOURCE_TAG_WORKLOAD` defaults to `asset-allocation-jobs`
+- `RESOURCE_TAG_ENVIRONMENT` defaults to `prod`
+- Export explicit values only when you need to override those defaults
+
 ## Deployment Steps
 
 1. Publish the contracts repo first and pin the version consumed here.

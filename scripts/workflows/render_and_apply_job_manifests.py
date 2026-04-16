@@ -8,6 +8,11 @@ import subprocess
 
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
+DEFAULT_REPOSITORY_TAGS = {
+    "RESOURCE_TAG_COST_CENTER": "asset-allocation",
+    "RESOURCE_TAG_WORKLOAD": "asset-allocation-jobs",
+    "RESOURCE_TAG_ENVIRONMENT": "prod",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +35,22 @@ def render_manifest(template_text: str, environment: dict[str, str]) -> str:
     for key, value in environment.items():
         rendered = rendered.replace("${" + key + "}", value)
     return rendered
+
+
+def render_environment(environment: dict[str, str]) -> dict[str, str]:
+    resolved = dict(environment)
+    for key, value in DEFAULT_REPOSITORY_TAGS.items():
+        if not resolved.get(key):
+            resolved[key] = value
+
+    if not resolved.get("RESOURCE_TAG_OWNER"):
+        owner = resolved.get("GITHUB_REPOSITORY_OWNER", "")
+        if not owner:
+            repository = resolved.get("GITHUB_REPOSITORY", "")
+            owner = repository.partition("/")[0]
+        resolved["RESOURCE_TAG_OWNER"] = owner or "asset-allocation"
+
+    return resolved
 
 
 def unresolved_placeholders(text: str) -> list[str]:
@@ -67,9 +88,10 @@ def manifest_exists(*, job_name: str, resource_group: str) -> bool:
 
 
 def render_and_apply_manifests(*, deploy_dir: Path, rendered_dir: Path, resource_group: str, environment: dict[str, str]) -> None:
+    resolved_environment = render_environment(environment)
     rendered_dir.mkdir(parents=True, exist_ok=True)
     for manifest in sorted(deploy_dir.glob("job_*.yaml")):
-        rendered = render_manifest(manifest.read_text(encoding="utf-8"), environment)
+        rendered = render_manifest(manifest.read_text(encoding="utf-8"), resolved_environment)
         ensure_manifest_fully_rendered(manifest_path=manifest, rendered_text=rendered)
         rendered_path = rendered_dir / manifest.name
         rendered_path.write_text(rendered, encoding="utf-8")
