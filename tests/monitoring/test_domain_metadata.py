@@ -770,9 +770,31 @@ def test_collect_domain_metadata_falls_back_to_bucket_artifacts_for_gold_market(
     monkeypatch.setattr(
         "monitoring.domain_metadata.domain_artifacts.load_bucket_artifact",
         lambda *, layer, domain, bucket, client=None, sub_domain=None: (
-            {"symbolCount": 4}
+            {
+                "symbolCount": 4,
+                "columns": ["date", "symbol", "close", "return_1d"],
+                "columnCount": 4,
+                "dateRange": {
+                    "min": "2026-01-02T00:00:00+00:00",
+                    "max": "2026-02-03T00:00:00+00:00",
+                    "column": "date",
+                    "source": "artifact",
+                },
+                "updatedAt": "2026-03-15T00:00:00+00:00",
+            }
             if bucket == "A"
-            else {"symbolCount": 6}
+            else {
+                "symbolCount": 6,
+                "columns": ["date", "symbol", "close", "volume"],
+                "columnCount": 4,
+                "dateRange": {
+                    "min": "2026-02-04T00:00:00+00:00",
+                    "max": "2026-03-05T00:00:00+00:00",
+                    "column": "date",
+                    "source": "artifact",
+                },
+                "updatedAt": "2026-03-16T00:00:00+00:00",
+            }
             if bucket == "B"
             else None
         ),
@@ -782,7 +804,18 @@ def test_collect_domain_metadata_falls_back_to_bucket_artifacts_for_gold_market(
 
     assert payload["fileCount"] == 2
     assert payload["symbolCount"] == 10
+    assert payload["columns"] == ["date", "symbol", "close", "return_1d", "volume"]
+    assert payload["columnCount"] == 5
+    assert payload["dateRange"] == {
+        "min": "2026-01-02T00:00:00+00:00",
+        "max": "2026-03-05T00:00:00+00:00",
+        "column": "date",
+        "source": "artifact",
+    }
+    assert payload["computedAt"] == "2026-03-16T00:00:00+00:00"
+    assert payload["metadataSource"] == "artifact"
     assert any("symbol count derived from bucket artifacts" in warning for warning in payload["warnings"])
+    assert any("columns reconstructed from bucket artifacts" in warning for warning in payload["warnings"])
 
 
 def test_collect_domain_metadata_prefers_writer_artifact(monkeypatch) -> None:

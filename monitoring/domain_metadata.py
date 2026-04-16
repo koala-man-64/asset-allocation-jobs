@@ -310,6 +310,67 @@ def _artifact_domain_metadata_payload(
     )
 
 
+def _domain_artifact_date_column(domain_key: str) -> Optional[str]:
+    normalized_domain = _normalize_key(domain_key)
+    if normalized_domain == "price-target":
+        return "obs_date"
+    if normalized_domain in {"market", "finance", "earnings"}:
+        return "date"
+    return None
+
+
+def _bucket_artifact_domain_metadata_payload(
+    *,
+    layer_key: str,
+    domain_key: str,
+    container: str,
+    symbol_count_override: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    normalized_layer = _normalize_key(layer_key)
+    normalized_domain = _normalize_key(domain_key)
+    if normalized_layer != "gold":
+        return None
+    if normalized_domain not in {"market", "finance", "earnings", "price-target"}:
+        return None
+
+    bucket_payloads: List[Dict[str, Any]] = []
+    latest_artifact_dt: Optional[datetime] = None
+    for bucket in bronze_bucketing.ALPHABET_BUCKETS:
+        payload = domain_artifacts.load_bucket_artifact(
+            layer=normalized_layer,
+            domain=normalized_domain,
+            bucket=bucket,
+        )
+        if not isinstance(payload, dict):
+            continue
+        bucket_payloads.append(payload)
+        artifact_dt = _coerce_datetime(payload.get("updatedAt") or payload.get("computedAt"))
+        if artifact_dt is not None and (latest_artifact_dt is None or artifact_dt > latest_artifact_dt):
+            latest_artifact_dt = artifact_dt
+
+    if not bucket_payloads:
+        return None
+
+    summary = domain_artifacts.aggregate_summaries(
+        bucket_payloads,
+        symbol_count_override=symbol_count_override,
+        date_column=_domain_artifact_date_column(normalized_domain),
+    )
+    fallback_artifact = {
+        "updatedAt": _to_iso_datetime(latest_artifact_dt) or _utc_now_iso(),
+        "columns": summary.get("columns") or [],
+        "columnCount": summary.get("columnCount"),
+        "dateRange": summary.get("dateRange"),
+        "artifactPath": None,
+    }
+    return build_domain_metadata_snapshot_metadata_from_artifact(
+        layer=normalized_layer,
+        domain=normalized_domain,
+        artifact=fallback_artifact,
+        container=container,
+    )
+
+
 def _extract_ticker_from_blob_name(layer: LayerKey, domain: DomainKey, blob_name: str) -> Optional[str]:
     layer_key = _normalize_key(layer)
     domain_key = _normalize_key(domain)
@@ -1015,23 +1076,50 @@ def collect_domain_metadata(*, layer: str, domain: str, force_refresh: bool = Fa
                     f"{layer_key.title()} blob listing unavailable for prefix={prefix}; symbol count set to unknown."
                 )
 
+        bucket_artifact_payload = None
+        if layer_key == "gold" and isinstance(files, int) and files > 0:
+            bucket_artifact_payload = _bucket_artifact_domain_metadata_payload(
+                layer_key=layer_key,
+                domain_key=domain_key,
+                container=container,
+                symbol_count_override=symbol_count,
+            )
+            if bucket_artifact_payload is not None:
+                warnings.append("Root domain metadata artifact missing; columns reconstructed from bucket artifacts.")
+
         payload = {
             "layer": layer_key,
             "domain": domain_key,
             "container": container,
             "type": "blob",
             "prefix": prefix,
-            "computedAt": computed_at,
+            "computedAt": (
+                bucket_artifact_payload.get("computedAt") if isinstance(bucket_artifact_payload, dict) else None
+            )
+            or computed_at,
             "folderLastModified": folder_last_modified,
             "symbolCount": symbol_count,
-            "columns": [],
-            "columnCount": None,
+            "columns": (
+                list(bucket_artifact_payload.get("columns") or [])
+                if isinstance(bucket_artifact_payload, dict)
+                else []
+            ),
+            "columnCount": (
+                bucket_artifact_payload.get("columnCount") if isinstance(bucket_artifact_payload, dict) else None
+            ),
             "financeSubfolderSymbolCounts": finance_subfolder_symbol_counts,
             "blacklistedSymbolCount": blacklisted_symbol_count,
             "fileCount": files,
             "totalBytes": total_bytes,
-            "metadataPath": None,
-            "metadataSource": "scan",
+            "metadataPath": (
+                bucket_artifact_payload.get("metadataPath") if isinstance(bucket_artifact_payload, dict) else None
+            ),
+            "metadataSource": (
+                bucket_artifact_payload.get("metadataSource") if isinstance(bucket_artifact_payload, dict) else "scan"
+            ),
+            "dateRange": (
+                bucket_artifact_payload.get("dateRange") if isinstance(bucket_artifact_payload, dict) else None
+            ),
             "warnings": warnings,
         }
         _cache_domain_metadata(layer_key, domain_key, payload)
