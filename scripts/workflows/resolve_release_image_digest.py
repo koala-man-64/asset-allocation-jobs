@@ -53,13 +53,7 @@ def request_json(url: str, token: str) -> dict[str, Any]:
 
 
 def download_bytes(url: str, token: str) -> bytes:
-    headers = {
-        "Accept": "application/octet-stream",
-        "Authorization": f"Bearer {token}",
-        "User-Agent": USER_AGENT,
-        "X-GitHub-Api-Version": API_VERSION,
-    }
-    request = Request(url, headers=headers)
+    request = Request(url, headers=api_headers(token))
     with urlopen(request) as response:
         return response.read()
 
