@@ -79,6 +79,21 @@ def _capture_log_messages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return messages
 
 
+def _transient_postgres_sync_failure(
+    *,
+    stage: str = "verify_write_target",
+    category: str = "read_only_transaction",
+    error_class: str = "PostgresWriteTargetUnavailableError",
+    message: str = "Gold Postgres sync failed",
+) -> PostgresError:
+    failure = PostgresError(message)
+    setattr(failure, "failure_stage", stage)
+    setattr(failure, "failure_category", category)
+    setattr(failure, "failure_error_class", error_class)
+    setattr(failure, "failure_transient", True)
+    return failure
+
+
 @pytest.fixture(autouse=True)
 def _install_fake_gold_market_staging(monkeypatch: pytest.MonkeyPatch) -> None:
     staged_chunks: dict[str, pd.DataFrame] = {}
@@ -791,6 +806,74 @@ def test_run_alpha26_market_gold_blocks_watermark_when_postgres_sync_fails(monke
     assert index_path is None
     assert watermarks["bucket::A"]["silver_last_commit"] == 90.0
     assert written_paths == ["market/buckets/A"]
+
+
+def test_run_alpha26_market_gold_defers_transient_postgres_sync_failures(monkeypatch):
+    watermarks = {"bucket::A": {"silver_last_commit": 90.0}}
+    written_paths: list[str] = []
+    messages = _capture_log_messages(monkeypatch)
+
+    monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", ["A"])
+    monkeypatch.setattr(gold.layer_bucketing, "load_layer_symbol_index", lambda **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(gold.layer_bucketing, "write_layer_symbol_index", lambda **_kwargs: "index")
+    monkeypatch.setattr(gold, "resolve_postgres_dsn", lambda: "postgresql://test")
+    monkeypatch.setattr(gold, "load_domain_sync_state", lambda *_args, **_kwargs: {})
+
+    def _fake_last_commit(_container: str, path: str):
+        if path == DataPaths.get_silver_market_bucket_path("A"):
+            return 100.0
+        return None
+
+    monkeypatch.setattr(delta_core_module, "get_delta_last_commit", _fake_last_commit)
+    monkeypatch.setattr(delta_core_module, "load_delta", lambda *_args, **_kwargs: _silver_bucket_df("AAPL"))
+    monkeypatch.setattr(
+        gold,
+        "compute_features",
+        lambda df: _gold_feature_df(str(df["symbol"].iloc[0]).strip().upper()),
+    )
+    monkeypatch.setattr(
+        delta_core_module,
+        "store_delta",
+        lambda _df, _container, path, **_kwargs: written_paths.append(str(path)),
+    )
+    monkeypatch.setattr(
+        gold,
+        "sync_gold_bucket",
+        lambda **_kwargs: (_ for _ in ()).throw(_transient_postgres_sync_failure()),
+    )
+
+    run_result = gold._run_alpha26_market_gold(
+        silver_container="silver",
+        gold_container="gold",
+        backfill_start_iso=None,
+        watermarks=watermarks,
+    )
+    (
+        processed,
+        _skipped_unchanged,
+        _skipped_missing_source,
+        failed,
+        watermarks_dirty,
+        _alpha26_symbols,
+        index_path,
+    ) = run_result
+
+    assert processed == 0
+    assert failed == 0
+    assert watermarks_dirty is False
+    assert index_path is None
+    assert run_result.retry_pending_buckets == 1
+    assert watermarks["bucket::A"]["silver_last_commit"] == 90.0
+    assert written_paths == ["market/buckets/A"]
+    assert any(
+        "status=retry_pending bucket=A reason=transient_write_failure" in message
+        for message in messages
+    )
+    assert any(
+        "artifact_publication_status layer=gold domain=market status=retry_pending" in message
+        and "deferred_buckets=1" in message
+        for message in messages
+    )
 
 
 def test_run_alpha26_market_gold_blocks_watermark_on_checkpoint_failure(monkeypatch):

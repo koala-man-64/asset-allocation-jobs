@@ -385,6 +385,15 @@ def test_sync_gold_bucket_detects_read_only_session_before_delete(monkeypatch: p
     )
 
 
+def test_classify_sync_failure_treats_connection_lost_as_transient() -> None:
+    failure = sync.classify_sync_failure(stage="stage_copy", exc=RuntimeError("the connection is lost"))
+
+    assert failure.stage == "stage_copy"
+    assert failure.category == "connection_interrupted"
+    assert failure.transient is True
+    assert failure.error_class == "RuntimeError"
+
+
 def test_sync_gold_bucket_chunks_retries_with_callable_frame_supplier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

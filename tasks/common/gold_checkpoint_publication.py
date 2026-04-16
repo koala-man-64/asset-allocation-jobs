@@ -23,6 +23,7 @@ class GoldPublicationFinalizationResult:
     failed_symbols: int
     failed_buckets: int
     failed_finalization: int
+    deferred_buckets: int
     failure_mode: str
     publication_reason: str
     index_path: Optional[str]
@@ -66,11 +67,15 @@ def default_publication_reason(
     failed_symbols: int,
     failed_buckets: int,
     failed_finalization: int,
+    deferred_buckets: int = 0,
 ) -> str:
     symbol_failure_count = _coerce_counter(failed_symbols)
     bucket_failure_count = _coerce_counter(failed_buckets)
     finalization_failure_count = _coerce_counter(failed_finalization)
+    deferred_bucket_count = _coerce_counter(deferred_buckets)
     if symbol_failure_count == 0 and bucket_failure_count == 0 and finalization_failure_count == 0:
+        if deferred_bucket_count > 0:
+            return "retry_pending"
         return "none"
     if symbol_failure_count > 0 and bucket_failure_count == 0 and finalization_failure_count == 0:
         return "failed_symbols"
@@ -207,6 +212,7 @@ def finalize_gold_publication(
     failed_symbols: int,
     failed_buckets: int,
     failed_finalization: int = 0,
+    deferred_buckets: int = 0,
     publication_reason: Optional[str] = None,
     index_path: Optional[str] = None,
     job_run_id: Optional[str] = None,
@@ -217,9 +223,15 @@ def finalize_gold_publication(
     symbol_failure_count = _coerce_counter(failed_symbols)
     bucket_failure_count = _coerce_counter(failed_buckets)
     finalization_failure_count = _coerce_counter(failed_finalization)
+    deferred_bucket_count = _coerce_counter(deferred_buckets)
     domain_artifact_path: Optional[str] = None
 
-    if symbol_failure_count == 0 and bucket_failure_count == 0 and finalization_failure_count == 0:
+    if (
+        symbol_failure_count == 0
+        and bucket_failure_count == 0
+        and finalization_failure_count == 0
+        and deferred_bucket_count == 0
+    ):
         if index_path is None:
             try:
                 index_path = layer_bucketing.write_layer_symbol_index(
@@ -283,18 +295,30 @@ def finalize_gold_publication(
             failed_symbols=symbol_failure_count,
             failed_buckets=bucket_failure_count,
             failed_finalization=finalization_failure_count,
+            deferred_buckets=deferred_bucket_count,
         )
     if clean_reason is None:
         clean_reason = "none"
 
-    if failed_total == 0:
+    if failed_total == 0 and deferred_bucket_count == 0:
         mdc.write_line(
             "artifact_publication_status "
             f"layer=gold domain={clean_domain} status=published reason={clean_reason} "
             f"failure_mode={failure_mode} buckets_ok={int(processed)} failed=0 "
             "failed_symbols=0 failed_buckets=0 failed_finalization=0 "
             f"processed={int(processed)} skipped_unchanged={int(skipped_unchanged)} "
-            f"skipped_missing_source={int(skipped_missing_source)}"
+            f"skipped_missing_source={int(skipped_missing_source)} "
+            f"deferred_buckets={deferred_bucket_count}"
+        )
+    elif failed_total == 0:
+        mdc.write_line(
+            "artifact_publication_status "
+            f"layer=gold domain={clean_domain} status=retry_pending reason={clean_reason} "
+            f"failure_mode={failure_mode} failed=0 failed_symbols=0 failed_buckets=0 "
+            "failed_finalization=0 "
+            f"processed={int(processed)} skipped_unchanged={int(skipped_unchanged)} "
+            f"skipped_missing_source={int(skipped_missing_source)} "
+            f"deferred_buckets={deferred_bucket_count}"
         )
     else:
         mdc.write_line(
@@ -304,7 +328,8 @@ def finalize_gold_publication(
             f"failed_symbols={symbol_failure_count} failed_buckets={bucket_failure_count} "
             f"failed_finalization={finalization_failure_count} processed={int(processed)} "
             f"skipped_unchanged={int(skipped_unchanged)} "
-            f"skipped_missing_source={int(skipped_missing_source)}"
+            f"skipped_missing_source={int(skipped_missing_source)} "
+            f"deferred_buckets={deferred_bucket_count}"
         )
 
     return GoldPublicationFinalizationResult(
@@ -312,6 +337,7 @@ def finalize_gold_publication(
         failed_symbols=symbol_failure_count,
         failed_buckets=bucket_failure_count,
         failed_finalization=finalization_failure_count,
+        deferred_buckets=deferred_bucket_count,
         failure_mode=failure_mode,
         publication_reason=clean_reason,
         index_path=index_path,

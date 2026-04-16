@@ -986,7 +986,14 @@ def classify_sync_failure(*, stage: str, exc: Exception) -> GoldSyncFailureDetai
     elif "administrator command" in haystack:
         category = "administrator_termination"
         transient = True
-    elif "timeout" in haystack or "connection refused" in haystack or "connection reset" in haystack:
+    elif (
+        "timeout" in haystack
+        or "connection refused" in haystack
+        or "connection reset" in haystack
+        or "connection is lost" in haystack
+        or "the connection is lost" in haystack
+        or "connection lost" in haystack
+    ):
         category = "connection_interrupted"
         transient = True
     elif "schema drift" in haystack or "missing columns" in haystack or "does not exist" in haystack:

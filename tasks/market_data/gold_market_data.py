@@ -19,7 +19,7 @@ from typing import Any, Iterator, Optional
 
 import numpy as np
 import pandas as pd
-from core.postgres import connect
+from core.postgres import PostgresError, connect
 
 from tasks.common.watermarks import load_watermarks, save_watermarks
 from tasks.common.backfill import apply_backfill_start_cutoff, get_backfill_range
@@ -74,6 +74,38 @@ class BucketChunkWriteResult:
     columns: int
     memory_mb: float
     summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class GoldMarketRunResult:
+    processed: int
+    skipped_unchanged: int
+    skipped_missing_source: int
+    failed: int
+    watermarks_dirty: bool
+    alpha26_symbols: int
+    index_path: Optional[str]
+    retry_pending_buckets: int = 0
+
+    def _tuple(self) -> tuple[int, int, int, int, bool, int, Optional[str]]:
+        return (
+            self.processed,
+            self.skipped_unchanged,
+            self.skipped_missing_source,
+            self.failed,
+            self.watermarks_dirty,
+            self.alpha26_symbols,
+            self.index_path,
+        )
+
+    def __iter__(self):
+        return iter(self._tuple())
+
+    def __len__(self) -> int:
+        return len(self._tuple())
+
+    def __getitem__(self, item):
+        return self._tuple()[item]
 
 
 @dataclass
@@ -185,6 +217,15 @@ def _coerce_datetime(series: pd.Series) -> pd.Series:
     if hasattr(value.dt, "tz_convert") and value.dt.tz is not None:
         value = value.dt.tz_convert(None)
     return value
+
+
+def _is_retry_pending_postgres_sync_failure(exc: Exception) -> bool:
+    return isinstance(exc, PostgresError) and bool(getattr(exc, "failure_transient", False))
+
+
+def _postgres_sync_failure_field(exc: Exception, name: str) -> str:
+    value = str(getattr(exc, name, "") or "").strip().lower()
+    return value or "unknown"
 
 
 def _safe_div(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -1145,7 +1186,7 @@ def _run_alpha26_market_gold(
     gold_container: str,
     backfill_start_iso: Optional[str],
     watermarks: dict,
-) -> tuple[int, int, int, int, bool, int, Optional[str]]:
+) -> GoldMarketRunResult:
     """Build and write bucketed gold market tables from silver alpha26 inputs.
 
     Processing model:
@@ -1161,6 +1202,7 @@ def _run_alpha26_market_gold(
     - watermark dirty flag
     - indexed symbol count
     - symbol index path (if available)
+    - retry-pending bucket count
     """
 
     from core import core as mdc
@@ -1174,6 +1216,7 @@ def _run_alpha26_market_gold(
     failed_symbols = 0
     failed_buckets = 0
     failed_finalization = 0
+    retry_pending_buckets = 0
     processed = 0
     skipped_unchanged = 0
     skipped_missing_source = 0
@@ -1632,32 +1675,68 @@ def _run_alpha26_market_gold(
                 failed_symbols=bucket_symbol_failures,
             )
         except Exception as exc:
-            failed += 1
-            failed_buckets += 1
-            mdc.write_error(f"Gold market alpha26 write failed bucket={bucket}: {exc}")
-            mdc.write_line(
-                f"layer_handoff_status transition=silver_to_gold status=failed bucket={bucket} "
-                f"reason=write_failure symbols_in={len(bucket_symbol_to_bucket) + bucket_symbol_failures} "
-                f"symbols_out=0 failures={bucket_symbol_failures + 1}"
-            )
-            mdc.write_line(
-                f"watermark_update_status layer=gold domain=market bucket={bucket} status=blocked reason=write_failure"
-            )
-            bucket_results.append(
-                BucketExecutionResult(
-                    bucket=bucket,
-                    status="failed_write",
-                    symbols_written=0,
-                    watermark_updated=False,
+            if _is_retry_pending_postgres_sync_failure(exc):
+                retry_pending_buckets += 1
+                failure_stage = _postgres_sync_failure_field(exc, "failure_stage")
+                failure_category = _postgres_sync_failure_field(exc, "failure_category")
+                failure_error_class = str(getattr(exc, "failure_error_class", "") or type(exc).__name__).strip()
+                mdc.write_warning(
+                    "Gold market alpha26 write retry pending "
+                    f"bucket={bucket} failure_stage={failure_stage} "
+                    f"failure_category={failure_category} error_class={failure_error_class}: {exc}"
                 )
-            )
-            _log_bucket_progress(
-                bucket=bucket,
-                stage="write_failed",
-                output_symbols=len(bucket_symbol_to_bucket),
-                output_rows=bucket_output_rows,
-                failed_symbols=bucket_symbol_failures,
-            )
+                mdc.write_line(
+                    f"layer_handoff_status transition=silver_to_gold status=retry_pending bucket={bucket} "
+                    f"reason=transient_write_failure symbols_in={len(bucket_symbol_to_bucket) + bucket_symbol_failures} "
+                    f"symbols_out=0 failures={bucket_symbol_failures} failure_stage={failure_stage} "
+                    f"failure_category={failure_category}"
+                )
+                mdc.write_line(
+                    f"watermark_update_status layer=gold domain=market bucket={bucket} "
+                    "status=blocked reason=write_retry_pending"
+                )
+                bucket_results.append(
+                    BucketExecutionResult(
+                        bucket=bucket,
+                        status="retry_pending",
+                        symbols_written=0,
+                        watermark_updated=False,
+                    )
+                )
+                _log_bucket_progress(
+                    bucket=bucket,
+                    stage="write_retry_pending",
+                    output_symbols=len(bucket_symbol_to_bucket),
+                    output_rows=bucket_output_rows,
+                    failed_symbols=bucket_symbol_failures,
+                )
+            else:
+                failed += 1
+                failed_buckets += 1
+                mdc.write_error(f"Gold market alpha26 write failed bucket={bucket}: {exc}")
+                mdc.write_line(
+                    f"layer_handoff_status transition=silver_to_gold status=failed bucket={bucket} "
+                    f"reason=write_failure symbols_in={len(bucket_symbol_to_bucket) + bucket_symbol_failures} "
+                    f"symbols_out=0 failures={bucket_symbol_failures + 1}"
+                )
+                mdc.write_line(
+                    f"watermark_update_status layer=gold domain=market bucket={bucket} status=blocked reason=write_failure"
+                )
+                bucket_results.append(
+                    BucketExecutionResult(
+                        bucket=bucket,
+                        status="failed_write",
+                        symbols_written=0,
+                        watermark_updated=False,
+                    )
+                )
+                _log_bucket_progress(
+                    bucket=bucket,
+                    stage="write_failed",
+                    output_symbols=len(bucket_symbol_to_bucket),
+                    output_rows=bucket_output_rows,
+                    failed_symbols=bucket_symbol_failures,
+                )
         finally:
             if silver_commit is not None:
                 try:
@@ -1672,7 +1751,7 @@ def _run_alpha26_market_gold(
     for result in bucket_results:
         status_counts[result.status] = int(status_counts.get(result.status, 0)) + 1
     publication_reason: Optional[str] = None
-    if failed == 0 and postgres_dsn:
+    if failed == 0 and retry_pending_buckets == 0 and postgres_dsn:
         try:
             _verify_postgres_critical_market_symbols(dsn=postgres_dsn, sync_state=sync_state)
         except Exception as exc:
@@ -1692,6 +1771,7 @@ def _run_alpha26_market_gold(
         failed_symbols=failed_symbols,
         failed_buckets=failed_buckets,
         failed_finalization=failed_finalization,
+        deferred_buckets=retry_pending_buckets,
         publication_reason=publication_reason,
         index_path=index_path,
         job_run_id=run_id,
@@ -1701,17 +1781,19 @@ def _run_alpha26_market_gold(
         "layer_handoff_status transition=silver_to_gold status=complete "
         f"bucket_statuses={status_counts} failed={finalization.failed} "
         f"failed_symbols={finalization.failed_symbols} failed_buckets={finalization.failed_buckets} "
-        f"failed_finalization={finalization.failed_finalization}"
+        f"failed_finalization={finalization.failed_finalization} "
+        f"deferred_buckets={finalization.deferred_buckets}"
     )
 
-    return (
-        processed,
-        skipped_unchanged,
-        skipped_missing_source,
-        finalization.failed,
-        watermarks_dirty,
-        len(symbol_to_bucket),
-        finalization.index_path,
+    return GoldMarketRunResult(
+        processed=processed,
+        skipped_unchanged=skipped_unchanged,
+        skipped_missing_source=skipped_missing_source,
+        failed=finalization.failed,
+        watermarks_dirty=watermarks_dirty,
+        alpha26_symbols=len(symbol_to_bucket),
+        index_path=finalization.index_path,
+        retry_pending_buckets=finalization.deferred_buckets,
     )
 
 
@@ -1733,6 +1815,12 @@ def main() -> int:
 
     # Watermarks make bucket processing incremental and idempotent.
     watermarks = load_watermarks("gold_market_features")
+    run_result = _run_alpha26_market_gold(
+        silver_container=job_cfg.silver_container,
+        gold_container=job_cfg.gold_container,
+        backfill_start_iso=backfill_start_iso,
+        watermarks=watermarks,
+    )
     (
         processed,
         skipped_unchanged,
@@ -1741,17 +1829,13 @@ def main() -> int:
         watermarks_dirty,
         alpha26_symbols,
         alpha26_index_path,
-    ) = _run_alpha26_market_gold(
-        silver_container=job_cfg.silver_container,
-        gold_container=job_cfg.gold_container,
-        backfill_start_iso=backfill_start_iso,
-        watermarks=watermarks,
-    )
+    ) = run_result
+    retry_pending_buckets = int(getattr(run_result, "retry_pending_buckets", 0) or 0)
 
     reconciliation_orphans = 0
     reconciliation_deleted_blobs = 0
     reconciliation_failed = 0
-    if failed == 0:
+    if failed == 0 and retry_pending_buckets == 0:
         try:
             reconciliation_orphans, reconciliation_deleted_blobs = _run_market_reconciliation(
                 silver_container=job_cfg.silver_container,
@@ -1764,6 +1848,10 @@ def main() -> int:
                 "reconciliation_result layer=gold domain=market "
                 "status=failed orphan_count=unknown deleted_blobs=unknown cutoff_rows_dropped=unknown"
             )
+    elif retry_pending_buckets > 0:
+        mdc.write_warning(
+            f"Skipping gold market reconciliation: retry_pending_buckets={retry_pending_buckets}"
+        )
 
     if watermarks_dirty and reconciliation_failed == 0:
         save_watermarks("gold_market_features", watermarks)
@@ -1774,7 +1862,8 @@ def main() -> int:
         f"processed_buckets={processed} skipped_unchanged={skipped_unchanged} "
         f"skipped_missing_source={skipped_missing_source} symbols={alpha26_symbols} "
         f"index_path={alpha26_index_path or 'unavailable'} reconciled_orphans={reconciliation_orphans} "
-        f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} failed={total_failed}"
+        f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} failed={total_failed} "
+        f"retry_pending_buckets={retry_pending_buckets}"
     )
     return 0 if total_failed == 0 else 1
 
