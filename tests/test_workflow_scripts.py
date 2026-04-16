@@ -74,6 +74,81 @@ def test_write_release_manifest_writes_expected_shape(tmp_path: Path) -> None:
     assert '"contracts": "1.0.0"' in written
 
 
+def test_read_release_manifest_extracts_manifest_from_artifact_zip(tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/resolve_release_image_digest.py", "resolve_release_image_digest")
+    import zipfile
+
+    artifact_path = tmp_path / "test-release-manifest.zip"
+    with zipfile.ZipFile(artifact_path, "w") as archive:
+        archive.writestr(
+            "release-manifest.json",
+            '{"image_digest": "registry/image@sha256:deadbeef", "git_sha": "abc123"}',
+        )
+
+    manifest = module.read_release_manifest(artifact_path.read_bytes())
+
+    assert manifest["image_digest"] == "registry/image@sha256:deadbeef"
+    assert manifest["git_sha"] == "abc123"
+
+
+def test_resolve_release_image_uses_latest_successful_release_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/workflows/resolve_release_image_digest.py", "resolve_release_image_digest")
+
+    def fake_request_json(url: str, token: str) -> dict[str, object]:
+        assert token == "test-token"
+        if "/actions/workflows/release.yml/runs" in url:
+            return {
+                "workflow_runs": [
+                    {"id": 10, "conclusion": "failure", "head_branch": "main"},
+                    {
+                        "id": 11,
+                        "conclusion": "success",
+                        "head_branch": "main",
+                        "head_sha": "def456",
+                        "html_url": "https://github.example/runs/11",
+                    },
+                ]
+            }
+        if "/actions/runs/11/artifacts" in url:
+            return {
+                "artifacts": [
+                    {
+                        "name": "jobs-release",
+                        "expired": False,
+                        "archive_download_url": "https://github.example/artifacts/11.zip",
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected GitHub API request: {url}")
+
+    monkeypatch.setattr(module, "request_json", fake_request_json)
+
+    import zipfile
+    from io import BytesIO
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "release-manifest.json",
+            '{"image_digest": "registry/image@sha256:feedbeef", "git_sha": "abc123"}',
+        )
+    monkeypatch.setattr(module, "download_bytes", lambda url, token: buffer.getvalue())
+
+    outputs = module.resolve_release_image(
+        repo="owner/repo",
+        branch="main",
+        workflow="release.yml",
+        artifact_name="jobs-release",
+        token="test-token",
+    )
+
+    assert outputs["image_digest"] == "registry/image@sha256:feedbeef"
+    assert outputs["image_source"] == "latest-successful-release"
+    assert outputs["release_branch"] == "main"
+    assert outputs["release_git_sha"] == "abc123"
+    assert outputs["release_run_id"] == "11"
+
+
 def test_build_jobs_image_pushes_and_emits_outputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = load_module("scripts/workflows/build_jobs_image.py", "build_jobs_image")
     commands: list[list[str]] = []

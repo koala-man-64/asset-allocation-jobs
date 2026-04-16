@@ -284,7 +284,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 
 - This repo builds one jobs image from `Dockerfile`.
 - `release.yml` produces and publishes that image plus a release manifest describing version alignment.
-- `deploy-prod.yml` deploys that image digest across Azure Container Apps Jobs owned by this repo.
+- `deploy-prod.yml` deploys the latest successful release manifest for the selected branch, or an explicit digest supplied by `deploy_runtime` repository dispatch.
 
 ### Allowed workflows
 
@@ -303,6 +303,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 ### Rollback and readiness
 
 - Rollback is image-based redeploy using previously captured image references rather than ad hoc resource mutation.
+- Manual deploy dispatch resolves the latest successful release artifact; targeted rollback uses `deploy_runtime` repository dispatch with an explicit previous digest.
 - Readiness and diagnosability depend on structured logs, explicit env/config surfaces, workflow gates, storage access, Postgres access where required, and successful control-plane tokenized HTTP access.
 - `tasks/monitoring/check_readiness.py` is part of the runtime readiness surface, but it is not the only operational check that matters.
 

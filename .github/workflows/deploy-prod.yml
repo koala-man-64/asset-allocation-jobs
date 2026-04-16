@@ -3,24 +3,12 @@ run-name: Jobs Deploy Prod / ${{ github.event_name }} / ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
-    inputs:
-      image_digest:
-        description: Full container image reference with digest
-        required: true
-        type: string
-      control_plane_ref:
-        description: Optional control-plane ref for traceability
-        required: false
-        type: string
-      reason:
-        description: Why this rollout is being performed
-        required: false
-        type: string
   repository_dispatch:
     types:
       - deploy_runtime
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -36,8 +24,6 @@ jobs:
       name: prod
     env:
       DISPATCH_IMAGE_DIGEST: ${{ github.event.client_payload.image_digest }}
-      DISPATCH_CONTROL_PLANE_REF: ${{ github.event.client_payload.control_plane_ref }}
-      DISPATCH_REASON: ${{ github.event.client_payload.reason }}
       RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
       ACR_NAME: ${{ vars.ACR_NAME }}
       ACR_PULL_IDENTITY_NAME: ${{ vars.ACR_PULL_IDENTITY_NAME || 'asset-allocation-acr-pull-mi' }}
@@ -82,25 +68,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Resolve rollout inputs
-        id: inputs
+      - name: Resolve rollout image
+        id: image
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          image_digest="${{ inputs.image_digest }}"
-          control_plane_ref="${{ inputs.control_plane_ref }}"
-          reason="${{ inputs.reason }}"
-          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
-            image_digest="${DISPATCH_IMAGE_DIGEST}"
-            control_plane_ref="${DISPATCH_CONTROL_PLANE_REF}"
-            reason="${DISPATCH_REASON}"
+          if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ] && [ -n "${DISPATCH_IMAGE_DIGEST}" ]; then
+            {
+              echo "image_digest=${DISPATCH_IMAGE_DIGEST}"
+              echo "image_source=repository_dispatch"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          : "${image_digest:?image_digest is required}"
-          {
-            echo "image_digest=${image_digest}"
-            echo "control_plane_ref=${control_plane_ref}"
-            echo "reason=${reason}"
-          } >> "$GITHUB_OUTPUT"
+          python scripts/workflows/resolve_release_image_digest.py \
+            --repo "${GITHUB_REPOSITORY}" \
+            --branch "${GITHUB_REF_NAME}" \
+            --workflow "release.yml" \
+            --artifact "jobs-release" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Azure login
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
@@ -135,7 +122,7 @@ jobs:
 
       - name: Render and apply job manifests
         env:
-          JOB_IMAGE: ${{ steps.inputs.outputs.image_digest }}
+          JOB_IMAGE: ${{ steps.image.outputs.image_digest }}
           ACR_PULL_IDENTITY_RESOURCE_ID: ${{ steps.azure.outputs.identity_id }}
           ACR_PULL_IDENTITY_CLIENT_ID: ${{ steps.azure.outputs.identity_client_id }}
           CONTAINER_APPS_ENVIRONMENT_ID: ${{ steps.azure.outputs.environment_id }}
@@ -154,7 +141,7 @@ jobs:
           python scripts/workflows/verify_deployed_job_images.py \
             --rendered-dir artifacts/rendered \
             --resource-group "${RESOURCE_GROUP}" \
-            --expected-image "${{ steps.inputs.outputs.image_digest }}"
+            --expected-image "${{ steps.image.outputs.image_digest }}"
 
       - name: Upload rendered manifests and rollback data
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -172,10 +159,12 @@ jobs:
           {
             echo "## Jobs deploy"
             echo ""
-            echo "- Image: \`${{ steps.inputs.outputs.image_digest }}\`"
-            echo "- Control-plane ref: \`${{ steps.inputs.outputs.control_plane_ref || 'not provided' }}\`"
+            echo "- Image: \`${{ steps.image.outputs.image_digest }}\`"
+            echo "- Image source: \`${{ steps.image.outputs.image_source }}\`"
+            echo "- Release branch: \`${{ steps.image.outputs.release_branch || github.ref_name }}\`"
+            echo "- Release run: \`${{ steps.image.outputs.release_run_id || 'not resolved' }}\`"
+            echo "- Release git SHA: \`${{ steps.image.outputs.release_git_sha || 'not resolved' }}\`"
             echo "- Rendered manifests: \`artifacts/rendered/*\`"
             echo "- Previous job images: \`artifacts/previous-job-images.json\`"
-            echo "- Rollback: rerun this workflow with a previous image digest"
-            echo "- Reason: \`${{ steps.inputs.outputs.reason || 'not provided' }}\`"
+            echo "- Rollback: send a \`deploy_runtime\` repository dispatch with a previous image digest from \`artifacts/previous-job-images.json\`"
           } >> "${GITHUB_STEP_SUMMARY}"

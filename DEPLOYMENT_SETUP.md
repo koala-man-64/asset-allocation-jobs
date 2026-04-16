@@ -38,7 +38,7 @@ Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAll
 ## Operate
 
 - Build exactly one jobs image digest with `release.yml`.
-- Deploy that digest across ACA Jobs with `deploy-prod.yml`.
+- Deploy the latest successful `release.yml` artifact for the selected branch with `deploy-prod.yml`.
 - Run `integration.yml` whenever the control-plane or runtime-common release dispatches their compatibility events, or when validating an explicit dependency ref manually.
 - Use `integration.yml` to pin a released `asset-allocation-contracts` version into repo manifests.
 - Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for ad hoc operator-driven starts after deployment.
@@ -100,7 +100,8 @@ GitHub variables:
 ## Rollback
 
 - Capture the pre-deploy image set from `artifacts/previous-job-images.json`.
-- Roll back by rerunning `.github/workflows/deploy-prod.yml` with the previous known-good image digest.
+- Manual `workflow_dispatch` deploys the latest successful `release.yml` artifact for the selected branch.
+- Roll back to an older image by sending a `deploy_runtime` repository dispatch with the previous known-good image digest from `artifacts/previous-job-images.json`.
 - Re-trigger only the affected jobs after rollback, not the whole stack.
 
 ## Troubleshoot
