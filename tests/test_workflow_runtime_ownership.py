@@ -88,6 +88,13 @@ def test_api_backed_manual_jobs_define_control_plane_env_vars() -> None:
         assert "value: ${ASSET_ALLOCATION_API_SCOPE}" in text, manifest_name
 
 
+def test_platinum_rankings_job_does_not_define_deploy_time_ranking_overrides() -> None:
+    text = (repo_root() / "deploy" / "job_platinum_rankings.yaml").read_text(encoding="utf-8")
+    assert "RANKING_STRATEGY_NAME" not in text
+    assert "RANKING_START_DATE" not in text
+    assert "RANKING_END_DATE" not in text
+
+
 def test_contributor_and_security_docs_reference_live_jobs_assets_only() -> None:
     root = repo_root()
     for path in ("CONTRIBUTING.md", "SECURITY.md"):

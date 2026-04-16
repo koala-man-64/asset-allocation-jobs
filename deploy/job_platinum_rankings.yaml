@@ -43,12 +43,6 @@ properties:
         value: ${ASSET_ALLOCATION_API_SCOPE}
       - name: POSTGRES_DSN
         secretRef: pg-dsn
-      - name: RANKING_STRATEGY_NAME
-        value: ${RANKING_STRATEGY_NAME}
-      - name: RANKING_START_DATE
-        value: ${RANKING_START_DATE}
-      - name: RANKING_END_DATE
-        value: ${RANKING_END_DATE}
       image: ${JOB_IMAGE}
       imageType: ContainerImage
       name: platinum-rankings-job

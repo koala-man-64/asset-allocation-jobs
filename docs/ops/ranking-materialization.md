@@ -64,15 +64,12 @@ Worker entrypoint:
 Relevant environment variables:
 
 - `POSTGRES_DSN`
-- `RANKING_STRATEGY_NAME` optional
-- `RANKING_START_DATE` optional, ISO date
-- `RANKING_END_DATE` optional, ISO date
 
 Behavior:
 
-- If `RANKING_STRATEGY_NAME` is set, only that strategy is materialized.
-- If it is omitted, the worker scans saved strategies and materializes each strategy that references an existing ranking schema.
-- If no date range is provided, the worker derives a best-effort full range from the referenced gold tables.
+- The worker scans saved strategies and materializes each strategy that references an existing ranking schema.
+- The worker derives a best-effort full date range from the referenced gold tables based on whatever data is currently present.
+- The worker does not accept ranking-specific deploy-time environment overrides.
 - Universe configs cannot be deleted while they are still referenced by saved strategies or ranking schemas.
 
 ## Verification

@@ -261,6 +261,14 @@ def test_render_and_apply_manifests_renders_env_and_uses_update_or_create(
     assert commands[1][3] == "create"
 
 
+def test_deploy_prod_workflow_does_not_define_ranking_override_env_vars() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert "RANKING_STRATEGY_NAME" not in workflow_text
+    assert "RANKING_START_DATE" not in workflow_text
+    assert "RANKING_END_DATE" not in workflow_text
+
+
 def test_verify_deployed_job_images_detects_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = load_module("scripts/workflows/verify_deployed_job_images.py", "verify_deployed_job_images")
     rendered_dir = tmp_path / "rendered"

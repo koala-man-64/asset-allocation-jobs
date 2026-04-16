@@ -21,9 +21,6 @@ CONTRACTS_REF,deploy_var,var,deploy_config,true,Contracts ref to validate agains
 CONTROL_PLANE_REPOSITORY,deploy_var,var,deploy_config,true,Sibling control-plane repo slug used by repository_dispatch.
 DEBUG_SYMBOLS,deploy_var,var,deploy_config,true,Optional debug symbols for jobs workflows.
 BACKFILL_START_DATE,deploy_var,var,deploy_config,true,Default backfill start date.
-RANKING_START_DATE,deploy_var,var,deploy_config,true,Optional ranking start date.
-RANKING_END_DATE,deploy_var,var,deploy_config,true,Optional ranking end date.
-RANKING_STRATEGY_NAME,deploy_var,var,deploy_config,true,Optional ranking strategy name.
 BRONZE_MARKET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze market sync.
 BRONZE_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze finance sync.
 BRONZE_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze price-target sync.

@@ -50,9 +50,6 @@ jobs:
       BACKFILL_START_DATE: ${{ vars.BACKFILL_START_DATE }}
       DEBUG_SYMBOLS: ${{ vars.DEBUG_SYMBOLS }}
       JOB_STARTUP_API_CONTAINER_APPS: ${{ vars.JOB_STARTUP_API_CONTAINER_APPS }}
-      RANKING_START_DATE: ${{ vars.RANKING_START_DATE }}
-      RANKING_END_DATE: ${{ vars.RANKING_END_DATE }}
-      RANKING_STRATEGY_NAME: ${{ vars.RANKING_STRATEGY_NAME }}
       SILVER_MARKET_JOB: ${{ vars.SILVER_MARKET_JOB || 'silver-market-job' }}
       SILVER_FINANCE_JOB: ${{ vars.SILVER_FINANCE_JOB || 'silver-finance-job' }}
       SILVER_PRICE_TARGET_JOB: ${{ vars.SILVER_PRICE_TARGET_JOB || 'silver-price-target-job' }}
