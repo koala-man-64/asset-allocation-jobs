@@ -51,6 +51,12 @@ Force seed metadata to overwrite existing curated fields:
 - `GET /api/system/postgres/gold-column-lookup/tables`
 - `GET /api/system/postgres/gold-column-lookup?table=&q=&status=&limit=&offset=`
 
+## Universe Field Mapping
+
+- Jobs-side universe evaluation uses stable public field ids such as `market.close` and `quality.piotroski_f_score`.
+- The warehouse table/column binding for those ids stays local to the jobs runtime and should not be treated as a public contract surface.
+- This lookup catalog remains the source of curated warehouse metadata, but it is separate from the public universe field ids consumed by strategy configuration and preview flows.
+
 ## CI Drift Gates
 
 The following tests enforce lookup metadata quality:

@@ -6,27 +6,34 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from core.postgres import connect, copy_rows
-from core.ranking_engine.contracts import (
+from asset_allocation_runtime_common.foundation.postgres import connect, copy_rows
+from asset_allocation_runtime_common.ranking_engine.contracts import (
     RankingGroup,
     RankingMaterializationSummary,
     RankingPreviewRow,
     RankingSchemaConfig,
     RankingTransform,
 )
-from core.ranking_engine.naming import build_scoped_identifier, slugify_strategy_output_table
-from core.ranking_repository import RankingRepository
-from core.strategy_engine import StrategyConfig, UniverseCondition, UniverseDefinition, UniverseGroup
-from core.strategy_engine import universe as universe_service
-from core.strategy_repository import StrategyRepository
-from core.universe_repository import UniverseRepository
-
+from asset_allocation_runtime_common.ranking_engine.naming import build_scoped_identifier, slugify_strategy_output_table
+from asset_allocation_runtime_common.ranking_repository import RankingRepository
+from asset_allocation_runtime_common.strategy_engine import StrategyConfig, UniverseCondition, UniverseDefinition, UniverseGroup
+from asset_allocation_runtime_common.strategy_engine import universe as universe_service
+from asset_allocation_runtime_common.strategy_repository import StrategyRepository
+from asset_allocation_runtime_common.universe_repository import UniverseRepository
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _UniverseSourceBinding:
+    field: str
+    table: str
+    column: str
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,51 @@ class _ResolvedDateRange:
     previous_watermark: date | None
     noop: bool = False
     reason: str | None = None
+
+
+def _coerce_universe_definition(universe: Any) -> Any:
+    if universe is None:
+        return universe
+    if isinstance(universe, Mapping):
+        return SimpleNamespace(**dict(universe))
+    return universe
+
+
+def _universe_root(universe: Any) -> Any:
+    return _node_attr(universe, "root")
+
+
+def _node_attr(node: Any, name: str, default: Any = None) -> Any:
+    if isinstance(node, Mapping):
+        return node.get(name, default)
+    return getattr(node, name, default)
+
+
+def _node_clauses(node: Any) -> list[Any]:
+    clauses = _node_attr(node, "clauses", [])
+    if clauses is None:
+        return []
+    return list(clauses)
+
+
+def _resolve_universe_source_binding(node: Any) -> _UniverseSourceBinding:
+    field = str(_node_attr(node, "field") or "").strip()
+    if field:
+        binding = universe_service._FIELD_BINDINGS_BY_FIELD.get(field)
+        if binding is None:
+            raise ValueError(f"Unknown universe field '{field}'.")
+        return _UniverseSourceBinding(field=binding.field, table=binding.table, column=binding.column)
+
+    table_name = str(_node_attr(node, "table") or "").strip().lower()
+    column_name = str(_node_attr(node, "column") or "").strip().lower()
+    if not table_name or not column_name:
+        raise ValueError("Universe condition must define either 'field' or 'table'/'column'.")
+    normalized_table = table_name
+    normalized_column = column_name
+    binding = universe_service._FIELD_BINDINGS_BY_SOURCE.get((normalized_table, normalized_column))
+    if binding is not None:
+        return _UniverseSourceBinding(field=binding.field, table=binding.table, column=binding.column)
+    return _UniverseSourceBinding(field=f"{normalized_table}.{normalized_column}", table=normalized_table, column=normalized_column)
 
 
 def preview_strategy_rankings(
@@ -429,8 +481,8 @@ def _compute_rankings_dataframe(
         return pd.DataFrame(columns=["date", "symbol", "score", "rank"])
 
     filtered = merged[
-        _evaluate_universe_mask(merged, resolved_strategy_universe.root)
-        & _evaluate_universe_mask(merged, resolved_ranking_universe.root)
+        _evaluate_universe_mask(merged, _universe_root(resolved_strategy_universe))
+        & _evaluate_universe_mask(merged, _universe_root(resolved_ranking_universe))
     ].copy()
     if filtered.empty:
         return pd.DataFrame(columns=["date", "symbol", "score", "rank"])
@@ -469,14 +521,14 @@ def _compute_rankings_dataframe(
 
 def _resolve_strategy_universe(dsn: str, strategy_config: StrategyConfig) -> UniverseDefinition:
     if strategy_config.universe is not None:
-        return strategy_config.universe
+        return _coerce_universe_definition(strategy_config.universe)
     if not strategy_config.universeConfigName:
         raise ValueError("Strategy config must reference universeConfigName.")
     repo = UniverseRepository(dsn)
     universe = repo.get_universe_config(strategy_config.universeConfigName)
     if not universe:
         raise ValueError(f"Universe config '{strategy_config.universeConfigName}' not found.")
-    return UniverseDefinition.model_validate(universe.get("config") or {})
+    return _coerce_universe_definition(universe.get("config") or {})
 
 
 def _resolve_ranking_universe(dsn: str, ranking_schema: RankingSchemaConfig) -> UniverseDefinition:
@@ -486,7 +538,7 @@ def _resolve_ranking_universe(dsn: str, ranking_schema: RankingSchemaConfig) -> 
     universe = repo.get_universe_config(ranking_schema.universeConfigName)
     if not universe:
         raise ValueError(f"Universe config '{ranking_schema.universeConfigName}' not found.")
-    return UniverseDefinition.model_validate(universe.get("config") or {})
+    return _coerce_universe_definition(universe.get("config") or {})
 
 
 def _collect_required_columns(
@@ -495,19 +547,21 @@ def _collect_required_columns(
     ranking_schema: RankingSchemaConfig,
 ) -> dict[str, set[str]]:
     required: dict[str, set[str]] = {}
-    _collect_universe_columns(strategy_universe.root, required)
-    _collect_universe_columns(ranking_universe.root, required)
+    _collect_universe_columns(_universe_root(strategy_universe), required)
+    _collect_universe_columns(_universe_root(ranking_universe), required)
     for group in ranking_schema.groups:
         for factor in group.factors:
             required.setdefault(factor.table, set()).add(factor.column)
     return required
 
 
-def _collect_universe_columns(node: UniverseGroup | UniverseCondition, required: dict[str, set[str]]) -> None:
-    if isinstance(node, UniverseCondition):
-        required.setdefault(node.table, set()).add(node.column)
+def _collect_universe_columns(node: UniverseGroup | UniverseCondition | Mapping[str, Any] | Any, required: dict[str, set[str]]) -> None:
+    node_kind = _node_attr(node, "kind")
+    if str(node_kind or "").strip().lower() == "condition":
+        binding = _resolve_universe_source_binding(node)
+        required.setdefault(binding.table, set()).add(binding.column)
         return
-    for clause in node.clauses:
+    for clause in _node_clauses(node):
         _collect_universe_columns(clause, required)
 
 
@@ -583,26 +637,27 @@ def _merge_frames(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return merged
 
 
-def _evaluate_universe_mask(df: pd.DataFrame, node: UniverseGroup | UniverseCondition) -> pd.Series:
-    if isinstance(node, UniverseCondition):
-        column_name = f"{node.table}__{node.column}"
+def _evaluate_universe_mask(df: pd.DataFrame, node: UniverseGroup | UniverseCondition | Mapping[str, Any] | Any) -> pd.Series:
+    if str(_node_attr(node, "kind") or "").strip().lower() == "condition":
+        binding = _resolve_universe_source_binding(node)
+        column_name = f"{binding.table}__{binding.column}"
         if column_name not in df.columns:
             return pd.Series(False, index=df.index, dtype="boolean")
         series = df[column_name]
-        operator = node.operator
+        operator = str(_node_attr(node, "operator") or "").strip().lower()
         if operator == "is_null":
             return _finalize_mask(series.isna(), df.index)
         if operator == "is_not_null":
             return _finalize_mask(series.notna(), df.index)
 
         if operator == "in":
-            values = _normalize_comparison_values(series, node.values or [])
+            values = _normalize_comparison_values(series, list(_node_attr(node, "values") or []))
             return _finalize_mask(series.notna() & series.isin(values), df.index)
         if operator == "not_in":
-            values = _normalize_comparison_values(series, node.values or [])
+            values = _normalize_comparison_values(series, list(_node_attr(node, "values") or []))
             return _finalize_mask(series.notna() & ~series.isin(values), df.index)
 
-        comparison_value = _normalize_comparison_value(series, node.value)
+        comparison_value = _normalize_comparison_value(series, _node_attr(node, "value"))
         if operator == "eq":
             return _finalize_mask(series.notna() & series.eq(comparison_value), df.index)
         if operator == "ne":
@@ -617,8 +672,8 @@ def _evaluate_universe_mask(df: pd.DataFrame, node: UniverseGroup | UniverseCond
             return _finalize_mask(series.notna() & series.le(comparison_value), df.index)
         raise ValueError(f"Unsupported universe operator '{operator}'.")
 
-    child_masks = [_evaluate_universe_mask(df, clause) for clause in node.clauses]
-    if node.operator == "and":
+    child_masks = [_evaluate_universe_mask(df, clause) for clause in _node_clauses(node)]
+    if str(_node_attr(node, "operator") or "").strip().lower() == "and":
         result = child_masks[0].copy()
         for mask in child_masks[1:]:
             result &= mask

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -21,30 +22,25 @@ from core.backtest_runtime import (
     _compute_summary,
     validate_backtest_submission,
 )
-from core.ranking_engine.contracts import RankingSchemaConfig
-from core.strategy_engine.contracts import StrategyConfig, UniverseDefinition
-from core.strategy_engine.position_state import PositionState
-from core.strategy_engine import universe as universe_service
-
-
-def _sample_universe() -> UniverseDefinition:
-    return UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "close",
-                        "operator": "gt",
-                        "value": 1,
-                    }
-                ],
-            },
-        }
+from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
+from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
+from asset_allocation_runtime_common.strategy_engine.position_state import PositionState
+from asset_allocation_runtime_common.strategy_engine import universe as universe_service
+def _sample_universe() -> SimpleNamespace:
+    return SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "market.close",
+                    "operator": "gt",
+                    "value": 1,
+                }
+            ],
+        },
     )
 
 

@@ -8,8 +8,8 @@ from typing import Any, Optional, Tuple
 import pandas as pd
 import json
 
-from core import core as mdc
-from core import delta_core
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data import delta_core
 from tasks.finance_data import config as cfg
 from tasks.finance_data.silver_frames import (
     _align_finance_frame_to_contract,
@@ -25,10 +25,10 @@ from tasks.finance_data.silver_parsing import (
     resample_daily_ffill,
 )
 from asset_allocation_contracts.paths import DataPaths
-from core import bronze_bucketing
-from core import domain_artifacts
-from core import layer_bucketing
-from core.finance_contracts import (
+from asset_allocation_runtime_common.market_data import bronze_bucketing
+from asset_allocation_runtime_common.market_data import domain_artifacts
+from asset_allocation_runtime_common.market_data import layer_bucketing
+from asset_allocation_contracts.finance import (
     SILVER_FINANCE_COLUMNS_BY_SUBDOMAIN,
     SILVER_FINANCE_REPORT_TYPE_TO_LAYOUT,
     SILVER_FINANCE_SUBDOMAINS,

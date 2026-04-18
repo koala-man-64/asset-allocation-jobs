@@ -4,7 +4,7 @@ import pandas as pd
 from unittest.mock import patch
 
 from tasks.market_data import silver_market_data as silver
-from core import delta_core
+from asset_allocation_runtime_common.market_data import delta_core
 from asset_allocation_contracts.paths import DataPaths
 
 @pytest.fixture

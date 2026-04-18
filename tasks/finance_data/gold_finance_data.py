@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Sequence, Tuple, Dict, Any, List, Optional
 
@@ -10,17 +11,17 @@ from tasks.common.watermarks import load_watermarks, save_watermarks
 from tasks.common.backfill import apply_backfill_start_cutoff, get_backfill_range
 from tasks.common.delta_write_policy import prepare_delta_write_frame
 from tasks.common.silver_contracts import coerce_to_naive_datetime, normalize_columns_to_snake_case
-from core import domain_artifacts
+from asset_allocation_runtime_common.market_data import domain_artifacts
 from tasks.common import gold_checkpoint_publication
-from core import layer_bucketing
-from core.finance_contracts import SILVER_FINANCE_SUBDOMAINS, VALUATION_FINANCE_COLUMNS
+from asset_allocation_runtime_common.market_data import layer_bucketing
+from asset_allocation_contracts.finance import SILVER_FINANCE_SUBDOMAINS, VALUATION_FINANCE_COLUMNS
 from tasks.common.market_reconciliation import (
     collect_delta_market_symbols,
     collect_delta_silver_finance_symbols,
     enforce_backfill_cutoff_on_bucket_tables,
     purge_orphan_rows_from_bucket_tables,
 )
-from core.gold_sync_contracts import (
+from asset_allocation_runtime_common.market_data.gold_sync_contracts import (
     bucket_sync_is_current,
     load_domain_sync_state,
     resolve_postgres_dsn,
@@ -59,6 +60,16 @@ class GoldFinanceRunResult:
 
 
 _NUMBER_RE = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*([kKmMbBtT])?\s*$")
+
+
+def _gold_finance_job_run_id() -> str:
+    execution_name = str(os.environ.get("CONTAINER_APP_JOB_EXECUTION_NAME") or "").strip()
+    if execution_name:
+        return execution_name
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"gold-finance-job-{stamp}-{os.getpid()}"
+
+
 _REQUIRED_FEATURE_COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
     "revenue": ("total_revenue", "Total Revenue", "Revenue"),
     "gross_profit": ("gross_profit", "Gross Profit"),
@@ -606,8 +617,7 @@ def _load_gold_finance_bucket_template(
     container: str,
     candidate_paths: Sequence[str],
 ) -> tuple[pd.DataFrame, bool]:
-    from core import delta_core
-
+    from asset_allocation_runtime_common.market_data import delta_core
     for path in candidate_paths:
         try:
             df_existing = delta_core.load_delta(container, path)
@@ -620,8 +630,8 @@ def _load_gold_finance_bucket_template(
 
 
 def _run_finance_reconciliation(*, silver_container: str, gold_container: str) -> tuple[int, int]:
-    from core import core as mdc
-    from core import delta_core
+    from asset_allocation_runtime_common.market_data import core as mdc
+    from asset_allocation_runtime_common.market_data import delta_core
     from asset_allocation_contracts.paths import DataPaths
 
     silver_client = mdc.get_storage_client(silver_container)
@@ -707,9 +717,8 @@ def _run_alpha26_finance_gold(
     backfill_start_iso: Optional[str],
     watermarks: dict,
 ) -> GoldFinanceRunResult:
-    from core import core as mdc
-    from core import delta_core
-
+    from asset_allocation_runtime_common.market_data import core as mdc
+    from asset_allocation_runtime_common.market_data import delta_core
     backfill_start = pd.to_datetime(backfill_start_iso).normalize() if backfill_start_iso else None
     processed = 0
     skipped_unchanged = 0
@@ -718,6 +727,7 @@ def _run_alpha26_finance_gold(
     failed_symbols = 0
     failed_buckets = 0
     failed_finalization = 0
+    run_id = _gold_finance_job_run_id()
     watermarks_dirty = False
     symbol_to_bucket = _load_existing_gold_finance_symbol_to_bucket_map()
     postgres_dsn = resolve_postgres_dsn()
@@ -940,6 +950,9 @@ def _run_alpha26_finance_gold(
                     df=write_decision.frame,
                     date_column="date",
                     job_name="gold-finance-job",
+                    job_run_id=run_id,
+                    run_id=run_id,
+                    source_commit=silver_commit,
                 )
             except Exception as exc:
                 mdc.write_warning(f"Gold finance metadata bucket artifact write failed bucket={bucket}: {exc}")
@@ -1075,6 +1088,9 @@ def _run_alpha26_finance_gold(
         failed_buckets=failed_buckets,
         failed_finalization=failed_finalization,
         index_path=index_path,
+        job_run_id=run_id,
+        run_id=run_id,
+        source_commit=silver_commit,
     )
     mdc.write_line(
         "layer_handoff_status transition=silver_to_gold status=complete "
@@ -1110,7 +1126,7 @@ def _run_alpha26_finance_gold(
 
 
 def main() -> int:
-    from core import core as mdc
+    from asset_allocation_runtime_common.market_data import core as mdc
     from tasks.common.job_trigger import get_last_startup_api_wake_status
 
     mdc.log_environment_diagnostics()
@@ -1183,9 +1199,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    from core import core as mdc
+    from asset_allocation_runtime_common.market_data import core as mdc
     from tasks.common.job_entrypoint import run_logged_job
-    from tasks.common.job_trigger import ensure_api_awake_from_env
+    from tasks.common.job_trigger import ensure_api_awake_from_env, trigger_next_job_from_env
     from tasks.common.system_health_markers import write_system_health_marker
 
     job_name = "gold-finance-job"
@@ -1196,6 +1212,9 @@ if __name__ == "__main__":
             run_logged_job(
                 job_name=job_name,
                 run=main,
-                on_success=(lambda: write_system_health_marker(layer="gold", domain="finance", job_name=job_name),),
+                on_success=(
+                    lambda: write_system_health_marker(layer="gold", domain="finance", job_name=job_name),
+                    trigger_next_job_from_env,
+                ),
             )
         )

@@ -6,8 +6,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from core import core as mdc
-from core.blob_storage import BlobStorageClient
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.foundation.blob_storage import BlobStorageClient
 
 
 DEFAULT_MARKER_PREFIX = "system/health_markers"

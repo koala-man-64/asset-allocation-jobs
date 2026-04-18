@@ -14,15 +14,15 @@ from typing import Any, Callable, Optional
 
 import pandas as pd
 
-from core.massive_gateway_client import (
+from asset_allocation_runtime_common.providers.massive_gateway_client import (
     MassiveGatewayClient,
     MassiveGatewayError,
     MassiveGatewayNotFoundError,
     MassiveGatewayRateLimitError,
 )
-from core import symbol_availability
-from core import core as mdc
-from core.pipeline import ListManager
+from asset_allocation_runtime_common.market_data import symbol_availability
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data.pipeline import ListManager
 from tasks.common.bronze_backfill_coverage import (
     load_coverage_marker,
     normalize_date,
@@ -38,7 +38,7 @@ from tasks.common.bronze_symbol_policy import (
     is_explicit_invalid_candidate,
     record_invalid_symbol_candidate,
 )
-from core import bronze_bucketing
+from asset_allocation_runtime_common.market_data import bronze_bucketing
 from tasks.common.bronze_alpha26_publish import publish_alpha26_bronze_domain
 from tasks.common.job_status import resolve_job_run_status
 from tasks.common.silver_contracts import parse_wait_timeout_seconds

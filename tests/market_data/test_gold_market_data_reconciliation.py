@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from core import delta_core
+from asset_allocation_runtime_common.market_data import delta_core
 from asset_allocation_contracts.paths import DataPaths
 from tasks.market_data import gold_market_data as gold
 

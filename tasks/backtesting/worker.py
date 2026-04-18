@@ -4,10 +4,11 @@ import logging
 import os
 import time as monotonic_time
 
-from core.backtest_repository import BacktestRepository
+from asset_allocation_runtime_common.backtest_repository import BacktestRepository
 from core.backtest_runtime import execute_backtest_run
-from core.control_plane_transport import ControlPlaneTransport
-from core.postgres import connect
+from asset_allocation_runtime_common.control_plane_transport import ControlPlaneTransport
+from asset_allocation_runtime_common.foundation.postgres import connect
+from tasks.common.system_health_markers import write_system_health_marker
 
 logger = logging.getLogger("asset-allocation.tasks.backtesting")
 
@@ -130,6 +131,14 @@ def main() -> int:
             result.get("summary", {}).get("trades"),
             result.get("summary", {}).get("final_equity"),
         )
+        completed_run = repo.get_run(run_id)
+        if completed_run and str(completed_run.get("canonical_target_id") or "").strip():
+            write_system_health_marker(
+                layer="platinum",
+                domain="backtests",
+                job_name="backtesting-worker-job",
+                metadata={"targetId": completed_run.get("canonical_target_id"), "runId": run_id},
+            )
         return 0
     except Exception as exc:
         logger.exception("Backtest run failed: run_id=%s", run_id)

@@ -6,21 +6,21 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-from core import core as mdc
+from asset_allocation_runtime_common.market_data import core as mdc
 from tasks.common.delta_write_policy import prepare_delta_write_frame
 from tasks.common.gold_output_contracts import project_gold_output_frame
 
 from tasks.common.watermarks import load_watermarks, save_watermarks
 from tasks.common.backfill import apply_backfill_start_cutoff, get_backfill_range
-from core import domain_artifacts
+from asset_allocation_runtime_common.market_data import domain_artifacts
 from tasks.common import gold_checkpoint_publication
-from core import layer_bucketing
+from asset_allocation_runtime_common.market_data import layer_bucketing
 from tasks.common.market_reconciliation import (
     collect_delta_market_symbols,
     enforce_backfill_cutoff_on_bucket_tables,
     purge_orphan_rows_from_bucket_tables,
 )
-from core.gold_sync_contracts import (
+from asset_allocation_runtime_common.market_data.gold_sync_contracts import (
     bucket_sync_is_current,
     load_domain_sync_state,
     resolve_postgres_dsn,
@@ -70,6 +70,14 @@ def _merge_symbol_to_bucket_map(
     out = {symbol: bucket for symbol, bucket in existing.items() if bucket != touched_bucket}
     out.update(touched_symbol_to_bucket)
     return out
+
+
+def _gold_earnings_job_run_id() -> str:
+    execution_name = str(os.environ.get("CONTAINER_APP_JOB_EXECUTION_NAME") or "").strip()
+    if execution_name:
+        return execution_name
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"gold-earnings-job-{stamp}-{os.getpid()}"
 
 
 def _failure_log_value(value: object) -> str:
@@ -458,8 +466,8 @@ def _build_job_config() -> FeatureJobConfig:
 
 
 def _run_earnings_reconciliation(*, silver_container: str, gold_container: str) -> tuple[int, int]:
-    from core import core as mdc
-    from core import delta_core
+    from asset_allocation_runtime_common.market_data import core as mdc
+    from asset_allocation_runtime_common.market_data import delta_core
     from asset_allocation_contracts.paths import DataPaths
 
     silver_client = mdc.get_storage_client(silver_container)
@@ -546,10 +554,9 @@ def _run_alpha26_earnings_gold(
     backfill_start_iso: Optional[str],
     watermarks: dict,
 ) -> tuple[int, int, int, int, bool, int, Optional[str]]:
-    from core import core as mdc
+    from asset_allocation_runtime_common.market_data import core as mdc
     from asset_allocation_contracts.paths import DataPaths
-    from core import delta_core
-
+    from asset_allocation_runtime_common.market_data import delta_core
     backfill_start = pd.to_datetime(backfill_start_iso).normalize() if backfill_start_iso else None
     processed = 0
     skipped_unchanged = 0
@@ -558,6 +565,7 @@ def _run_alpha26_earnings_gold(
     failed_symbols = 0
     failed_buckets = 0
     failed_finalization = 0
+    run_id = _gold_earnings_job_run_id()
     watermarks_dirty = False
     symbol_to_bucket = _load_existing_gold_earnings_symbol_to_bucket_map()
     postgres_dsn = resolve_postgres_dsn()
@@ -732,6 +740,9 @@ def _run_alpha26_earnings_gold(
                     df=write_decision.frame,
                     date_column="date",
                     job_name="gold-earnings-job",
+                    job_run_id=run_id,
+                    run_id=run_id,
+                    source_commit=silver_commit,
                 )
             except Exception as exc:
                 mdc.write_warning(f"Gold earnings metadata bucket artifact write failed bucket={bucket}: {exc}")
@@ -873,6 +884,9 @@ def _run_alpha26_earnings_gold(
         failed_buckets=failed_buckets,
         failed_finalization=failed_finalization,
         index_path=index_path,
+        job_run_id=run_id,
+        run_id=run_id,
+        source_commit=silver_commit,
     )
     mdc.write_line(
         "layer_handoff_status transition=silver_to_gold status=complete "
@@ -892,7 +906,7 @@ def _run_alpha26_earnings_gold(
 
 
 def main() -> int:
-    from core import core as mdc
+    from asset_allocation_runtime_common.market_data import core as mdc
     mdc.log_environment_diagnostics()
     job_cfg = _build_job_config()
     backfill_start, _ = get_backfill_range()
@@ -954,9 +968,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    from core import core as mdc
+    from asset_allocation_runtime_common.market_data import core as mdc
     from tasks.common.job_entrypoint import run_logged_job
-    from tasks.common.job_trigger import ensure_api_awake_from_env
+    from tasks.common.job_trigger import ensure_api_awake_from_env, trigger_next_job_from_env
     from tasks.common.system_health_markers import write_system_health_marker
 
     job_name = "gold-earnings-job"
@@ -966,6 +980,9 @@ if __name__ == "__main__":
             run_logged_job(
                 job_name=job_name,
                 run=main,
-                on_success=(lambda: write_system_health_marker(layer="gold", domain="earnings", job_name=job_name),),
+                on_success=(
+                    lambda: write_system_health_marker(layer="gold", domain="earnings", job_name=job_name),
+                    trigger_next_job_from_env,
+                ),
             )
         )

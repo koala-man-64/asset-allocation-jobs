@@ -5,7 +5,7 @@ from typing import Literal, Sequence
 
 import pandas as pd
 
-from core import delta_core
+from asset_allocation_runtime_common.market_data import delta_core
 from tasks.common.silver_contracts import normalize_columns_to_snake_case
 
 

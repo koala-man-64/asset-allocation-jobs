@@ -39,14 +39,14 @@ def _forbidden_imports(path: Path) -> list[str]:
             continue
         imported_names = {alias.name for alias in node.names}
         if node.module == "core.pipeline" and "DataPaths" in imported_names:
-            offenders.append(f"{path.relative_to(REPO_ROOT)} -> from core.pipeline import DataPaths")
+            offenders.append(f"{path.relative_to(REPO_ROOT)} -> from asset_allocation_runtime_common.market_data.pipeline import DataPaths")
         legacy_regime_imports = sorted(
             {"DEFAULT_REGIME_MODEL_NAME", "RegimePolicy"} & imported_names
         )
         if node.module == "core.regime" and legacy_regime_imports:
             offenders.append(
                 f"{path.relative_to(REPO_ROOT)} -> "
-                f"from core.regime import {', '.join(legacy_regime_imports)}"
+                f"from asset_allocation_runtime_common.domain.regime import {', '.join(legacy_regime_imports)}"
             )
     return offenders
 

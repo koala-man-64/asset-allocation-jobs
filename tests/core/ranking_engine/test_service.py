@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from core.ranking_engine.naming import build_scoped_identifier, slugify_strategy_output_table
-from core.ranking_engine.service import (
+from asset_allocation_runtime_common.ranking_engine.naming import build_scoped_identifier, slugify_strategy_output_table
+from asset_allocation_runtime_common.ranking_engine.service import (
     _MaterializationContext,
     _ResolvedDateRange,
     _apply_transforms,
@@ -18,10 +19,8 @@ from core.ranking_engine.service import (
     _resolve_date_range,
     _write_rankings_to_platinum,
 )
-from core.ranking_engine.contracts import RankingSchemaConfig
-from core.strategy_engine.contracts import StrategyConfig, UniverseDefinition
-
-
+from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
+from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
 def _build_strategy_config(*, ranking_schema_name: str = "quality") -> StrategyConfig:
     return StrategyConfig.model_validate(
         {
@@ -66,24 +65,21 @@ def _build_ranking_schema_config() -> RankingSchemaConfig:
     )
 
 
-def _build_universe() -> UniverseDefinition:
-    return UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "close",
-                        "operator": "gt",
-                        "value": 10,
-                    }
-                ],
-            },
-        }
+def _build_universe() -> SimpleNamespace:
+    return SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "market.close",
+                    "operator": "gt",
+                    "value": 10,
+                }
+            ],
+        },
     )
 
 
@@ -131,43 +127,38 @@ def test_apply_transforms_runs_in_order() -> None:
 
 
 def test_evaluate_universe_mask_handles_nested_groups() -> None:
-    universe = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "close",
-                        "operator": "gt",
-                        "value": 10,
-                    },
-                    {
-                        "kind": "group",
-                        "operator": "or",
-                        "clauses": [
-                            {
-                                "kind": "condition",
-                                "table": "finance_data",
-                                "column": "piotroski_f_score",
-                                "operator": "gte",
-                                "value": 7,
-                            },
-                            {
-                                "kind": "condition",
-                                "table": "market_data",
-                                "column": "return_20d",
-                                "operator": "gt",
-                                "value": 0.1,
-                            },
-                        ],
-                    },
-                ],
-            },
-        }
+    universe = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "market.close",
+                    "operator": "gt",
+                    "value": 10,
+                },
+                {
+                    "kind": "group",
+                    "operator": "or",
+                    "clauses": [
+                        {
+                            "kind": "condition",
+                            "field": "quality.piotroski_f_score",
+                            "operator": "gte",
+                            "value": 7,
+                        },
+                        {
+                            "kind": "condition",
+                            "field": "returns.return_20d",
+                            "operator": "gt",
+                            "value": 0.1,
+                        },
+                    ],
+                },
+            ],
+        },
     )
     frame = pd.DataFrame(
         {
@@ -188,41 +179,35 @@ def test_evaluate_universe_mask_handles_string_and_null_safely() -> None:
             "market_data__sector": pd.Series(["Technology", "Financials", pd.NA], dtype="string"),
         }
     )
-    equals_node = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "sector",
-                        "operator": "eq",
-                        "value": "Technology",
-                    }
-                ],
-            },
-        }
+    equals_node = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "security.sector",
+                    "operator": "eq",
+                    "value": "Technology",
+                }
+            ],
+        },
     )
-    not_in_node = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "sector",
-                        "operator": "not_in",
-                        "values": ["Financials"],
-                    }
-                ],
-            },
-        }
+    not_in_node = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "security.sector",
+                    "operator": "not_in",
+                    "values": ["Financials"],
+                }
+            ],
+        },
     )
 
     assert _evaluate_universe_mask(frame, equals_node.root).tolist() == [True, False, False]
@@ -241,77 +226,65 @@ def test_evaluate_universe_mask_handles_date_datetime_boolean_and_numeric_types(
             "market_data__close": [10.0, 12.0, None],
         }
     )
-    date_node = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "trade_date",
-                        "operator": "gte",
-                        "value": "2026-03-08",
-                    }
-                ],
-            },
-        }
+    date_node = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "market.trade_date",
+                    "operator": "gte",
+                    "value": "2026-03-08",
+                }
+            ],
+        },
     )
-    datetime_node = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "timestamp",
-                        "operator": "gte",
-                        "value": "2026-03-08T00:00:00Z",
-                    }
-                ],
-            },
-        }
+    datetime_node = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "market.timestamp",
+                    "operator": "gte",
+                    "value": "2026-03-08T00:00:00Z",
+                }
+            ],
+        },
     )
-    boolean_node = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "active",
-                        "operator": "eq",
-                        "value": True,
-                    }
-                ],
-            },
-        }
+    boolean_node = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "security.is_active",
+                    "operator": "eq",
+                    "value": True,
+                }
+            ],
+        },
     )
-    numeric_node = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "close",
-                        "operator": "gte",
-                        "value": 11,
-                    }
-                ],
-            },
-        }
+    numeric_node = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "market.close",
+                    "operator": "gte",
+                    "value": 11,
+                }
+            ],
+        },
     )
 
     assert _evaluate_universe_mask(frame, date_node.root).tolist() == [False, True, False]
@@ -428,41 +401,21 @@ def test_resolve_date_range_rejects_invalid_explicit_range(monkeypatch: pytest.M
 
 
 def test_compute_rankings_dataframe_intersects_strategy_and_ranking_universes(monkeypatch) -> None:
-    strategy_universe = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "close",
-                        "operator": "gt",
-                        "value": 10,
-                    }
-                ],
-            },
-        }
-    )
-    ranking_universe = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "finance_data",
-                        "column": "piotroski_f_score",
-                        "operator": "gte",
-                        "value": 7,
-                    }
-                ],
-            },
-        }
+    strategy_universe = _build_universe()
+    ranking_universe = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "quality.piotroski_f_score",
+                    "operator": "gte",
+                    "value": 7,
+                }
+            ],
+        },
     )
     monkeypatch.setattr(
         "core.ranking_engine.service.universe_service._load_gold_table_specs",
@@ -545,41 +498,21 @@ def test_compute_rankings_dataframe_intersects_strategy_and_ranking_universes(mo
 
 
 def test_compute_rankings_dataframe_excludes_null_piotroski_rows(monkeypatch) -> None:
-    strategy_universe = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "market_data",
-                        "column": "close",
-                        "operator": "gt",
-                        "value": 10,
-                    }
-                ],
-            },
-        }
-    )
-    ranking_universe = UniverseDefinition.model_validate(
-        {
-            "source": "postgres_gold",
-            "root": {
-                "kind": "group",
-                "operator": "and",
-                "clauses": [
-                    {
-                        "kind": "condition",
-                        "table": "finance_data",
-                        "column": "piotroski_f_score",
-                        "operator": "gte",
-                        "value": 7,
-                    }
-                ],
-            },
-        }
+    strategy_universe = _build_universe()
+    ranking_universe = SimpleNamespace(
+        source="postgres_gold",
+        root={
+            "kind": "group",
+            "operator": "and",
+            "clauses": [
+                {
+                    "kind": "condition",
+                    "field": "quality.piotroski_f_score",
+                    "operator": "gte",
+                    "value": 7,
+                }
+            ],
+        },
     )
     monkeypatch.setattr(
         "core.ranking_engine.service.universe_service._load_gold_table_specs",

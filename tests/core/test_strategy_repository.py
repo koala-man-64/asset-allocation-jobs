@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import httpx
 
-from core.control_plane_transport import ControlPlaneTransport, ControlPlaneTransportConfig
-from core.strategy_repository import StrategyRepository, normalize_strategy_config_document
+from asset_allocation_runtime_common.control_plane_transport import ControlPlaneTransport, ControlPlaneTransportConfig
+from asset_allocation_runtime_common.strategy_repository import StrategyRepository, normalize_strategy_config_document
 
 
 def _build_transport(handler) -> ControlPlaneTransport:

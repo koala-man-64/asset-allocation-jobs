@@ -5,13 +5,13 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from core import core as mdc
-from core import delta_core
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data import delta_core
 from tasks.price_target_data import config as cfg
 from asset_allocation_contracts.paths import DataPaths
-from core import bronze_bucketing
-from core import domain_artifacts
-from core import layer_bucketing
+from asset_allocation_runtime_common.market_data import bronze_bucketing
+from asset_allocation_runtime_common.market_data import domain_artifacts
+from asset_allocation_runtime_common.market_data import layer_bucketing
 from tasks.common.backfill import apply_backfill_start_cutoff, get_backfill_range
 from tasks.common.watermarks import (
     check_blob_unchanged,

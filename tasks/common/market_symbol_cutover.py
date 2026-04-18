@@ -4,10 +4,10 @@ from typing import Literal
 
 import pandas as pd
 
-from core import core as mdc
-from core import bronze_bucketing
-from core import layer_bucketing
-from core.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data import bronze_bucketing
+from asset_allocation_runtime_common.market_data import layer_bucketing
+from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 
 MarketLayer = Literal["bronze", "silver", "gold"]
 _REGIME_REQUIRED_MARKET_SYMBOL_SET = frozenset(REGIME_REQUIRED_MARKET_SYMBOLS)

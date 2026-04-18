@@ -255,3 +255,23 @@ def test_backtest_position_analytics_v4_migration_adds_closed_position_surface()
     assert "total_transaction_cost DOUBLE PRECISION NOT NULL DEFAULT 0" in text
     assert "idx_backtest_closed_positions_run_closed_at" in text
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE core.backtest_closed_positions TO backtest_service;" in text
+
+
+def test_results_freshness_migration_creates_refresh_tables_and_canonical_run_columns() -> None:
+    repo_root = _repo_root()
+    migration = (
+        repo_root
+        / "deploy"
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0037_results_freshness.sql"
+    )
+    text = migration.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS core.ranking_refresh_state" in text
+    assert "CHECK (status IN ('idle', 'dirty', 'claimed', 'failed'))" in text
+    assert "CREATE TABLE IF NOT EXISTS core.canonical_backtest_targets" in text
+    assert "ADD COLUMN IF NOT EXISTS canonical_target_id TEXT" in text
+    assert "ADD COLUMN IF NOT EXISTS canonical_fingerprint TEXT" in text
+    assert "fk_core_runs_canonical_target" in text

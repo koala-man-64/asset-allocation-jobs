@@ -5,10 +5,10 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from core import config as cfg
-from core import core as mdc
-from core.alpha_vantage_gateway_client import AlphaVantageGatewayInvalidSymbolError
-from core.massive_gateway_client import MassiveGatewayNotFoundError
+from asset_allocation_runtime_common.foundation import config as cfg
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client import AlphaVantageGatewayInvalidSymbolError
+from asset_allocation_runtime_common.providers.massive_gateway_client import MassiveGatewayNotFoundError
 
 _INVALID_CANDIDATE_MARKER_PREFIX = "system/invalid_symbol_candidates/bronze"
 _PROMOTION_THRESHOLD = 2

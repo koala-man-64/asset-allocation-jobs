@@ -8,11 +8,11 @@ from datetime import datetime, date, timedelta, timezone
 from io import BytesIO
 from typing import Dict, List, Optional
 
-from core import core as mdc
-from core import symbol_availability
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data import symbol_availability
 from tasks.price_target_data import config as cfg
-from core.pipeline import ListManager
-from core import bronze_bucketing
+from asset_allocation_runtime_common.market_data.pipeline import ListManager
+from asset_allocation_runtime_common.market_data import bronze_bucketing
 from tasks.common.bronze_alpha26_publish import publish_alpha26_bronze_domain
 from tasks.common.bronze_observability import log_bronze_success, should_log_bronze_success
 from tasks.common.bronze_symbol_policy import build_bronze_run_id

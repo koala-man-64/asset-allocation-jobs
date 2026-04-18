@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.ranking_engine.contracts import RankingSchemaConfig
-
-
+from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
 def test_ranking_schema_rejects_duplicate_group_names() -> None:
     with pytest.raises(ValueError, match="Duplicate group name"):
         RankingSchemaConfig.model_validate(

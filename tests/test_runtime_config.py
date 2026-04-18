@@ -1,7 +1,7 @@
 import logging
 
-from core import runtime_config
-from core.runtime_config import normalize_env_override
+from asset_allocation_runtime_common.foundation import runtime_config
+from asset_allocation_runtime_common.foundation.runtime_config import normalize_env_override
 
 
 def test_normalize_env_override_passthrough_for_unmanaged_keys():

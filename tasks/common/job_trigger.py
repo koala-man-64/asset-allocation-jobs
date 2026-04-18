@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from core import core as mdc
+from asset_allocation_runtime_common.market_data import core as mdc
 from monitoring.arm_client import ArmConfig, AzureArmClient
 
 

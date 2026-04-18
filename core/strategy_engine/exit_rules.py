@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.strategy_engine.contracts import ExitRule, StrategyConfig
-from core.strategy_engine.position_state import PositionState, PriceBar
-
+from asset_allocation_runtime_common.strategy_engine.contracts import ExitRule, StrategyConfig
+from asset_allocation_runtime_common.strategy_engine.position_state import PositionState, PriceBar
 STOP_LIKE_RULE_TYPES = {"stop_loss_fixed", "trailing_stop_pct", "trailing_stop_atr"}
 TAKE_PROFIT_RULE_TYPES = {"take_profit_fixed"}
 

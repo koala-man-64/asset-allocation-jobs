@@ -5,8 +5,7 @@ from typing import Optional, Tuple
 import os
 import pandas as pd
 
-from core import core as mdc
-
+from asset_allocation_runtime_common.market_data import core as mdc
 _DEFAULT_BACKFILL_START = pd.Timestamp("2016-01-01")
 def get_latest_only_flag(domain: str, *, default: bool = True) -> bool:
     _ = (domain, default)

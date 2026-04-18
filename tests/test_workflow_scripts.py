@@ -22,22 +22,31 @@ def load_module(relative_path: str, module_name: str) -> ModuleType:
     return module
 
 
-def test_install_jobs_dependencies_excludes_selected_shared_package(tmp_path: Path) -> None:
+def test_install_jobs_dependencies_relies_on_requirement_files_and_editables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     module = load_module("scripts/workflows/install_jobs_dependencies.py", "install_jobs_dependencies")
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text(
-        "\n".join(
-            [
-                "[project]",
-                'dependencies = ["asset-allocation-contracts==1.2.3", "asset-allocation-runtime-common==4.5.6", "pandas==1.0.0"]',
-            ]
-        ),
-        encoding="utf-8",
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(module.sys, "executable", "/python")
+
+    module.install_jobs_dependencies(
+        jobs_path=tmp_path,
+        requirement_paths=[Path("requirements.lock.txt")],
+        include_dev_lockfile=True,
+        editable_paths=[Path("asset-allocation-runtime-common/python")],
+        editable_no_deps_paths=[Path("asset-allocation-jobs")],
+        pip_check=True,
     )
 
-    specs = module.shared_dependency_specs(pyproject, {"asset-allocation-runtime-common"})
-
-    assert specs == ["asset-allocation-contracts==1.2.3"]
+    assert commands == [
+        ["/python", "-m", "pip", "install", "--upgrade", "pip"],
+        ["/python", "-m", "pip", "install", "-r", "requirements.lock.txt"],
+        ["/python", "-m", "pip", "install", "-r", str(tmp_path / "requirements-dev.lock.txt")],
+        ["/python", "-m", "pip", "install", "-e", str(Path("asset-allocation-runtime-common/python"))],
+        ["/python", "-m", "pip", "install", "-e", str(Path("asset-allocation-jobs")), "--no-deps"],
+        ["/python", "-m", "pip", "check"],
+    ]
 
 
 def test_pin_contracts_version_updates_dependency_manifests(tmp_path: Path) -> None:
@@ -51,6 +60,70 @@ def test_pin_contracts_version_updates_dependency_manifests(tmp_path: Path) -> N
     assert 'asset-allocation-contracts==9.9.9"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert "asset-allocation-contracts==9.9.9" in (tmp_path / "requirements.txt").read_text(encoding="utf-8")
     assert "asset-allocation-contracts==9.9.9" in (tmp_path / "requirements.lock.txt").read_text(encoding="utf-8")
+
+
+def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module(
+        "scripts/workflows/validate_shared_dependency_compatibility.py",
+        "validate_shared_dependency_compatibility",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "\n".join(
+            [
+                "[project]",
+                'dependencies = ["asset-allocation-contracts==1.2.0", "asset-allocation-runtime-common==2.0.1"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command, check, text, capture_output):
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    versions = module.validate_repo_shared_dependency_compatibility(repo_root=tmp_path, python_exe="/python")
+
+    assert versions == ("1.2.0", "2.0.1")
+    assert commands == [
+        [
+            "/python",
+            "-m",
+            "pip",
+            "install",
+            "--dry-run",
+            "--ignore-installed",
+            "asset-allocation-contracts==1.2.0",
+            "asset-allocation-runtime-common==2.0.1",
+        ]
+    ]
+
+
+def test_validate_shared_dependency_compatibility_surfaces_resolver_failure() -> None:
+    module = load_module(
+        "scripts/workflows/validate_shared_dependency_compatibility.py",
+        "validate_shared_dependency_compatibility",
+    )
+
+    def fake_run(command, check, text, capture_output):
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="ResolutionImpossible")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    try:
+        with pytest.raises(SystemExit, match="Shared package pins do not resolve together"):
+            module.validate_shared_dependency_compatibility(
+                python_exe="/python",
+                contracts_version="2.0.0",
+                runtime_common_version="2.0.1",
+            )
+    finally:
+        monkeypatch.undo()
 
 
 def test_write_release_manifest_writes_expected_shape(tmp_path: Path) -> None:

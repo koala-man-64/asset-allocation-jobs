@@ -167,8 +167,7 @@ jobs:
             --requirements asset-allocation-jobs/requirements.lock.txt \
             --include-dev-lockfile \
             --editable asset-allocation-runtime-common/python \
-            --editable-no-deps asset-allocation-jobs \
-            --shared-dependency-exclude asset-allocation-runtime-common
+            --editable-no-deps asset-allocation-jobs
 
       - name: Run jobs compatibility suite
         shell: bash
@@ -221,12 +220,20 @@ jobs:
         uses: ./.github/actions/setup-python-jobs
         with:
           python-version: "3.14"
+          python-package-index-url: ${{ secrets.PYTHON_PACKAGE_INDEX_URL }}
+          python-package-extra-index-url: ${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}
 
       - name: Update contracts dependency manifests
         shell: bash
         run: |
           set -euo pipefail
           python scripts/workflows/pin_contracts_version.py --contracts-version "${{ steps.inputs.outputs.contracts_version }}"
+
+      - name: Validate shared dependency compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/workflows/validate_shared_dependency_compatibility.py
 
       - name: Verify dependency contract tests
         shell: bash

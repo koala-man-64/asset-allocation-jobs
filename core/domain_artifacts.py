@@ -7,12 +7,10 @@ from typing import Any, Iterable, Optional
 
 import pandas as pd
 
-from core import core as mdc
-from core.blob_storage import BlobStorageClient
-from core import bronze_bucketing
-from core import domain_metadata_snapshots
-
-
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.foundation.blob_storage import BlobStorageClient
+from asset_allocation_runtime_common.market_data import bronze_bucketing
+from asset_allocation_runtime_common.market_data import domain_metadata_snapshots
 logger = logging.getLogger(__name__)
 
 ARTIFACT_VERSION = 1
@@ -57,6 +55,23 @@ _FINANCE_SUBDOMAIN_ALIASES: dict[str, str] = {
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_metadata_text(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _resolve_affected_as_of_range(
+    *,
+    summary: Optional[dict[str, Any]],
+    affected_as_of_start: Any,
+    affected_as_of_end: Any,
+) -> tuple[Optional[str], Optional[str]]:
+    date_range = summary.get("dateRange") if isinstance(summary, dict) and isinstance(summary.get("dateRange"), dict) else {}
+    resolved_start = _normalize_metadata_text(affected_as_of_start) or _normalize_metadata_text(date_range.get("min"))
+    resolved_end = _normalize_metadata_text(affected_as_of_end) or _normalize_metadata_text(date_range.get("max"))
+    return resolved_start, resolved_end
 
 
 def normalize_layer(value: str) -> str:
@@ -393,6 +408,10 @@ def write_bucket_artifact(
     manifest_path: Optional[str] = None,
     active_data_prefix: Optional[str] = None,
     data_path: Optional[str] = None,
+    source_commit: Any = None,
+    published_at: Any = None,
+    affected_as_of_start: Any = None,
+    affected_as_of_end: Any = None,
 ) -> Optional[dict[str, Any]]:
     storage_client = client or _client_for_layer(layer)
     if storage_client is None:
@@ -408,6 +427,17 @@ def write_bucket_artifact(
         sub_domain=normalized_sub_domain or None,
     )
     now = _utc_now_iso()
+    summary = summarize_frame(
+        df,
+        domain=normalized_domain,
+        date_column=date_column,
+        sub_domain=normalized_sub_domain or None,
+    )
+    resolved_affected_start, resolved_affected_end = _resolve_affected_as_of_range(
+        summary=summary,
+        affected_as_of_start=affected_as_of_start,
+        affected_as_of_end=affected_as_of_end,
+    )
     payload = {
         "version": ARTIFACT_VERSION,
         "scope": "bucket",
@@ -419,18 +449,17 @@ def write_bucket_artifact(
         "artifactPath": artifact_path,
         "updatedAt": now,
         "computedAt": now,
+        "publishedAt": _normalize_metadata_text(published_at) or now,
         "producerJobName": str(job_name or "").strip() or None,
         "jobRunId": str(job_run_id or "").strip() or None,
         "runId": str(run_id or job_run_id or "").strip() or None,
         "manifestPath": str(manifest_path or "").strip() or None,
         "activeDataPrefix": str(active_data_prefix or "").strip().strip("/") or None,
         "dataPath": str(data_path or "").strip() or None,
-        **summarize_frame(
-            df,
-            domain=normalized_domain,
-            date_column=date_column,
-            sub_domain=normalized_sub_domain or None,
-        ),
+        "sourceCommit": source_commit,
+        "affectedAsOfStart": resolved_affected_start,
+        "affectedAsOfEnd": resolved_affected_end,
+        **summary,
     }
     mdc.save_json_content(payload, artifact_path, client=storage_client)
     return payload
@@ -535,6 +564,10 @@ def write_domain_artifact(
     active_data_prefix: Optional[str] = None,
     total_bytes_override: Optional[int] = None,
     file_count_override: Optional[int] = None,
+    source_commit: Any = None,
+    published_at: Any = None,
+    affected_as_of_start: Any = None,
+    affected_as_of_end: Any = None,
 ) -> Optional[dict[str, Any]]:
     storage_client = client or _client_for_layer(layer)
     if storage_client is None:
@@ -588,6 +621,11 @@ def write_domain_artifact(
             sub_domain=normalized_sub_domain or None,
         )
     now = _utc_now_iso()
+    resolved_affected_start, resolved_affected_end = _resolve_affected_as_of_range(
+        summary=summary,
+        affected_as_of_start=affected_as_of_start,
+        affected_as_of_end=affected_as_of_end,
+    )
     payload: dict[str, Any] = {
         "version": ARTIFACT_VERSION,
         "scope": "domain",
@@ -598,6 +636,7 @@ def write_domain_artifact(
         "artifactPath": artifact_path,
         "updatedAt": now,
         "computedAt": now,
+        "publishedAt": _normalize_metadata_text(published_at) or now,
         "producerJobName": str(job_name or "").strip() or None,
         "jobRunId": str(job_run_id or "").strip() or None,
         "runId": str(run_id or job_run_id or "").strip() or None,
@@ -606,6 +645,9 @@ def write_domain_artifact(
         "symbolIndexPath": str(symbol_index_path or "").strip() or None,
         "totalBytes": total_bytes,
         "fileCount": int(file_count_override) if isinstance(file_count_override, int) else None,
+        "sourceCommit": source_commit,
+        "affectedAsOfStart": resolved_affected_start,
+        "affectedAsOfEnd": resolved_affected_end,
         **summary,
     }
     if normalized_domain == "finance" and not normalized_sub_domain:

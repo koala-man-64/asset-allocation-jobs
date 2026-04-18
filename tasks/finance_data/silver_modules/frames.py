@@ -4,9 +4,9 @@ from typing import Optional
 
 import pandas as pd
 
-from core import core as mdc
-from core import finance_contracts
-from core import layer_bucketing
+from asset_allocation_contracts.finance import SILVER_FINANCE_COLUMNS_BY_SUBDOMAIN
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data import layer_bucketing
 from tasks.finance_data import config as cfg
 from tasks.common.delta_write_policy import prepare_delta_write_frame
 from tasks.common.silver_contracts import coerce_to_naive_datetime
@@ -21,9 +21,9 @@ def _finance_row_identity_columns(df: pd.DataFrame) -> list[str]:
 
 def _finance_declared_schema_columns(sub_domain: str) -> tuple[str, ...]:
     normalized_sub_domain = layer_bucketing.normalize_sub_domain(sub_domain)
-    if normalized_sub_domain not in finance_contracts.SILVER_FINANCE_COLUMNS_BY_SUBDOMAIN:
+    if normalized_sub_domain not in SILVER_FINANCE_COLUMNS_BY_SUBDOMAIN:
         raise ValueError(f"Unsupported finance sub-domain for contract alignment: {sub_domain}")
-    expected_columns = finance_contracts.SILVER_FINANCE_COLUMNS_BY_SUBDOMAIN[normalized_sub_domain]
+    expected_columns = SILVER_FINANCE_COLUMNS_BY_SUBDOMAIN[normalized_sub_domain]
     return ("date", "symbol", *expected_columns[2:])
 
 
