@@ -22,22 +22,31 @@ def load_module(relative_path: str, module_name: str) -> ModuleType:
     return module
 
 
-def test_install_jobs_dependencies_excludes_selected_shared_package(tmp_path: Path) -> None:
+def test_install_jobs_dependencies_relies_on_requirement_files_and_editables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     module = load_module("scripts/workflows/install_jobs_dependencies.py", "install_jobs_dependencies")
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text(
-        "\n".join(
-            [
-                "[project]",
-                'dependencies = ["asset-allocation-contracts==1.2.3", "asset-allocation-runtime-common==4.5.6", "pandas==1.0.0"]',
-            ]
-        ),
-        encoding="utf-8",
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(module.sys, "executable", "/python")
+
+    module.install_jobs_dependencies(
+        jobs_path=tmp_path,
+        requirement_paths=[Path("requirements.lock.txt")],
+        include_dev_lockfile=True,
+        editable_paths=[Path("asset-allocation-runtime-common/python")],
+        editable_no_deps_paths=[Path("asset-allocation-jobs")],
+        pip_check=True,
     )
 
-    specs = module.shared_dependency_specs(pyproject, {"asset-allocation-runtime-common"})
-
-    assert specs == ["asset-allocation-contracts==1.2.3"]
+    assert commands == [
+        ["/python", "-m", "pip", "install", "--upgrade", "pip"],
+        ["/python", "-m", "pip", "install", "-r", "requirements.lock.txt"],
+        ["/python", "-m", "pip", "install", "-r", str(tmp_path / "requirements-dev.lock.txt")],
+        ["/python", "-m", "pip", "install", "-e", str(Path("asset-allocation-runtime-common/python"))],
+        ["/python", "-m", "pip", "install", "-e", str(Path("asset-allocation-jobs")), "--no-deps"],
+        ["/python", "-m", "pip", "check"],
+    ]
 
 
 def test_pin_contracts_version_updates_dependency_manifests(tmp_path: Path) -> None:

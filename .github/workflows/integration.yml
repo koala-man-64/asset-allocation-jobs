@@ -167,8 +167,7 @@ jobs:
             --requirements asset-allocation-jobs/requirements.lock.txt \
             --include-dev-lockfile \
             --editable asset-allocation-runtime-common/python \
-            --editable-no-deps asset-allocation-jobs \
-            --shared-dependency-exclude asset-allocation-runtime-common
+            --editable-no-deps asset-allocation-jobs
 
       - name: Run jobs compatibility suite
         shell: bash
