@@ -27,9 +27,9 @@ def _stage_market_blob(
     backfill_range: tuple[pd.Timestamp | None, pd.Timestamp | None] = (None, None),
 ) -> tuple[str, pd.DataFrame]:
     bucket_frames: dict[str, list[pd.DataFrame]] = {}
-    with patch("core.core.read_raw_bytes", return_value=_market_bucket_bytes(rows)), patch(
-        "core.delta_core.store_delta",
-        side_effect=AssertionError("store_delta should not be called in staged Silver market processing."),
+    with patch(
+        "tasks.market_data.silver_market_data._read_bronze_market_bucket_bytes",
+        return_value=_market_bucket_bytes(rows),
     ), patch(
         "tasks.market_data.silver_market_data.get_backfill_range",
         return_value=backfill_range,
@@ -95,7 +95,7 @@ def test_process_alpha26_bucket_blob_accepts_string_last_modified(monkeypatch):
     }
     watermarks: dict[str, dict[str, str]] = {}
 
-    monkeypatch.setattr(silver.mdc, "read_raw_bytes", lambda *_args, **_kwargs: b"ignored")
+    monkeypatch.setattr(silver, "_read_bronze_market_bucket_bytes", lambda *_args, **_kwargs: b"ignored")
     monkeypatch.setattr(silver.pd, "read_parquet", lambda *_args, **_kwargs: pd.DataFrame())
     monkeypatch.setattr(silver.mdc, "write_line", lambda *_args, **_kwargs: None)
 
@@ -307,19 +307,16 @@ def test_run_market_reconciliation_cutoff_store_path_sanitizes_index_artifacts(m
     monkeypatch.setattr(silver, "silver_client", fake_client)
     monkeypatch.setattr(silver, "collect_delta_market_symbols", lambda *, client, root_prefix: {"AAPL"})
     monkeypatch.setattr(silver, "get_backfill_range", lambda: (pd.Timestamp("2016-01-01"), None))
-
-    monkeypatch.setattr(delta_core, "_ensure_container_exists", lambda _container: None)
-    monkeypatch.setattr(delta_core, "get_delta_table_uri", lambda _container, _path: str(tmp_path / "silver_market"))
-    monkeypatch.setattr(delta_core, "get_delta_storage_options", lambda _container=None: {})
-    monkeypatch.setattr(delta_core, "_get_existing_delta_schema_columns", lambda _uri, _opts: None)
+    monkeypatch.setattr(silver, "_load_silver_market_bucket", lambda _path: None)
 
     captured: dict = {}
 
-    def fake_write_deltalake(_uri, df: pd.DataFrame, **kwargs):
+    def _fake_store_delta(df: pd.DataFrame, _container: str, path: str, mode: str = "overwrite") -> None:
+        assert mode == "overwrite"
         captured["df"] = df.copy()
-        captured["kwargs"] = dict(kwargs)
+        captured["path"] = path
 
-    monkeypatch.setattr(delta_core, "write_deltalake", fake_write_deltalake)
+    monkeypatch.setattr(delta_core, "store_delta", _fake_store_delta)
 
     def _fake_enforce_backfill_cutoff_on_bucket_tables(**kwargs):
         dirty = pd.DataFrame(
@@ -648,14 +645,9 @@ def test_write_alpha26_market_buckets_partial_update_preserves_untouched_symbol_
     monkeypatch.setattr(delta_core, "get_delta_schema_columns", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ["A", "C"])
     monkeypatch.setattr(
-        silver.layer_bucketing,
-        "load_layer_symbol_index",
-        lambda **_kwargs: pd.DataFrame(
-            {
-                "symbol": ["AAPL", "CSCO"],
-                "bucket": ["A", "C"],
-            }
-        ),
+        silver,
+        "_load_existing_silver_symbol_to_bucket_map",
+        lambda: {"AAPL": "A", "CSCO": "C"},
     )
     monkeypatch.setattr(
         silver.layer_bucketing,
@@ -694,11 +686,7 @@ def test_write_alpha26_market_buckets_partial_update_preserves_untouched_symbol_
 
 def test_write_alpha26_market_buckets_partial_update_fails_closed_without_prior_index(monkeypatch):
     monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ["A", "C"])
-    monkeypatch.setattr(
-        silver.layer_bucketing,
-        "load_layer_symbol_index",
-        lambda **_kwargs: pd.DataFrame(columns=["symbol", "bucket"]),
-    )
+    monkeypatch.setattr(silver, "_load_existing_silver_symbol_to_bucket_map", lambda: {})
 
     bucket_frames = {
         "A": [

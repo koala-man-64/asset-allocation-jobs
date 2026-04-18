@@ -206,7 +206,10 @@ def _patch_gold_storage_clients(monkeypatch: pytest.MonkeyPatch, fake_gold: Any)
             return fake_gold
         return None
 
-    monkeypatch.setattr("core.core.get_storage_client", _fake_get_storage_client)
+    monkeypatch.setattr(
+        "asset_allocation_runtime_common.market_data.core.get_storage_client",
+        _fake_get_storage_client,
+    )
 
 
 @pytest.mark.parametrize("case", GOLD_CASES, ids=[c["id"] for c in GOLD_CASES])
@@ -273,7 +276,10 @@ def test_gold_reconciliation_contract_requires_silver_storage_client(
 ) -> None:
     module = case["module"]
     run_fn = getattr(module, case["run_name"])
-    monkeypatch.setattr("core.core.get_storage_client", lambda _container: None)
+    monkeypatch.setattr(
+        "asset_allocation_runtime_common.market_data.core.get_storage_client",
+        lambda _container: None,
+    )
 
     with pytest.raises(RuntimeError, match="requires silver storage client"):
         run_fn(silver_container="silver", gold_container="gold")

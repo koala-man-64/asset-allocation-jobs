@@ -35,11 +35,11 @@ properties:
     containers:
     - env:
       - name: AZURE_FOLDER_FINANCE
-        value: ${AZURE_CONTAINER_GOLD}
+        value: ${AZURE_FOLDER_FINANCE}
       - name: AZURE_FOLDER_EARNINGS
-        value: ${AZURE_CONTAINER_GOLD}
+        value: ${AZURE_FOLDER_EARNINGS}
       - name: AZURE_FOLDER_TARGETS
-        value: ${AZURE_CONTAINER_GOLD}
+        value: ${AZURE_FOLDER_TARGETS}
       - name: AZURE_CONTAINER_SILVER
         value: ${AZURE_CONTAINER_SILVER}
       - name: LOG_FORMAT
@@ -63,7 +63,7 @@ properties:
       - name: AZURE_CONTAINER_GOLD
         value: ${AZURE_CONTAINER_GOLD}
       - name: AZURE_STORAGE_ACCOUNT_NAME
-        value: assetallocstorage001
+        value: ${AZURE_STORAGE_ACCOUNT_NAME}
       - name: AZURE_STORAGE_CONNECTION_STRING
         secretRef: azure-storage-connection-string
       - name: AZURE_FOLDER_MARKET
