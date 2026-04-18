@@ -3,6 +3,7 @@
 Status: Canonical current-state design contract for this repository.  
 Audience: Engineers and agents changing jobs runtime code, deployment manifests, workflows, configuration surfaces, or cross-repo interfaces.  
 Update rule: Update this document in the same PR as any material runtime, deploy, configuration, workflow, or interface-contract change.
+Active remediation ledger: `docs/architecture/backtesting-runtime-remediation-ledger.md` for the coordinated backtesting runtime v2 program.
 
 ## 1. Executive Summary
 
@@ -15,6 +16,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - `README.md`
 - `pyproject.toml`
 - `DEPLOYMENT_SETUP.md`
+- `docs/architecture/backtesting-runtime-remediation-ledger.md`
 - `docs/architecture/original-monolith-and-five-repo-map.md`
 - `core/control_plane_transport.py`
 
@@ -225,11 +227,18 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - Shared transport and repository helpers are consumed from `asset-allocation-runtime-common`.
 - This repo pins those dependencies in `pyproject.toml` and builds images from published packages rather than by copying sibling repositories into the runtime image.
 
+### Backtesting v2 remediation routing
+
+- Backtesting runtime v2 is contracts-repo-first. Any result-shape or serialized metadata change for backtesting must be introduced in `asset-allocation-contracts` before this repo adopts it.
+- The planned v2 contract is additive and backward-compatible. This repo should preserve v1 reads and historical compatibility while the sibling repos publish and adopt the new fields.
+- The jobs-side implementation should treat `period_return`, `window_periods`, response `metadata`, and readiness semantics as published contract inputs, not as locally invented shapes.
+
 ### Control-plane boundary
 
 - Jobs require `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE`.
 - Jobs call the control plane over authenticated HTTP via runtime-common transport and clients.
 - Jobs must not import control-plane Python modules directly for normal runtime behavior.
+- Backtesting worker preflight depends on a dedicated authenticated readiness endpoint in the control plane before claim/start flow is allowed to proceed.
 
 ### Identity and secret boundaries
 
@@ -338,6 +347,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 #### Required CI gate
 
 - `.github/workflows/quality.yml` is the canonical validation path for PRs and `main`.
+- Backtesting runtime v2 changes add a dedicated runtime quality gate (`test-backtesting-runtime`) so simulation correctness checks do not hide inside the generic fast gate.
 
 #### Environment and deploy contract
 

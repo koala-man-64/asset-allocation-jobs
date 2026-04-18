@@ -7,12 +7,21 @@ import pytest
 
 from core.backtest_runtime import (
     ResolvedBacktestDefinition,
+    _apply_rebalance_target,
+    _build_snapshot_symbol_index,
+    _market_row,
+    _maybe_update_heartbeat,
     _regime_context_for_session,
+    _periods_per_year_from_bar_size,
+    _rolling_window_periods,
     _score_snapshot,
+    _compute_rolling_metrics,
+    _compute_summary,
     validate_backtest_submission,
 )
 from core.ranking_engine.contracts import RankingSchemaConfig
 from core.strategy_engine.contracts import StrategyConfig, UniverseDefinition
+from core.strategy_engine.position_state import PositionState
 from core.strategy_engine import universe as universe_service
 
 
@@ -265,3 +274,124 @@ def test_regime_context_blocks_and_scales_exposure() -> None:
     assert transition["blocked"] is True
     assert transition["blocked_reason"] == "transition"
     assert transition["blocked_action"] == "skip_entries"
+
+
+def test_snapshot_symbol_index_reuses_preindexed_rows() -> None:
+    snapshot = pd.DataFrame(
+        {
+            "symbol": ["MSFT", "AAPL", "AAPL"],
+            "market_data__close": [10.0, 20.0, 21.0],
+        }
+    )
+
+    index = _build_snapshot_symbol_index(snapshot)
+
+    assert sorted(index) == ["AAPL", "MSFT"]
+    assert _market_row(index, "AAPL")["market_data__close"] == 20.0
+    assert _market_row(index, "NVDA") is None
+
+
+def test_maybe_update_heartbeat_throttles_until_interval_elapses(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    moments = iter([0.0, 10.0, 75.0])
+
+    class _FakeRepo:
+        def update_heartbeat(self, run_id: str) -> None:
+            calls.append(run_id)
+
+    monkeypatch.setattr("core.backtest_runtime.monotonic_time.monotonic", lambda: next(moments))
+
+    state = {"interval_seconds": 60.0, "last_heartbeat_at": None}
+
+    assert _maybe_update_heartbeat(_FakeRepo(), run_id="run-123", state=state, phase="start", force=False) is True
+    assert _maybe_update_heartbeat(_FakeRepo(), run_id="run-123", state=state, phase="loop", force=False) is False
+    assert _maybe_update_heartbeat(_FakeRepo(), run_id="run-123", state=state, phase="loop", force=False) is True
+    assert calls == ["run-123", "run-123"]
+
+
+def test_apply_rebalance_target_preserves_existing_position_state() -> None:
+    original = PositionState(
+        symbol="AAPL",
+        entry_date=datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc),
+        entry_price=100.0,
+        quantity=10.0,
+        bars_held=7,
+        highest_since_entry=125.0,
+        lowest_since_entry=94.0,
+    )
+
+    resized = _apply_rebalance_target(
+        original,
+        symbol="AAPL",
+        entry_date=datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc),
+        entry_price=110.0,
+        target_quantity=15.0,
+    )
+
+    assert resized is not None
+    assert resized.quantity == 15.0
+    assert resized.entry_date == original.entry_date
+    assert resized.entry_price == original.entry_price
+    assert resized.bars_held == original.bars_held
+    assert resized.highest_since_entry == original.highest_since_entry
+    assert resized.lowest_since_entry == original.lowest_since_entry
+
+
+def test_cadence_aware_metrics_scale_from_intraday_bar_size() -> None:
+    periods_per_year = _periods_per_year_from_bar_size("5m")
+    window_periods = _rolling_window_periods(periods_per_year=periods_per_year)
+    timeseries = pd.DataFrame(
+        {
+            "date": [
+                "2026-03-03T14:30:00Z",
+                "2026-03-03T14:35:00Z",
+            ],
+            "portfolio_value": [100.0, 100.0003000002],
+            "drawdown": [0.0, 0.0],
+            "period_return": [0.000001, 0.000002],
+            "daily_return": [0.000001, 0.000002],
+            "cumulative_return": [0.000001, 0.000003000002],
+            "cash": [0.0, 0.0],
+            "gross_exposure": [1.0, 1.0],
+            "net_exposure": [1.0, 1.0],
+            "turnover": [0.0, 0.0],
+            "commission": [0.0, 0.0],
+            "slippage_cost": [0.0, 0.0],
+            "trade_count": [0, 0],
+        }
+    )
+    trades = pd.DataFrame(
+        columns=[
+            "execution_date",
+            "symbol",
+            "quantity",
+            "price",
+            "notional",
+            "commission",
+            "slippage_cost",
+            "cash_after",
+        ]
+    )
+
+    summary = _compute_summary(
+        timeseries,
+        trades,
+        run_id="run-123",
+        run_name="intraday-test",
+        periods_per_year=periods_per_year,
+    )
+    rolling = _compute_rolling_metrics(
+        timeseries,
+        periods_per_year=periods_per_year,
+        window_periods=2,
+    )
+
+    assert periods_per_year == pytest.approx(19656.0)
+    assert window_periods == 4914
+    assert summary["annualized_return"] == pytest.approx(((1.000003000002) ** (periods_per_year / 2.0)) - 1.0)
+    assert summary["annualized_volatility"] == pytest.approx(
+        pd.Series([0.000001, 0.000002]).std(ddof=0) * (periods_per_year ** 0.5)
+    )
+    assert rolling["window_days"].tolist() == [63, 63]
+    assert rolling["window_periods"].tolist() == [2, 2]
+    assert rolling["rolling_return"].iloc[-1] == pytest.approx((1.000001 * 1.000002) - 1.0)

@@ -44,7 +44,7 @@ def test_run_lifecycle_calls_expected_internal_paths() -> None:
         repo = BacktestRepository(transport=transport)
         repo.start_run("run-123", execution_name="worker-01")
         repo.update_heartbeat("run-123")
-        repo.complete_run("run-123", summary={"sharpe": 1.2}, artifact_manifest_path="backtests/run-123/manifest.json")
+        repo.complete_run("run-123", summary={"sharpe": 1.2})
         repo.fail_run("run-123", error="boom")
     finally:
         transport.close()
@@ -55,3 +55,33 @@ def test_run_lifecycle_calls_expected_internal_paths() -> None:
         ("POST", "/api/internal/backtests/runs/run-123/complete"),
         ("POST", "/api/internal/backtests/runs/run-123/fail"),
     ]
+
+
+def test_reconcile_runs_uses_expected_internal_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/internal/backtests/runs/reconcile"
+        return httpx.Response(
+            200,
+            json={
+                "dispatchedCount": 1,
+                "dispatchFailedCount": 0,
+                "failedStaleRunningCount": 0,
+                "skippedActiveCount": 2,
+                "noActionCount": 0,
+                "dispatchedRunIds": ["run-1"],
+                "dispatchFailedRunIds": [],
+                "failedRunIds": [],
+            },
+        )
+
+    transport = _build_transport(handler)
+    try:
+        repo = BacktestRepository(transport=transport)
+        result = repo.reconcile_runs()
+    finally:
+        transport.close()
+
+    assert result.dispatchedCount == 1
+    assert result.skippedActiveCount == 2
+    assert result.dispatchedRunIds == ["run-1"]

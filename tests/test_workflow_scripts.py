@@ -404,3 +404,33 @@ def test_trigger_job_uses_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None
             "rg",
         ]
     ]
+
+
+def test_trigger_job_supports_backtest_reconcile_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/ops/trigger_job.py", "trigger_job_reconcile")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, check: commands.append(list(command)) or subprocess.CompletedProcess(command, 0),
+    )
+
+    resolved = module.start_job(
+        job_key="backtests-reconcile",
+        resource_group="rg",
+        environment={"BACKTEST_RECONCILE_JOB": "custom-backtests-reconcile-job"},
+    )
+
+    assert resolved == "custom-backtests-reconcile-job"
+    assert commands == [
+        [
+            "az",
+            "containerapp",
+            "job",
+            "start",
+            "--name",
+            "custom-backtests-reconcile-job",
+            "--resource-group",
+            "rg",
+        ]
+    ]

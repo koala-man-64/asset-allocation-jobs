@@ -43,6 +43,12 @@ Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAll
 - Use `integration.yml` to pin a released `asset-allocation-contracts` version into repo manifests.
 - Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for ad hoc operator-driven starts after deployment.
 
+## Backtesting Runtime V2
+
+- Backtesting runtime v2 is contracts-repo-first. Treat result-shape changes, new summary metadata, and any serialized v2 fields as upstream contract work before this repo adopts them.
+- Worker preflight should be read as `env + Postgres + authenticated control-plane readiness probe`, not as a loose config parse. Failure before claim/start is expected when the readiness dependency is missing or unhealthy.
+- The remediation adds a dedicated backtesting runtime quality gate (`test-backtesting-runtime`) so resize-state, cadence-aware metrics, and publish-path regressions do not hide inside `test-fast`.
+
 ## Shared Azure Foundation
 
 Run shared Azure bootstrap from the sibling `asset-allocation-control-plane` repo. Do not bootstrap from this repo.
@@ -120,6 +126,9 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - If `deploy-prod.yml` fails during apply, inspect `artifacts/rendered/*` to confirm only `Microsoft.App/jobs` resources were rendered.
 - If `deploy-prod.yml` verifies the wrong image, inspect `artifacts/previous-job-images.json` and the job image queries returned by Azure CLI.
 - If `scripts\ops\trigger_job.py` fails, verify the selected job name exists in `AssetAllocationRG`, `RESOURCE_GROUP` is set, and your Azure CLI session can run `az containerapp job start`.
+- If a backtest run fails before claim/start with an auth or reachability error, treat it as a preflight failure. Verify the readiness dependency, `ASSET_ALLOCATION_API_BASE_URL`, `ASSET_ALLOCATION_API_SCOPE`, and the control-plane identity path before retrying the job.
+- If summary metrics look daily-only on an intraday run, treat that as a cadence-metric issue, not a deployment issue. The remediation should publish cadence-aware metrics and rolling windows, so a job that still looks daily-only is not on the expected v2 path.
+- If a partial rebalance appears to reset time-stop or trailing-stop behavior, treat that as a state-preservation issue. The expected v2 behavior is to preserve active `PositionState` fields across resize operations.
 
 ## Dependencies
 

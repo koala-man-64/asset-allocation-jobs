@@ -39,6 +39,7 @@ STALE_DOC_REFERENCES = (
 
 API_BOOTSTRAP_JOB_MANIFESTS = (
     "job_backtests.yaml",
+    "job_backtests_reconcile.yaml",
     "job_platinum_rankings.yaml",
 )
 

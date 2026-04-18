@@ -49,6 +49,29 @@ def test_transport_adds_auth_and_caller_headers(monkeypatch: pytest.MonkeyPatch)
     assert payload == [{"name": "momentum"}]
 
 
+def test_transport_probe_uses_authenticated_get_request() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        assert request.headers["Authorization"] == "Bearer test-token"
+        return httpx.Response(204, content=b"")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = ControlPlaneTransport(
+        ControlPlaneTransportConfig(base_url="https://control-plane.example", api_scope="api://asset-allocation"),
+        http_client=client,
+        access_token_provider=lambda: "test-token",
+    )
+
+    try:
+        assert transport.probe("/api/internal/backtests/ready") is None
+    finally:
+        transport.close()
+
+    assert calls == [("GET", "/api/internal/backtests/ready")]
+
+
 def test_transport_raises_control_plane_request_error_with_detail() -> None:
     client = httpx.Client(
         transport=httpx.MockTransport(lambda request: httpx.Response(503, json={"detail": "Upstream unavailable"}))

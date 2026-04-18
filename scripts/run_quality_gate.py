@@ -23,6 +23,11 @@ FAST_TESTS = [
     "tests/core/test_backtest_repository.py",
 ]
 
+BACKTESTING_RUNTIME_TESTS = [
+    "tests/core/test_backtest_runtime.py",
+    "tests/tasks/test_backtesting_worker.py",
+]
+
 CONTROL_PLANE_COMPAT_TESTS = [
     "tests/core/test_control_plane_transport.py",
     "tests/core/test_strategy_repository.py",
@@ -61,6 +66,7 @@ def build_command(gate: str) -> tuple[list[str], pathlib.Path]:
         "format-python": ([python, "-m", "ruff", "format", "."], REPO_ROOT),
         "lint-fix-python": ([python, "-m", "ruff", "check", "--fix", "."], REPO_ROOT),
         "test-fast": ([python, "-m", "pytest", "-q", *FAST_TESTS], REPO_ROOT),
+        "test-backtesting-runtime": ([python, "-m", "pytest", "-q", *BACKTESTING_RUNTIME_TESTS], REPO_ROOT),
         "test-control-plane-compat": ([python, "-m", "pytest", "-q", *CONTROL_PLANE_COMPAT_TESTS], REPO_ROOT),
         "test-runtime-common-compat": ([python, "-m", "pytest", "-q", *RUNTIME_COMMON_COMPAT_TESTS], REPO_ROOT),
         "test-full": ([python, "-m", "pytest", "-q"], REPO_ROOT),

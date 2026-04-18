@@ -2,23 +2,18 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import re
+import time as monotonic_time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timezone
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
+from asset_allocation_runtime_common import BACKTEST_RESULTS_SCHEMA_VERSION, persist_backtest_results
 
-from core.backtest_artifacts import (
-    list_artifacts,
-    read_json_artifact,
-    read_parquet_artifact,
-    write_json_artifact,
-    write_manifest,
-    write_parquet_artifact,
-    write_text_artifact,
-)
 from core.backtest_repository import BacktestRepository
 from core.postgres import connect
 from core.ranking_engine import service as ranking_service
@@ -37,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 _PRICE_TABLE = "market_data"
 _PRICE_COLUMNS = {"open", "high", "low", "close", "volume"}
+_DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
+_TRADING_DAYS_PER_YEAR = 252.0
+_TRADING_MINUTES_PER_DAY = 390.0
+_DEFAULT_ROLLING_WINDOW_DAYS = 63
 
 
 @dataclass(frozen=True)
@@ -523,11 +522,25 @@ def _score_snapshot(
     return filtered[["rebalance_ts", "symbol", "score", "ordinal", "selected", "target_weight"]]
 
 
-def _market_row(snapshot: pd.DataFrame, symbol: str) -> pd.Series | None:
+def _market_row(snapshot: pd.DataFrame | dict[str, pd.Series], symbol: str) -> pd.Series | None:
+    if isinstance(snapshot, dict):
+        return snapshot.get(symbol)
     matches = snapshot[snapshot["symbol"] == symbol]
     if matches.empty:
         return None
     return matches.iloc[0]
+
+
+def _build_snapshot_symbol_index(snapshot: pd.DataFrame) -> dict[str, pd.Series]:
+    if snapshot.empty or "symbol" not in snapshot.columns:
+        return {}
+    indexed: dict[str, pd.Series] = {}
+    deduped = snapshot.drop_duplicates(subset=["symbol"]).reset_index(drop=True)
+    for _, row in deduped.iterrows():
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol:
+            indexed[symbol] = row
+    return indexed
 
 
 def _price_bar(ts: datetime, row: pd.Series) -> PriceBar:
@@ -555,6 +568,109 @@ def _maybe_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _apply_rebalance_target(
+    position: PositionState | None,
+    *,
+    symbol: str,
+    entry_date: datetime,
+    entry_price: float,
+    target_quantity: float,
+) -> PositionState | None:
+    if target_quantity <= 1e-9:
+        return None
+    if position is None:
+        return PositionState(
+            symbol=symbol,
+            entry_date=entry_date,
+            entry_price=entry_price,
+            quantity=float(target_quantity),
+        )
+    return replace(position, quantity=float(target_quantity))
+
+
+def _heartbeat_interval_seconds() -> float:
+    raw_value = str(os.environ.get("BACKTEST_HEARTBEAT_INTERVAL_SECONDS") or "").strip()
+    if not raw_value:
+        return _DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    try:
+        return max(5.0, float(raw_value))
+    except Exception:
+        return _DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+
+
+def _normalize_bar_size(bar_size: str | None) -> str | None:
+    normalized = str(bar_size or "").strip().lower()
+    return normalized or None
+
+
+def _periods_per_year_from_bar_size(bar_size: str | None) -> float:
+    normalized = _normalize_bar_size(bar_size)
+    if normalized is None or normalized in {"1d", "d", "day", "days", "daily"}:
+        return _TRADING_DAYS_PER_YEAR
+
+    match = re.fullmatch(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>[a-z]+)", normalized)
+    if not match:
+        raise ValueError(f"Unsupported bar_size '{bar_size}'.")
+
+    value = float(match.group("value"))
+    if value <= 0:
+        raise ValueError(f"Unsupported bar_size '{bar_size}'.")
+
+    unit = match.group("unit")
+    if unit in {"m", "min", "mins", "minute", "minutes"}:
+        return _TRADING_DAYS_PER_YEAR * (_TRADING_MINUTES_PER_DAY / value)
+    if unit in {"h", "hr", "hrs", "hour", "hours"}:
+        return _TRADING_DAYS_PER_YEAR * (6.5 / value)
+    if unit in {"w", "wk", "wks", "week", "weeks"}:
+        return _TRADING_DAYS_PER_YEAR / (5.0 * value)
+    if unit in {"mo", "mon", "month", "months"}:
+        return _TRADING_DAYS_PER_YEAR / (21.0 * value)
+
+    raise ValueError(f"Unsupported bar_size '{bar_size}'.")
+
+
+def _rolling_window_periods(*, periods_per_year: float, window_days: int = _DEFAULT_ROLLING_WINDOW_DAYS) -> int:
+    return max(1, int(round(window_days * periods_per_year / _TRADING_DAYS_PER_YEAR)))
+
+
+def _log_stage_timing(phase: str, started_at: float, **fields: object) -> None:
+    parts = [f"phase={phase}", f"duration_sec={monotonic_time.monotonic() - started_at:.2f}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        parts.append(f"{key}={text}")
+    logger.info("backtest_stage_timing %s", " ".join(parts))
+
+
+def _maybe_update_heartbeat(
+    repo: BacktestRepository,
+    *,
+    run_id: str,
+    state: dict[str, Any],
+    phase: str,
+    force: bool = False,
+) -> bool:
+    interval_seconds = float(state["interval_seconds"])
+    now_monotonic = monotonic_time.monotonic()
+    last_heartbeat_at = state.get("last_heartbeat_at")
+    if not force and last_heartbeat_at is not None and (now_monotonic - float(last_heartbeat_at)) < interval_seconds:
+        return False
+    if last_heartbeat_at is not None and (now_monotonic - float(last_heartbeat_at)) > (interval_seconds * 1.5):
+        logger.warning(
+            "backtest_lifecycle_event phase=heartbeat_delay run_id=%s delay_sec=%.2f threshold_sec=%.2f",
+            run_id,
+            now_monotonic - float(last_heartbeat_at),
+            interval_seconds,
+        )
+    repo.update_heartbeat(run_id)
+    state["last_heartbeat_at"] = now_monotonic
+    logger.info("backtest_lifecycle_event phase=heartbeat run_id=%s heartbeat_phase=%s", run_id, phase)
+    return True
 
 
 def _costs_from_raw_config(raw: dict[str, Any]) -> tuple[float, float]:
@@ -809,7 +925,14 @@ def _execute_trade(
     return cash_after, commission, slippage
 
 
-def _compute_summary(timeseries: pd.DataFrame, trades: pd.DataFrame, *, run_id: str, run_name: str | None) -> dict[str, Any]:
+def _compute_summary(
+    timeseries: pd.DataFrame,
+    trades: pd.DataFrame,
+    *,
+    run_id: str,
+    run_name: str | None,
+    periods_per_year: float,
+) -> dict[str, Any]:
     if timeseries.empty:
         return {
             "run_id": run_id,
@@ -822,13 +945,13 @@ def _compute_summary(timeseries: pd.DataFrame, trades: pd.DataFrame, *, run_id: 
             "trades": int(len(trades)),
             "initial_cash": 0.0,
             "final_equity": 0.0,
-        }
+    }
     initial_cash = float(timeseries["portfolio_value"].iloc[0])
     final_equity = float(timeseries["portfolio_value"].iloc[-1])
     total_return = (final_equity / initial_cash - 1.0) if initial_cash else 0.0
-    returns = pd.to_numeric(timeseries["daily_return"], errors="coerce").fillna(0.0)
+    returns = pd.to_numeric(timeseries["period_return"], errors="coerce").fillna(0.0)
     periods = max(len(returns), 1)
-    annualization = 252.0
+    annualization = float(periods_per_year)
     annualized_return = (1.0 + total_return) ** (annualization / periods) - 1.0 if periods > 0 else 0.0
     annualized_volatility = float(returns.std(ddof=0) * math.sqrt(annualization)) if len(returns) > 1 else 0.0
     sharpe_ratio = annualized_return / annualized_volatility if annualized_volatility > 0 else 0.0
@@ -849,12 +972,18 @@ def _compute_summary(timeseries: pd.DataFrame, trades: pd.DataFrame, *, run_id: 
     }
 
 
-def _compute_rolling_metrics(timeseries: pd.DataFrame, *, window_bars: int = 63) -> pd.DataFrame:
+def _compute_rolling_metrics(
+    timeseries: pd.DataFrame,
+    *,
+    periods_per_year: float,
+    window_periods: int,
+) -> pd.DataFrame:
     if timeseries.empty:
         return pd.DataFrame(
             columns=[
                 "date",
                 "window_days",
+                "window_periods",
                 "rolling_return",
                 "rolling_volatility",
                 "rolling_sharpe",
@@ -868,26 +997,26 @@ def _compute_rolling_metrics(timeseries: pd.DataFrame, *, window_bars: int = 63)
             ]
         )
     frame = timeseries.copy()
-    returns = pd.to_numeric(frame["daily_return"], errors="coerce").fillna(0.0)
-    frame["rolling_return"] = (1.0 + returns).rolling(window_bars).apply(lambda values: float(np.prod(values) - 1.0), raw=True)
-    frame["rolling_volatility"] = returns.rolling(window_bars).std(ddof=0) * math.sqrt(252.0)
-    frame["rolling_sharpe"] = np.where(
-        frame["rolling_volatility"].fillna(0.0) > 0,
-        frame["rolling_return"] * (252.0 / max(window_bars, 1)) / frame["rolling_volatility"],
-        0.0,
-    )
-    frame["rolling_max_drawdown"] = frame["drawdown"].rolling(window_bars).min()
-    frame["turnover_sum"] = pd.to_numeric(frame["turnover"], errors="coerce").fillna(0.0).rolling(window_bars).sum()
-    frame["commission_sum"] = pd.to_numeric(frame["commission"], errors="coerce").fillna(0.0).rolling(window_bars).sum()
-    frame["slippage_cost_sum"] = pd.to_numeric(frame["slippage_cost"], errors="coerce").fillna(0.0).rolling(window_bars).sum()
-    frame["n_trades_sum"] = pd.to_numeric(frame["trade_count"], errors="coerce").fillna(0.0).rolling(window_bars).sum()
-    frame["gross_exposure_avg"] = pd.to_numeric(frame["gross_exposure"], errors="coerce").fillna(0.0).rolling(window_bars).mean()
-    frame["net_exposure_avg"] = pd.to_numeric(frame["net_exposure"], errors="coerce").fillna(0.0).rolling(window_bars).mean()
-    frame["window_days"] = window_bars
+    returns = pd.to_numeric(frame["period_return"], errors="coerce").fillna(0.0)
+    frame["rolling_return"] = (1.0 + returns).rolling(window_periods).apply(lambda values: float(np.prod(values) - 1.0), raw=True)
+    frame["rolling_volatility"] = returns.rolling(window_periods).std(ddof=0) * math.sqrt(periods_per_year)
+    annualized_rolling_return = (1.0 + frame["rolling_return"]).pow(periods_per_year / max(window_periods, 1)) - 1.0
+    safe_volatility = frame["rolling_volatility"].replace(0.0, np.nan)
+    frame["rolling_sharpe"] = (annualized_rolling_return / safe_volatility).fillna(0.0)
+    frame["rolling_max_drawdown"] = frame["drawdown"].rolling(window_periods).min()
+    frame["turnover_sum"] = pd.to_numeric(frame["turnover"], errors="coerce").fillna(0.0).rolling(window_periods).sum()
+    frame["commission_sum"] = pd.to_numeric(frame["commission"], errors="coerce").fillna(0.0).rolling(window_periods).sum()
+    frame["slippage_cost_sum"] = pd.to_numeric(frame["slippage_cost"], errors="coerce").fillna(0.0).rolling(window_periods).sum()
+    frame["n_trades_sum"] = pd.to_numeric(frame["trade_count"], errors="coerce").fillna(0.0).rolling(window_periods).sum()
+    frame["gross_exposure_avg"] = pd.to_numeric(frame["gross_exposure"], errors="coerce").fillna(0.0).rolling(window_periods).mean()
+    frame["net_exposure_avg"] = pd.to_numeric(frame["net_exposure"], errors="coerce").fillna(0.0).rolling(window_periods).mean()
+    frame["window_days"] = _DEFAULT_ROLLING_WINDOW_DAYS
+    frame["window_periods"] = window_periods
     return frame[
         [
             "date",
             "window_days",
+            "window_periods",
             "rolling_return",
             "rolling_volatility",
             "rolling_sharpe",
@@ -908,6 +1037,7 @@ def execute_backtest_run(
     run_id: str,
     execution_name: str | None = None,
 ) -> dict[str, Any]:
+    runtime_started_at = monotonic_time.monotonic()
     repo = BacktestRepository(dsn)
     run = repo.get_run(run_id)
     if not run:
@@ -920,6 +1050,18 @@ def execute_backtest_run(
 
     start_ts = _ensure_utc(run["start_ts"])
     end_ts = _ensure_utc(run["end_ts"])
+    bar_size = str(run.get("bar_size") or "").strip() or None
+    periods_per_year = _periods_per_year_from_bar_size(bar_size)
+    rolling_window_periods = _rolling_window_periods(periods_per_year=periods_per_year)
+    _log_stage_timing(
+        "run_context_ready",
+        runtime_started_at,
+        run_id=run_id,
+        execution_name=execution_name,
+        bar_size=bar_size,
+        periods_per_year=f"{periods_per_year:.2f}",
+        rolling_window_periods=rolling_window_periods,
+    )
     definition = resolve_backtest_definition(
         dsn,
         strategy_name=str(run["strategy_name"] or ""),
@@ -932,7 +1074,13 @@ def execute_backtest_run(
         definition=definition,
         start_ts=start_ts,
         end_ts=end_ts,
-        bar_size=str(run.get("bar_size") or "").strip() or None,
+        bar_size=bar_size,
+    )
+    _log_stage_timing(
+        "validation_complete",
+        runtime_started_at,
+        run_id=run_id,
+        schedule_bars=len(schedule),
     )
 
     table_specs = universe_service._load_gold_table_specs(dsn)
@@ -941,6 +1089,13 @@ def execute_backtest_run(
     for ts in schedule:
         grouped_schedule[ts.date()].append(ts)
     regime_schedule_map = _load_regime_schedule_map(dsn, definition=definition, schedule=schedule)
+    _log_stage_timing(
+        "schedule_materialized",
+        runtime_started_at,
+        run_id=run_id,
+        sessions=len(grouped_schedule),
+        schedule_bars=len(schedule),
+    )
 
     evaluator = ExitRuleEvaluator()
     commission_bps, slippage_bps = _costs_from_raw_config(definition.strategy_config_raw)
@@ -951,31 +1106,53 @@ def execute_backtest_run(
     regime_trace_rows: list[dict[str, Any]] = []
     trade_rows: list[dict[str, Any]] = []
     timeseries_rows: list[dict[str, Any]] = []
-    log_lines = [f"run_id={run_id} strategy={definition.strategy_name} bars={len(schedule)}"]
     previous_equity = cash
+    initial_equity = cash
+    running_peak = cash
     previous_close_by_symbol: dict[str, float] = {}
     first_signal_computed = False
+    heartbeat_state: dict[str, Any] = {
+        "interval_seconds": _heartbeat_interval_seconds(),
+        "last_heartbeat_at": None,
+    }
+
+    _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="run_initialized", force=True)
 
     for session_date, session_schedule in grouped_schedule.items():
         session_start, session_end = _session_bounds(session_schedule[0])
+        session_started_at = monotonic_time.monotonic()
         intraday_frames = _load_intraday_session_frames(
             dsn,
             table_specs=table_specs,
             required_columns=required_columns,
             session_start=session_start,
             session_end=session_end,
-            bar_size=str(run.get("bar_size") or "").strip() or None,
+            bar_size=bar_size,
         )
         slow_frames = _load_slow_frames(
             dsn,
             table_specs=table_specs,
             required_columns=required_columns,
             as_of_ts=session_schedule[-1],
-            bar_size=str(run.get("bar_size") or "").strip() or None,
+            bar_size=bar_size,
+        )
+        _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="session_frames_loaded")
+        intraday_row_count = sum(len(frame) for frame in intraday_frames.values())
+        slow_row_count = sum(len(frame) for frame in slow_frames.values())
+        _log_stage_timing(
+            "session_frames_loaded",
+            session_started_at,
+            run_id=run_id,
+            session_date=session_date.isoformat(),
+            session_bars=len(session_schedule),
+            intraday_rows=intraday_row_count,
+            slow_rows=slow_row_count,
         )
         for index, current_ts in enumerate(session_schedule):
             snapshot = _snapshot_for_timestamp(current_ts, intraday_frames=intraday_frames, slow_frames=slow_frames)
-            repo.update_heartbeat(run_id)
+            snapshot_index = _build_snapshot_symbol_index(snapshot)
+            price_bar_cache: dict[str, PriceBar] = {}
+            _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="bar_loop")
             regime_row = regime_schedule_map.get(session_date)
             regime_context = _regime_context_for_session(definition.strategy_config.regimePolicy, regime_row)
             regime_trace_rows.append(
@@ -1012,13 +1189,14 @@ def execute_backtest_run(
                     rebalance_ts=current_ts,
                     target_weight_multiplier=float(regime_context["exposure_multiplier"]),
                 )
-                selection_trace_rows.extend(initial_ranking.to_dict("records"))
+                initial_ranking_records = initial_ranking.to_dict("records")
+                selection_trace_rows.extend(initial_ranking_records)
                 if regime_context["blocked"] and regime_context["blocked_action"] == "skip_rebalance":
                     pending_target_weights = {}
                 else:
                     pending_target_weights = {
                         str(row["symbol"]): float(row["target_weight"])
-                        for row in initial_ranking.to_dict("records")
+                        for row in initial_ranking_records
                         if bool(row["selected"])
                     }
                 first_signal_computed = True
@@ -1030,7 +1208,7 @@ def execute_backtest_run(
             market_equity_open = cash
 
             for symbol, position in list(positions.items()):
-                row = _market_row(snapshot, symbol)
+                row = _market_row(snapshot_index, symbol)
                 if row is None:
                     market_equity_open += position.quantity * previous_close_by_symbol.get(symbol, position.entry_price)
                     continue
@@ -1041,7 +1219,7 @@ def execute_backtest_run(
                 target_qty_by_symbol: dict[str, float] = {}
                 if pending_target_weights:
                     for symbol, target_weight in pending_target_weights.items():
-                        row = _market_row(snapshot, symbol)
+                        row = _market_row(snapshot_index, symbol)
                         if row is None:
                             continue
                         open_price = _maybe_float(row.get(f"{_PRICE_TABLE}__open")) or _maybe_float(
@@ -1053,7 +1231,7 @@ def execute_backtest_run(
 
                 all_symbols = sorted(set(positions.keys()) | set(target_qty_by_symbol.keys()))
                 for symbol in all_symbols:
-                    row = _market_row(snapshot, symbol)
+                    row = _market_row(snapshot_index, symbol)
                     if row is None:
                         continue
                     open_price = _maybe_float(row.get(f"{_PRICE_TABLE}__open")) or _maybe_float(
@@ -1085,20 +1263,24 @@ def execute_backtest_run(
                         positions.pop(symbol, None)
                         previous_close_by_symbol.pop(symbol, None)
                     else:
-                        positions[symbol] = PositionState(
+                        positions[symbol] = _apply_rebalance_target(
+                            positions.get(symbol),
                             symbol=symbol,
                             entry_date=current_ts,
                             entry_price=open_price,
-                            quantity=float(target_qty),
+                            target_quantity=float(target_qty),
                         )
 
             pending_target_weights = {}
 
             for symbol, position in list(positions.items()):
-                row = _market_row(snapshot, symbol)
+                row = _market_row(snapshot_index, symbol)
                 if row is None:
                     continue
-                bar = _price_bar(current_ts, row)
+                bar = price_bar_cache.get(symbol)
+                if bar is None:
+                    bar = _price_bar(current_ts, row)
+                    price_bar_cache[symbol] = bar
                 evaluation = evaluator.evaluate_bar(definition.strategy_config, position, bar)
                 positions[symbol] = evaluation.position_state
                 if evaluation.decision is None:
@@ -1123,7 +1305,7 @@ def execute_backtest_run(
             close_equity = cash
             gross_exposure = 0.0
             for symbol, position in positions.items():
-                row = _market_row(snapshot, symbol)
+                row = _market_row(snapshot_index, symbol)
                 close_price = None
                 if row is not None:
                     close_price = _maybe_float(row.get(f"{_PRICE_TABLE}__close")) or _maybe_float(row.get(f"{_PRICE_TABLE}__open"))
@@ -1135,15 +1317,16 @@ def execute_backtest_run(
                 gross_exposure += abs(position_value)
 
             period_return = (close_equity / previous_equity - 1.0) if previous_equity else 0.0
-            running_peak = max([close_equity, *(row["portfolio_value"] for row in timeseries_rows)] if timeseries_rows else [close_equity])
+            running_peak = max(running_peak, close_equity)
             drawdown = (close_equity / running_peak - 1.0) if running_peak else 0.0
             timeseries_rows.append(
                 {
                     "date": current_ts.isoformat(),
                     "portfolio_value": float(close_equity),
                     "drawdown": float(drawdown),
+                    "period_return": float(period_return),
                     "daily_return": float(period_return),
-                    "cumulative_return": float(close_equity / timeseries_rows[0]["portfolio_value"] - 1.0) if timeseries_rows else 0.0,
+                    "cumulative_return": float(close_equity / initial_equity - 1.0) if initial_equity else 0.0,
                     "cash": float(cash),
                     "gross_exposure": float(gross_exposure / close_equity) if close_equity else 0.0,
                     "net_exposure": float(gross_exposure / close_equity) if close_equity else 0.0,
@@ -1164,86 +1347,64 @@ def execute_backtest_run(
                     rebalance_ts=current_ts,
                     target_weight_multiplier=float(regime_context["exposure_multiplier"]),
                 )
-                selection_trace_rows.extend(ranking.to_dict("records"))
+                ranking_records = ranking.to_dict("records")
+                selection_trace_rows.extend(ranking_records)
                 if regime_context["blocked"] and regime_context["blocked_action"] == "skip_rebalance":
                     pending_target_weights = {}
                 else:
                     pending_target_weights = {
                         str(row["symbol"]): float(row["target_weight"])
-                        for row in ranking.to_dict("records")
+                        for row in ranking_records
                         if bool(row["selected"])
                     }
 
     timeseries = pd.DataFrame(timeseries_rows)
     trades = pd.DataFrame(trade_rows)
-    selection_trace = pd.DataFrame(selection_trace_rows)
-    regime_trace = pd.DataFrame(regime_trace_rows)
-    rolling_metrics = _compute_rolling_metrics(timeseries)
+    rolling_metrics = _compute_rolling_metrics(
+        timeseries,
+        periods_per_year=periods_per_year,
+        window_periods=rolling_window_periods,
+    )
     summary = _compute_summary(
         timeseries,
         trades,
         run_id=run_id,
         run_name=run.get("run_name"),
+        periods_per_year=periods_per_year,
     )
 
-    write_json_artifact(run_id, "effective_config.json", {
-        "strategy": definition.strategy_config_raw,
-        "pins": {
-            "strategyName": definition.strategy_name,
-            "strategyVersion": definition.strategy_version,
-            "rankingSchemaName": definition.ranking_schema_name,
-            "rankingSchemaVersion": definition.ranking_schema_version,
-            "universeName": definition.ranking_universe_name,
-            "universeVersion": definition.ranking_universe_version,
-            "regimeModelName": definition.regime_model_name,
-            "regimeModelVersion": definition.regime_model_version,
-        },
-        "run": {
-            "startTs": start_ts.isoformat(),
-            "endTs": end_ts.isoformat(),
-            "barSize": run.get("bar_size"),
-        },
-    })
-    write_json_artifact(run_id, "summary.json", summary)
-    write_parquet_artifact(run_id, "timeseries.parquet", timeseries)
-    write_parquet_artifact(run_id, "rolling_metrics.parquet", rolling_metrics)
-    write_parquet_artifact(run_id, "trades.parquet", trades)
-    write_parquet_artifact(run_id, "selection_trace.parquet", selection_trace)
-    write_parquet_artifact(run_id, "regime_trace.parquet", regime_trace)
-    write_text_artifact(run_id, "worker.log", "\n".join(log_lines))
-    manifest_path = write_manifest(run_id)
-    repo.complete_run(run_id, summary=summary, artifact_manifest_path=manifest_path)
-    return {
-        "summary": summary,
-        "artifacts": list_artifacts(run_id),
-    }
-
-
-def load_summary(run_id: str, *, repo: BacktestRepository) -> dict[str, Any]:
-    run = repo.get_run(run_id)
-    if not run:
-        raise ValueError(f"Run '{run_id}' not found.")
-    summary = run.get("summary_json") or {}
-    if isinstance(summary, dict) and summary:
-        return summary
-    artifact_summary = read_json_artifact(run_id, "summary.json")
-    if artifact_summary is None:
-        raise FileNotFoundError(f"Summary artifact missing for run '{run_id}'.")
-    return artifact_summary
-
-
-def load_timeseries(run_id: str) -> pd.DataFrame:
-    return read_parquet_artifact(run_id, "timeseries.parquet")
-
-
-def load_trades(run_id: str) -> pd.DataFrame:
-    return read_parquet_artifact(run_id, "trades.parquet")
-
-
-def load_rolling_metrics(run_id: str, *, window_days: int = 63) -> pd.DataFrame:
-    artifact = read_parquet_artifact(run_id, "rolling_metrics.parquet")
-    if not artifact.empty and "window_days" in artifact.columns:
-        filtered = artifact[pd.to_numeric(artifact["window_days"], errors="coerce") == int(window_days)]
-        if not filtered.empty:
-            return filtered.reset_index(drop=True)
-    return _compute_rolling_metrics(load_timeseries(run_id), window_bars=max(2, int(window_days)))
+    _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="postgres_publish_start")
+    _log_stage_timing(
+        "publish_start",
+        runtime_started_at,
+        run_id=run_id,
+        timeseries_rows=len(timeseries_rows),
+        rolling_rows=len(rolling_metrics),
+        trade_rows=len(trade_rows),
+        selection_rows=len(selection_trace_rows),
+        regime_rows=len(regime_trace_rows),
+    )
+    persist_backtest_results(
+        dsn,
+        run_id,
+        summary=summary,
+        timeseries_rows=timeseries_rows,
+        rolling_metric_rows=rolling_metrics.to_dict("records"),
+        trade_rows=trade_rows,
+        selection_trace_rows=selection_trace_rows,
+        regime_trace_rows=regime_trace_rows,
+        results_schema_version=BACKTEST_RESULTS_SCHEMA_VERSION,
+    )
+    _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="postgres_publish_complete", force=True)
+    _log_stage_timing(
+        "publish_complete",
+        runtime_started_at,
+        run_id=run_id,
+        timeseries_rows=len(timeseries_rows),
+        rolling_rows=len(rolling_metrics),
+        trade_rows=len(trade_rows),
+        selection_rows=len(selection_trace_rows),
+        regime_rows=len(regime_trace_rows),
+    )
+    repo.complete_run(run_id, summary=summary)
+    return {"summary": summary}
