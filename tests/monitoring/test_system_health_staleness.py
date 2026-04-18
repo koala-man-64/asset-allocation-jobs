@@ -6,12 +6,25 @@ from monitoring import system_health
 
 
 class _DummyStore:
-    def __init__(self, *, marker_last_modified: datetime | None = None, marker_error: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        marker_last_modified: datetime | None = None,
+        marker_error: Exception | None = None,
+        blob_last_modified: dict[str, datetime | None] | None = None,
+        blob_errors: dict[str, Exception] | None = None,
+    ):
         self._marker_last_modified = marker_last_modified
         self._marker_error = marker_error
+        self._blob_last_modified = dict(blob_last_modified or {})
+        self._blob_errors = dict(blob_errors or {})
 
     def get_blob_last_modified(self, *, container: str, blob_name: str) -> datetime | None:
         del container
+        if blob_name in self._blob_errors:
+            raise self._blob_errors[blob_name]
+        if blob_name in self._blob_last_modified:
+            return self._blob_last_modified[blob_name]
         del blob_name
         if self._marker_error is not None:
             raise self._marker_error
@@ -127,6 +140,47 @@ def test_probe_error_returns_error() -> None:
 
     assert resolved.status == "error"
     assert "403 Forbidden" in str(resolved.error)
+
+
+def test_gold_regime_marker_missing_falls_back_to_domain_artifact(monkeypatch) -> None:
+    artifact_time = datetime(2026, 2, 16, 9, 30, tzinfo=timezone.utc)
+    store = _DummyStore(blob_last_modified={"regime/_metadata/domain.json": artifact_time})
+    monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")
+
+    resolved = system_health._resolve_last_updated_with_marker_probes(
+        layer_name="Gold",
+        domain_name="regime",
+        store=store,  # type: ignore[arg-type]
+        marker_cfg=_marker_cfg(enabled=True),
+    )
+
+    assert resolved.status == "ok"
+    assert resolved.source == "domain-artifact-fallback"
+    assert resolved.last_updated == artifact_time
+    assert any("Marker missing" in warning for warning in resolved.warnings)
+    assert any("domain artifact fallback" in warning.lower() for warning in resolved.warnings)
+
+
+def test_gold_regime_marker_error_falls_back_to_domain_artifact(monkeypatch) -> None:
+    artifact_time = datetime(2026, 2, 16, 9, 45, tzinfo=timezone.utc)
+    store = _DummyStore(
+        marker_error=RuntimeError("403 Forbidden"),
+        blob_last_modified={"regime/_metadata/domain.json": artifact_time},
+    )
+    monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")
+
+    resolved = system_health._resolve_last_updated_with_marker_probes(
+        layer_name="Gold",
+        domain_name="regime",
+        store=store,  # type: ignore[arg-type]
+        marker_cfg=_marker_cfg(enabled=True),
+    )
+
+    assert resolved.status == "ok"
+    assert resolved.source == "domain-artifact-fallback"
+    assert resolved.last_updated == artifact_time
+    assert any("403 Forbidden" in warning for warning in resolved.warnings)
+    assert any("domain artifact fallback" in warning.lower() for warning in resolved.warnings)
 
 
 def test_marker_disabled_returns_error() -> None:

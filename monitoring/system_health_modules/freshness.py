@@ -168,6 +168,84 @@ def _probe_marker_last_modified(
     return LastModifiedProbeResult(state="ok", last_modified=last_modified)
 
 
+def _domain_artifact_fallback_blob(*, layer_name: str, domain_name: str) -> Optional[str]:
+    if _normalize_layer_key(layer_name) != "gold":
+        return None
+    if _normalize_domain_key(domain_name) != "regime":
+        return None
+    return "regime/_metadata/domain.json"
+
+
+def _resolve_last_updated_with_domain_artifact_fallback(
+    *,
+    layer_name: str,
+    domain_name: str,
+    store: AzureBlobStore,
+    marker_message: str,
+) -> Optional["DomainTimestampResolution"]:
+    artifact_blob = _domain_artifact_fallback_blob(layer_name=layer_name, domain_name=domain_name)
+    if not artifact_blob:
+        return None
+
+    artifact_container = _env_or_default(
+        "AZURE_CONTAINER_GOLD",
+        _config_str("AZURE_CONTAINER_GOLD"),
+    ).strip()
+    if not artifact_container:
+        artifact_message = "Gold regime domain artifact fallback unavailable: AZURE_CONTAINER_GOLD is not configured."
+        logger.error(artifact_message)
+        return DomainTimestampResolution(
+            status="error",
+            last_updated=None,
+            source="domain-artifact-fallback",
+            warnings=[marker_message, artifact_message],
+            error=artifact_message,
+        )
+
+    artifact_probe = _probe_marker_last_modified(
+        store=store,
+        container=artifact_container,
+        marker_blob=artifact_blob,
+    )
+    if artifact_probe.state == "ok":
+        resolution_message = (
+            f"Freshness resolved via domain artifact fallback for {artifact_blob} "
+            "after the health marker probe failed."
+        )
+        logger.warning(
+            "%s layer=%s domain=%s container=%s",
+            resolution_message,
+            layer_name,
+            domain_name,
+            artifact_container,
+        )
+        return DomainTimestampResolution(
+            status="ok",
+            last_updated=artifact_probe.last_modified,
+            source="domain-artifact-fallback",
+            warnings=[marker_message, resolution_message],
+        )
+
+    if artifact_probe.state == "error":
+        artifact_message = f"Domain artifact fallback probe failed for {artifact_blob}: {artifact_probe.error or 'unknown error'}"
+    else:
+        artifact_message = f"Domain artifact fallback missing for {artifact_blob}."
+    logger.error(
+        "%s layer=%s domain=%s container=%s",
+        artifact_message,
+        layer_name,
+        domain_name,
+        artifact_container,
+    )
+    return DomainTimestampResolution(
+        status="error",
+        last_updated=None,
+        source="domain-artifact-fallback",
+        warnings=[marker_message, artifact_message],
+        error=artifact_message,
+    )
+
+
 def _normalize_probe_result(raw: Any) -> LastModifiedProbeResult:
     if isinstance(raw, LastModifiedProbeResult):
         return raw
@@ -287,6 +365,16 @@ def _resolve_last_updated_with_marker_probes(
         message = f"Marker probe failed for {marker_blob}: {marker_probe.error or 'unknown error'}"
     else:
         message = f"Marker missing for {marker_blob}."
+    fallback_resolution = _resolve_last_updated_with_domain_artifact_fallback(
+        layer_name=layer_name,
+        domain_name=domain_name,
+        store=store,
+        marker_message=message,
+    )
+    if fallback_resolution is not None:
+        logger.warning(message)
+        return fallback_resolution
+
     logger.error(message)
     return DomainTimestampResolution(
         status="error",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
@@ -146,11 +146,13 @@ def test_write_storage_outputs_refreshes_persisted_metadata_snapshots(monkeypatc
     monkeypatch.setattr(regime_job.mdc, "get_storage_client", lambda _container: _FakeClient())
     monkeypatch.setattr(regime_job, "computed_at_iso", lambda: "2026-03-21T12:00:00+00:00")
     monkeypatch.setattr(
-        "core.domain_artifacts.mdc.save_json_content",
+        regime_job.domain_artifacts.mdc,
+        "save_json_content",
         lambda payload, path, client=None: saved_artifact.update({"payload": payload, "path": path, "client": client}),
     )
     monkeypatch.setattr(
-        "core.domain_artifacts.domain_metadata_snapshots.update_domain_metadata_snapshots_from_artifact",
+        regime_job.domain_artifacts.domain_metadata_snapshots,
+        "update_domain_metadata_snapshots_from_artifact",
         lambda **kwargs: snapshot_updates.append(kwargs),
     )
 
@@ -165,6 +167,14 @@ def test_write_storage_outputs_refreshes_persisted_metadata_snapshots(monkeypatc
         history=history,
         latest=latest,
         transitions=transitions,
+        active_revisions=[
+            {
+                "name": "default-regime",
+                "version": 1,
+                "activated_at": "2026-03-20T00:00:00+00:00",
+            }
+        ],
+        warnings=["Trailing incomplete regime input dates skipped from published regime surfaces."],
     )
 
     assert parquet_paths == [
@@ -176,10 +186,151 @@ def test_write_storage_outputs_refreshes_persisted_metadata_snapshots(monkeypatc
     assert saved_artifact["path"] == "regime/_metadata/domain.json"
     assert saved_artifact["payload"]["artifactPath"] == "regime/_metadata/domain.json"
     assert saved_artifact["payload"]["rootPath"] == "regime"
+    assert saved_artifact["payload"]["warnings"] == [
+        "Trailing incomplete regime input dates skipped from published regime surfaces."
+    ]
     assert len(snapshot_updates) == 1
     assert snapshot_updates[0]["layer"] == "gold"
     assert snapshot_updates[0]["domain"] == "regime"
     assert snapshot_updates[0]["artifact"]["artifactPath"] == "regime/_metadata/domain.json"
+
+
+def test_build_revision_inputs_uses_model_halt_threshold_for_streak_and_overlay() -> None:
+    inputs = pd.DataFrame(
+        [
+            {
+                "as_of_date": "2026-03-18",
+                "return_1d": -0.01,
+                "return_20d": -0.05,
+                "rvol_10d_ann": 31.0,
+                "vix_spot_close": 27.0,
+                "vix3m_close": 26.0,
+                "vix_slope": -1.0,
+                "vix_gt_32_streak": 0,
+                "inputs_complete_flag": True,
+            },
+            {
+                "as_of_date": "2026-03-19",
+                "return_1d": -0.01,
+                "return_20d": -0.05,
+                "rvol_10d_ann": 31.0,
+                "vix_spot_close": 29.0,
+                "vix3m_close": 28.0,
+                "vix_slope": -1.0,
+                "vix_gt_32_streak": 0,
+                "inputs_complete_flag": True,
+            },
+            {
+                "as_of_date": "2026-03-20",
+                "return_1d": -0.01,
+                "return_20d": -0.05,
+                "rvol_10d_ann": 31.0,
+                "vix_spot_close": 29.0,
+                "vix3m_close": 28.0,
+                "vix_slope": -1.0,
+                "vix_gt_32_streak": 0,
+                "inputs_complete_flag": True,
+            },
+        ]
+    )
+
+    revision_inputs, resolved_config = regime_job._build_revision_inputs(
+        inputs,
+        config={"haltVixThreshold": 28.0, "haltVixStreakDays": 2},
+    )
+    history, latest, _transitions = regime_job.build_regime_outputs(
+        revision_inputs,
+        model_name="default-regime",
+        model_version=7,
+        config=resolved_config,
+        computed_at=datetime(2026, 3, 21, tzinfo=timezone.utc),
+    )
+
+    assert revision_inputs["vix_gt_32_streak"].tolist() == [0, 1, 2]
+    assert history["vix_gt_32_streak"].tolist() == [0, 1, 2]
+    assert bool(latest.iloc[0]["halt_flag"]) is True
+    assert latest.iloc[0]["halt_reason"] is not None
+
+
+def test_publish_window_skips_trailing_incomplete_latest_inputs() -> None:
+    inputs = pd.DataFrame(
+        [
+            {
+                "as_of_date": "2026-03-18",
+                "return_1d": 0.01,
+                "return_20d": 0.04,
+                "rvol_10d_ann": 14.0,
+                "vix_spot_close": 18.0,
+                "vix3m_close": 18.8,
+                "vix_slope": 0.8,
+                "vix_gt_32_streak": 0,
+                "inputs_complete_flag": True,
+            },
+            {
+                "as_of_date": "2026-03-19",
+                "return_1d": -0.02,
+                "return_20d": -0.05,
+                "rvol_10d_ann": 20.0,
+                "vix_spot_close": 24.0,
+                "vix3m_close": 23.1,
+                "vix_slope": -0.9,
+                "vix_gt_32_streak": 0,
+                "inputs_complete_flag": True,
+            },
+            {
+                "as_of_date": "2026-03-20",
+                "return_1d": pd.NA,
+                "return_20d": pd.NA,
+                "rvol_10d_ann": pd.NA,
+                "vix_spot_close": 25.0,
+                "vix3m_close": pd.NA,
+                "vix_slope": pd.NA,
+                "vix_gt_32_streak": 0,
+                "inputs_complete_flag": False,
+            },
+        ]
+    )
+    market_series = pd.DataFrame(columns=["symbol", "date", "close", "return_1d", "return_20d"])
+
+    window = regime_job._resolve_publish_window(inputs, market_series=market_series)
+    metadata = regime_job._publish_window_metadata(window)
+    warnings = regime_job._publish_window_warnings(window)
+    published_inputs = regime_job._published_inputs(inputs, window=window)
+    full_history, full_latest, full_transitions = regime_job.build_regime_outputs(
+        inputs,
+        model_name="default-regime",
+        model_version=1,
+        computed_at=datetime(2026, 3, 21, tzinfo=timezone.utc),
+    )
+    published_history, published_latest, published_transitions = regime_job.build_regime_outputs(
+        published_inputs,
+        model_name="default-regime",
+        model_version=1,
+        computed_at=datetime(2026, 3, 21, tzinfo=timezone.utc),
+    )
+
+    assert window.published_as_of_date == date(2026, 3, 19)
+    assert window.input_as_of_date == date(2026, 3, 20)
+    assert window.skipped_trailing_input_dates == (date(2026, 3, 20),)
+    assert metadata["skipped_trailing_input_dates"] == ["2026-03-20"]
+    assert warnings == [
+        "Trailing incomplete regime input dates skipped from published regime surfaces: 2026-03-20. "
+        "Published regime state remains capped at 2026-03-19."
+    ]
+    assert pd.to_datetime(inputs["as_of_date"]).dt.date.tolist() == [
+        date(2026, 3, 18),
+        date(2026, 3, 19),
+        date(2026, 3, 20),
+    ]
+    assert pd.to_datetime(published_inputs["as_of_date"]).dt.date.tolist() == [
+        date(2026, 3, 18),
+        date(2026, 3, 19),
+    ]
+    assert full_latest.iloc[0]["as_of_date"].isoformat() == "2026-03-20"
+    assert full_latest.iloc[0]["regime_status"] == "unclassified"
+    assert published_history["as_of_date"].max().isoformat() == "2026-03-19"
+    assert published_latest.iloc[0]["as_of_date"].isoformat() == "2026-03-19"
+    assert len(published_transitions) <= len(full_transitions)
 
 
 def test_replace_postgres_tables_uses_staged_apply_for_all_regime_tables(

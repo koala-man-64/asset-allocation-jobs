@@ -5,12 +5,13 @@ import json
 import time
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from math import sqrt
 from typing import Any, NoReturn, Sequence
 
 import pandas as pd
 
+from asset_allocation_contracts.regime import RegimeModelConfig
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.foundation.postgres import connect, copy_rows
 from asset_allocation_runtime_common.domain.regime import build_regime_outputs, compute_curve_state, compute_trend_state
@@ -77,6 +78,13 @@ class _RegimeApplyConfig:
     columns: tuple[str, ...]
     key_columns: tuple[str, ...]
     scope: str
+
+
+@dataclass(frozen=True)
+class _RegimePublishWindow:
+    published_as_of_date: date
+    input_as_of_date: date | None
+    skipped_trailing_input_dates: tuple[date, ...]
 
 
 _REGIME_APPLY_CONFIGS: tuple[_RegimeApplyConfig, ...] = (
@@ -450,6 +458,50 @@ def _assert_complete_regime_inputs(inputs: pd.DataFrame, *, market_series: pd.Da
     )
 
 
+def _resolve_publish_window(inputs: pd.DataFrame, *, market_series: pd.DataFrame) -> _RegimePublishWindow:
+    _assert_complete_regime_inputs(inputs, market_series=market_series)
+    as_of_dates = pd.to_datetime(inputs.get("as_of_date"), errors="coerce")
+    complete_rows = (
+        inputs["inputs_complete_flag"].fillna(False)
+        if "inputs_complete_flag" in inputs.columns
+        else pd.Series(False, index=inputs.index, dtype="bool")
+    )
+    complete_dates = as_of_dates[complete_rows & as_of_dates.notna()]
+    published_as_of_ts = complete_dates.max()
+    if pd.isna(published_as_of_ts):
+        _fail_fast("Gold regime fast-fail: unable to resolve publish cutoff from complete inputs.")
+
+    raw_dates = as_of_dates.dropna()
+    input_as_of_date = raw_dates.max().date() if not raw_dates.empty else None
+    skipped_trailing_input_dates = tuple(
+        value.date() for value in raw_dates[raw_dates > published_as_of_ts].sort_values().drop_duplicates().tolist()
+    )
+    return _RegimePublishWindow(
+        published_as_of_date=published_as_of_ts.date(),
+        input_as_of_date=input_as_of_date,
+        skipped_trailing_input_dates=skipped_trailing_input_dates,
+    )
+
+
+def _publish_window_metadata(window: _RegimePublishWindow) -> dict[str, Any]:
+    return {
+        "published_as_of_date": window.published_as_of_date.isoformat(),
+        "input_as_of_date": window.input_as_of_date.isoformat() if isinstance(window.input_as_of_date, date) else None,
+        "skipped_trailing_input_dates": [value.isoformat() for value in window.skipped_trailing_input_dates],
+    }
+
+
+def _publish_window_warnings(window: _RegimePublishWindow) -> list[str]:
+    skipped_dates = _publish_window_metadata(window)["skipped_trailing_input_dates"]
+    if not skipped_dates:
+        return []
+    return [
+        "Trailing incomplete regime input dates skipped from published regime surfaces: "
+        f"{', '.join(skipped_dates)}. Published regime state remains capped at "
+        f"{window.published_as_of_date.isoformat()}."
+    ]
+
+
 def _load_market_series(dsn: str) -> pd.DataFrame:
     with connect(dsn) as conn:
         frame = pd.read_sql_query(
@@ -464,6 +516,19 @@ def _load_market_series(dsn: str) -> pd.DataFrame:
         )
     normalized = _normalize_market_series(frame)
     return _validate_required_market_series(normalized, dsn=dsn)
+
+
+def _compute_vix_streak(values: Sequence[Any], *, threshold: float) -> list[int]:
+    streak = 0
+    streak_values: list[int] = []
+    for raw_value in values:
+        value = float(raw_value) if raw_value is not None and not pd.isna(raw_value) else None
+        if value is not None and value > threshold:
+            streak += 1
+        else:
+            streak = 0
+        streak_values.append(streak)
+    return streak_values
 
 
 def _build_inputs_daily(market_series: pd.DataFrame, *, computed_at: datetime) -> pd.DataFrame:
@@ -488,16 +553,7 @@ def _build_inputs_daily(market_series: pd.DataFrame, *, computed_at: datetime) -
     inputs["vix_slope"] = inputs["vix3m_close"] - inputs["vix_spot_close"]
     inputs["rvol_10d_ann"] = inputs["return_1d"].rolling(window=10, min_periods=10).std(ddof=1) * sqrt(252.0) * 100.0
 
-    streak = 0
-    streak_values: list[int] = []
-    for raw_value in inputs["vix_spot_close"].tolist():
-        value = float(raw_value) if raw_value is not None and not pd.isna(raw_value) else None
-        if value is not None and value > 32.0:
-            streak += 1
-        else:
-            streak = 0
-        streak_values.append(streak)
-    inputs["vix_gt_32_streak"] = streak_values
+    inputs["vix_gt_32_streak"] = _compute_vix_streak(inputs["vix_spot_close"].tolist(), threshold=32.0)
     inputs["trend_state"] = inputs["return_20d"].map(lambda value: compute_trend_state(value))
     inputs["curve_state"] = inputs["vix_slope"].map(lambda value: compute_curve_state(value))
     inputs["inputs_complete_flag"] = inputs[
@@ -513,6 +569,40 @@ def _build_inputs_daily(market_series: pd.DataFrame, *, computed_at: datetime) -
     ].notna().all(axis=1)
     inputs["computed_at"] = pd.Timestamp(computed_at)
     return inputs[list(_INPUTS_COLUMNS)].copy()
+
+
+def _published_inputs(inputs: pd.DataFrame, *, window: _RegimePublishWindow) -> pd.DataFrame:
+    as_of_dates = pd.to_datetime(inputs.get("as_of_date"), errors="coerce")
+    return inputs.loc[as_of_dates <= pd.Timestamp(window.published_as_of_date)].copy()
+
+
+def _build_revision_inputs(
+    inputs: pd.DataFrame,
+    *,
+    config: RegimeModelConfig | dict[str, Any] | None,
+) -> tuple[pd.DataFrame, RegimeModelConfig]:
+    resolved_config = config if isinstance(config, RegimeModelConfig) else RegimeModelConfig.model_validate(config or {})
+    revision_inputs = inputs.copy()
+    revision_inputs["vix_gt_32_streak"] = _compute_vix_streak(
+        revision_inputs["vix_spot_close"].tolist(),
+        threshold=float(resolved_config.haltVixThreshold),
+    )
+    return (
+        revision_inputs[
+            [
+                "as_of_date",
+                "return_1d",
+                "return_20d",
+                "rvol_10d_ann",
+                "vix_spot_close",
+                "vix3m_close",
+                "vix_slope",
+                "vix_gt_32_streak",
+                "inputs_complete_flag",
+            ]
+        ].copy(),
+        resolved_config,
+    )
 
 
 def _replace_postgres_tables(
@@ -562,6 +652,7 @@ def _write_storage_outputs(
     latest: pd.DataFrame,
     transitions: pd.DataFrame,
     active_revisions: Sequence[dict[str, Any]],
+    warnings: Sequence[str] = (),
 ) -> None:
     client = mdc.get_storage_client(gold_container)
     if client is None:
@@ -619,7 +710,7 @@ def _write_storage_outputs(
         "affectedAsOfEnd": date_range.get("max") if isinstance(date_range, dict) else None,
         "totalRows": int(len(history)),
         "fileCount": 4,
-        "warnings": [],
+        "warnings": list(warnings),
     }
     domain_artifacts.publish_domain_artifact_payload(payload=payload, client=client)
 
@@ -642,7 +733,26 @@ def main() -> int:
     if not active_revisions:
         raise ValueError("No active regime model revisions found.")
     inputs = _build_inputs_daily(market_series, computed_at=computed_at)
-    _assert_complete_regime_inputs(inputs, market_series=market_series)
+    publish_window = _resolve_publish_window(inputs, market_series=market_series)
+    publish_window_metadata = _publish_window_metadata(publish_window)
+    publish_window_warnings = _publish_window_warnings(publish_window)
+    published_inputs = _published_inputs(inputs, window=publish_window)
+    skipped_dates_for_log = ",".join(publish_window_metadata["skipped_trailing_input_dates"]) or "-"
+    if publish_window.skipped_trailing_input_dates:
+        mdc.write_warning(
+            "Gold regime publish window trimmed: "
+            f"published_as_of_date={publish_window_metadata['published_as_of_date']} "
+            f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
+            f"skipped_count={len(publish_window.skipped_trailing_input_dates)} "
+            f"skipped_trailing_input_dates={skipped_dates_for_log}"
+        )
+    else:
+        mdc.write_line(
+            "Gold regime publish window resolved: "
+            f"published_as_of_date={publish_window_metadata['published_as_of_date']} "
+            f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
+            "skipped_count=0"
+        )
 
     history_frames: list[pd.DataFrame] = []
     latest_frames: list[pd.DataFrame] = []
@@ -652,11 +762,22 @@ def main() -> int:
     for revision in active_revisions:
         model_name = str(revision["name"])
         model_version = int(revision["version"])
+        revision_inputs, resolved_config = _build_revision_inputs(
+            published_inputs,
+            config=revision.get("config") or {},
+        )
+        mdc.write_line(
+            "Gold regime active revision: "
+            f"model_name={model_name} model_version={model_version} "
+            f"halt_vix_threshold={float(resolved_config.haltVixThreshold):.2f} "
+            f"halt_vix_streak_days={int(resolved_config.haltVixStreakDays)} "
+            f"published_as_of_date={publish_window_metadata['published_as_of_date']}"
+        )
         history, latest, transitions = build_regime_outputs(
-            inputs[["as_of_date", "return_1d", "return_20d", "rvol_10d_ann", "vix_spot_close", "vix3m_close", "vix_slope", "vix_gt_32_streak", "inputs_complete_flag"]].copy(),
+            revision_inputs,
             model_name=model_name,
             model_version=model_version,
-            config=revision.get("config") or {},
+            config=resolved_config,
             computed_at=computed_at,
         )
         history_frames.append(history)
@@ -687,12 +808,14 @@ def main() -> int:
         latest=latest,
         transitions=transitions,
         active_revisions=active_revisions,
+        warnings=publish_window_warnings,
     )
 
     save_watermarks(
         WATERMARK_KEY,
-        {
-            "as_of_date": str(inputs["as_of_date"].max()) if not inputs.empty else None,
+        publish_window_metadata
+        | {
+            "as_of_date": publish_window_metadata["published_as_of_date"],
             "history_rows": int(len(history)),
             "active_models": [
                 {"model_name": model_name, "model_version": model_version}
@@ -703,8 +826,9 @@ def main() -> int:
     save_last_success(
         WATERMARK_KEY,
         when=computed_at,
-        metadata={
-            "as_of_date": str(inputs["as_of_date"].max()) if not inputs.empty else None,
+        metadata=publish_window_metadata
+        | {
+            "as_of_date": publish_window_metadata["published_as_of_date"],
             "history_rows": int(len(history)),
             "latest_rows": int(len(latest)),
             "transition_rows": int(len(transitions)),
@@ -712,8 +836,11 @@ def main() -> int:
     )
     mdc.write_line(
         "Gold regime complete: "
-        f"inputs_rows={len(inputs)} history_rows={len(history)} latest_rows={len(latest)} "
-        f"transition_rows={len(transitions)} active_models={len(active_models)}"
+        f"inputs_rows={len(inputs)} published_inputs_rows={len(published_inputs)} "
+        f"history_rows={len(history)} latest_rows={len(latest)} transition_rows={len(transitions)} "
+        f"active_models={len(active_models)} published_as_of_date={publish_window_metadata['published_as_of_date']} "
+        f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
+        f"skipped_trailing_count={len(publish_window.skipped_trailing_input_dates)}"
     )
     return 0
 
