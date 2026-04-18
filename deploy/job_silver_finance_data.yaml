@@ -64,7 +64,7 @@ properties:
       - name: FINANCE_PIPELINE_SHARED_LOCK_NAME
         value: "finance-pipeline-shared"
       - name: SILVER_FINANCE_SHARED_LOCK_WAIT_SECONDS
-        value: "3600"
+        value: "60"
       - name: AZURE_STORAGE_ACCOUNT_NAME
         value: assetallocstorage001
       - name: AZURE_STORAGE_CONNECTION_STRING

@@ -20,6 +20,7 @@ JOB_CONFIG = {
     "gold_earnings": ("GOLD_EARNINGS_JOB", "gold-earnings-job"),
     "gold_regime": ("GOLD_REGIME_JOB", "gold-regime-job"),
     "platinum_rankings": ("PLATINUM_RANKINGS_JOB", "platinum-rankings-job"),
+    "results-reconcile": ("RESULTS_RECONCILE_JOB", "results-reconcile-job"),
     "backtests": ("BACKTEST_JOB", "backtests-job"),
     "backtests-reconcile": ("BACKTEST_RECONCILE_JOB", "backtests-reconcile-job"),
 }

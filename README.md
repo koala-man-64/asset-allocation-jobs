@@ -39,6 +39,7 @@ Canonical workflows live under `.github/workflows/`.
 - `scripts/setup-env.ps1` builds repo-local `.env.web` using Azure and git discovery where possible.
 - `scripts/sync-all-to-github.ps1` syncs the `.env.web` surface into repo vars and secrets.
 - `DEPLOYMENT_SETUP.md` is the canonical deploy, operate, and rollback runbook.
+- `docs/ops/networking-audit-2026-04-18.md` captures the live Azure networking posture observed on April 18, 2026 and the prioritized hardening backlog.
 
 ## Backtesting
 

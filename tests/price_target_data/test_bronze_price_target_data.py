@@ -60,7 +60,7 @@ def test_process_batch_bronze(mock_list_manager, mock_client, mock_nasdaq, uniqu
     
     async def run_test():
         # We patch store_raw_bytes to verify write
-        with patch('core.core.store_raw_bytes') as mock_store:
+        with patch.object(bronze.mdc, "store_raw_bytes") as mock_store:
             await bronze.process_batch_bronze([symbol], semaphore)
             
             # 4. Verify
@@ -103,7 +103,7 @@ def test_process_batch_bronze_logs_symbol_processed_success(
     semaphore = asyncio.Semaphore(1)
 
     async def run_test():
-        with patch("core.core.store_raw_bytes"), patch(
+        with patch.object(bronze.mdc, "store_raw_bytes"), patch(
             "tasks.price_target_data.bronze_price_target_data.log_bronze_success"
         ) as mock_log_success:
             summary = await bronze.process_batch_bronze([symbol], semaphore)
@@ -147,7 +147,7 @@ def test_process_batch_bronze_handles_filtered_missing_symbol(
     semaphore = asyncio.Semaphore(1)
 
     async def run_test():
-        with patch('core.core.store_raw_bytes') as mock_store:
+        with patch.object(bronze.mdc, "store_raw_bytes") as mock_store:
             summary = await bronze.process_batch_bronze(
                 [symbol_with_data, symbol_missing],
                 semaphore,
@@ -181,7 +181,7 @@ def test_process_batch_bronze_deletes_stale_when_cutoff_and_empty_response(
     semaphore = asyncio.Semaphore(1)
 
     async def run_test():
-        with patch('core.core.store_raw_bytes') as mock_store:
+        with patch.object(bronze.mdc, "store_raw_bytes") as mock_store:
             summary = await bronze.process_batch_bronze(
                 symbols,
                 semaphore,
@@ -233,8 +233,9 @@ def test_process_batch_bronze_uses_watermark_and_appends_existing(
     semaphore = asyncio.Semaphore(1)
 
     async def run_test():
-        with patch("core.core.read_raw_bytes", return_value=existing_parquet), patch(
-            "core.core.store_raw_bytes"
+        with patch.object(bronze.mdc, "read_raw_bytes", return_value=existing_parquet), patch.object(
+            bronze.mdc,
+            "store_raw_bytes",
         ) as mock_store:
             summary = await bronze.process_batch_bronze([symbol], semaphore)
             assert summary["saved"] == 1
@@ -280,8 +281,9 @@ def test_process_batch_bronze_missing_after_watermark_keeps_existing(
     semaphore = asyncio.Semaphore(1)
 
     async def run_test():
-        with patch("core.core.read_raw_bytes", return_value=existing_parquet), patch(
-            "core.core.store_raw_bytes"
+        with patch.object(bronze.mdc, "read_raw_bytes", return_value=existing_parquet), patch.object(
+            bronze.mdc,
+            "store_raw_bytes",
         ) as mock_store:
             summary = await bronze.process_batch_bronze([symbol], semaphore)
             assert summary["saved"] == 0
@@ -326,14 +328,12 @@ def test_process_batch_bronze_forces_backfill_when_coverage_gap_exists(
     semaphore = asyncio.Semaphore(1)
 
     async def run_test():
-        with patch("core.core.read_raw_bytes", return_value=existing_parquet), patch(
+        with patch.object(bronze.mdc, "read_raw_bytes", return_value=existing_parquet), patch(
             "tasks.price_target_data.bronze_price_target_data.load_coverage_marker",
             return_value=None,
         ), patch(
             "tasks.price_target_data.bronze_price_target_data._mark_coverage"
-        ) as mock_mark_coverage, patch(
-            "core.core.store_raw_bytes"
-        ) as mock_store:
+        ) as mock_mark_coverage, patch.object(bronze.mdc, "store_raw_bytes") as mock_store:
             summary = await bronze.process_batch_bronze(
                 [symbol],
                 semaphore,
@@ -375,7 +375,7 @@ def test_process_batch_bronze_skips_force_when_limited_marker_present(
     semaphore = asyncio.Semaphore(1)
 
     async def run_test():
-        with patch("core.core.read_raw_bytes", return_value=existing_parquet), patch(
+        with patch.object(bronze.mdc, "read_raw_bytes", return_value=existing_parquet), patch(
             "tasks.price_target_data.bronze_price_target_data.load_coverage_marker",
             return_value={
                 "coverageStatus": "limited",
@@ -427,7 +427,7 @@ def test_process_batch_bronze_logs_structured_save_failure(
     semaphore = asyncio.Semaphore(1)
 
     async def run_test():
-        with patch("core.core.store_raw_bytes", side_effect=RuntimeError("disk full")), patch(
+        with patch.object(bronze.mdc, "store_raw_bytes", side_effect=RuntimeError("disk full")), patch(
             "tasks.price_target_data.bronze_price_target_data.mdc.write_warning"
         ) as mock_warning, patch(
             "tasks.price_target_data.bronze_price_target_data.mdc.write_error"

@@ -14,11 +14,11 @@ properties:
   configuration:
     triggerType: Schedule
     scheduleTriggerConfig:
-      cronExpression: "*/1 * * * *"
+      cronExpression: "*/5 * * * *"
       parallelism: 1
       replicaCompletionCount: 1
     replicaRetryLimit: 1
-    replicaTimeout: 1800
+    replicaTimeout: 300
     registries:
     - server: assetallocationacr.azurecr.io
       identity: "${ACR_PULL_IDENTITY_RESOURCE_ID}"

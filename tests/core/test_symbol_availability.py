@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from asset_allocation_runtime_common.market_data import symbol_availability
+import asset_allocation_runtime_common.shared_core.symbol_availability as symbol_availability
 class _FakeCursor:
     def __init__(self, *, existing_count: int = 0, disabled_count: int = 0) -> None:
         self.existing_count = existing_count

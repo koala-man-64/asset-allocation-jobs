@@ -7,8 +7,7 @@ WORKDIR /app
 ARG CONTRACTS_VERSION=2.1.0
 ARG RUNTIME_COMMON_VERSION=2.0.5
 
-COPY asset-allocation-jobs/requirements.lock.txt ./
-RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
+COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
 RUN --mount=type=secret,id=pipconfig,target=/etc/pip.conf,required=false \
@@ -16,13 +15,13 @@ RUN --mount=type=secret,id=pipconfig,target=/etc/pip.conf,required=false \
     "asset-allocation-contracts==${CONTRACTS_VERSION}" \
     "asset-allocation-runtime-common==${RUNTIME_COMMON_VERSION}"
 
-COPY asset-allocation-jobs/pyproject.toml asset-allocation-jobs/README.md ./
-COPY asset-allocation-jobs/alpaca/ alpaca/
-COPY asset-allocation-jobs/alpha_vantage/ alpha_vantage/
-COPY asset-allocation-jobs/core/ core/
-COPY asset-allocation-jobs/massive_provider/ massive_provider/
-COPY asset-allocation-jobs/monitoring/ monitoring/
-COPY asset-allocation-jobs/tasks/ tasks/
+COPY pyproject.toml README.md ./
+COPY alpaca/ alpaca/
+COPY alpha_vantage/ alpha_vantage/
+COPY core/ core/
+COPY massive_provider/ massive_provider/
+COPY monitoring/ monitoring/
+COPY tasks/ tasks/
 RUN pip install --no-cache-dir .
 
 CMD ["python", "-c", "print('asset-allocation task image: specify a job command (e.g., python -m tasks.market_data.bronze_market_data)')"]

@@ -22,9 +22,9 @@ def test_process_file_success():
     mock_history = pd.DataFrame([{"Date": pd.Timestamp("2022-01-01"), "Reported EPS": 1.0, "Symbol": "TEST"}])
 
     with (
-        patch("core.core.read_raw_bytes", return_value=bronze_json.encode("utf-8")),
-        patch("core.delta_core.load_delta", return_value=mock_history),
-        patch("core.delta_core.store_delta") as mock_store,
+        patch.object(silver.mdc, "read_raw_bytes", return_value=bronze_json.encode("utf-8")),
+        patch.object(silver.delta_core, "load_delta", return_value=mock_history),
+        patch.object(silver.delta_core, "store_delta") as mock_store,
     ):
         res = silver.process_file(blob_name)
 
@@ -63,7 +63,7 @@ def test_process_alpha26_bucket_blob_accepts_string_last_modified(monkeypatch):
 
 def test_process_file_bad_json():
     blob_name = "earnings-data/BAD.json"
-    with patch("core.core.read_raw_bytes", return_value=b"bad json"):
+    with patch.object(silver.mdc, "read_raw_bytes", return_value=b"bad json"):
         res = silver.process_file(blob_name)
         assert res is False
 
@@ -74,14 +74,14 @@ def test_process_file_applies_backfill_start_cutoff():
     history = pd.DataFrame([{"Date": pd.Timestamp("2023-06-30"), "Reported EPS": 1.0, "Symbol": "TEST"}])
 
     with (
-        patch("core.core.read_raw_bytes", return_value=bronze_json.encode("utf-8")),
-        patch("core.delta_core.load_delta", return_value=history),
-        patch("core.delta_core.store_delta") as mock_store,
+        patch.object(silver.mdc, "read_raw_bytes", return_value=bronze_json.encode("utf-8")),
+        patch.object(silver.delta_core, "load_delta", return_value=history),
+        patch.object(silver.delta_core, "store_delta") as mock_store,
         patch(
             "tasks.earnings_data.silver_earnings_data.get_backfill_range",
             return_value=(pd.Timestamp("2024-01-01"), None),
         ),
-        patch("core.delta_core.vacuum_delta_table", return_value=0),
+        patch.object(silver.delta_core, "vacuum_delta_table", return_value=0),
     ):
         assert silver.process_file(blob_name) is True
         df_saved = mock_store.call_args[0][0]
@@ -93,9 +93,9 @@ def test_process_file_preserves_earnings_numeric_precision():
     bronze_json = '[{"Date":"2024-01-10","Reported EPS":1.234567}]'
 
     with (
-        patch("core.core.read_raw_bytes", return_value=bronze_json.encode("utf-8")),
-        patch("core.delta_core.load_delta", return_value=None),
-        patch("core.delta_core.store_delta") as mock_store,
+        patch.object(silver.mdc, "read_raw_bytes", return_value=bronze_json.encode("utf-8")),
+        patch.object(silver.delta_core, "load_delta", return_value=None),
+        patch.object(silver.delta_core, "store_delta") as mock_store,
     ):
         assert silver.process_file(blob_name) is True
         df_saved = mock_store.call_args[0][0]
@@ -127,9 +127,9 @@ def test_process_file_keeps_history_when_scheduled_rows_are_present():
     )
 
     with (
-        patch("core.core.read_raw_bytes", return_value=bronze_json.encode("utf-8")),
-        patch("core.delta_core.load_delta", return_value=history),
-        patch("core.delta_core.store_delta") as mock_store,
+        patch.object(silver.mdc, "read_raw_bytes", return_value=bronze_json.encode("utf-8")),
+        patch.object(silver.delta_core, "load_delta", return_value=history),
+        patch.object(silver.delta_core, "store_delta") as mock_store,
         patch("tasks.earnings_data.silver_earnings_data.get_backfill_range", return_value=(None, None)),
     ):
         assert silver.process_file(blob_name) is True
@@ -165,9 +165,9 @@ def test_process_file_replaces_stale_scheduled_row_for_same_fiscal_period():
     )
 
     with (
-        patch("core.core.read_raw_bytes", return_value=bronze_json.encode("utf-8")),
-        patch("core.delta_core.load_delta", return_value=history),
-        patch("core.delta_core.store_delta") as mock_store,
+        patch.object(silver.mdc, "read_raw_bytes", return_value=bronze_json.encode("utf-8")),
+        patch.object(silver.delta_core, "load_delta", return_value=history),
+        patch.object(silver.delta_core, "store_delta") as mock_store,
         patch("tasks.earnings_data.silver_earnings_data.get_backfill_range", return_value=(None, None)),
     ):
         assert silver.process_file(blob_name) is True
@@ -202,9 +202,9 @@ def test_process_file_actual_replaces_scheduled_row_for_same_fiscal_period():
     )
 
     with (
-        patch("core.core.read_raw_bytes", return_value=bronze_json.encode("utf-8")),
-        patch("core.delta_core.load_delta", return_value=history),
-        patch("core.delta_core.store_delta") as mock_store,
+        patch.object(silver.mdc, "read_raw_bytes", return_value=bronze_json.encode("utf-8")),
+        patch.object(silver.delta_core, "load_delta", return_value=history),
+        patch.object(silver.delta_core, "store_delta") as mock_store,
         patch("tasks.earnings_data.silver_earnings_data.get_backfill_range", return_value=(None, None)),
     ):
         assert silver.process_file(blob_name) is True
@@ -303,8 +303,8 @@ def test_write_alpha26_earnings_buckets_partial_update_preserves_untouched_symbo
     monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ("A", "M"))
     monkeypatch.setattr(
         silver.layer_bucketing,
-        "load_layer_symbol_index",
-        lambda **_kwargs: pd.DataFrame({"symbol": ["AAPL", "MSFT"], "bucket": ["A", "M"]}),
+        "load_layer_symbol_to_bucket_map",
+        lambda **_kwargs: {"AAPL": "A", "MSFT": "M"},
     )
     monkeypatch.setattr(
         silver.layer_bucketing,

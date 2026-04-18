@@ -1,6 +1,7 @@
 import pytest
 import os
 import importlib
+from contextlib import ExitStack
 from unittest.mock import patch, MagicMock
 
 # Force hermetic test env so local shell/.env values cannot leak into unit tests.
@@ -64,13 +65,24 @@ def redirect_storage(tmp_path_factory):
 
     try:
         delta_core = importlib.import_module("core.delta_core")
+        runtime_delta_core_wrapper = importlib.import_module("asset_allocation_runtime_common.market_data.delta_core")
+        runtime_delta_core = importlib.import_module("asset_allocation_runtime_common.shared_core.delta_core")
     except ImportError:
         yield temp_storage_root
         return
 
-    with patch.object(delta_core, "get_delta_table_uri", side_effect=mock_get_uri), \
-         patch.object(delta_core, "get_delta_storage_options", return_value={}), \
-         patch.object(delta_core, "_ensure_container_exists", return_value=None):
+    patch_targets = {
+        delta_core.__name__: delta_core,
+        runtime_delta_core_wrapper.__name__: runtime_delta_core_wrapper,
+        runtime_delta_core.__name__: runtime_delta_core,
+    }
+
+    with ExitStack() as stack:
+        for module in patch_targets.values():
+            stack.enter_context(patch.object(module, "get_delta_table_uri", side_effect=mock_get_uri))
+            stack.enter_context(patch.object(module, "get_delta_storage_options", return_value={}))
+            if hasattr(module, "_ensure_container_exists"):
+                stack.enter_context(patch.object(module, "_ensure_container_exists", return_value=None))
         yield temp_storage_root
 
 

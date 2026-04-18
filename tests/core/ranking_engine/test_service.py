@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import asset_allocation_runtime_common.ranking_engine.service as service_module
 from asset_allocation_runtime_common.ranking_engine.naming import build_scoped_identifier, slugify_strategy_output_table
 from asset_allocation_runtime_common.ranking_engine.service import (
     _MaterializationContext,
@@ -321,11 +322,13 @@ def test_normalize_loaded_column_preserves_supported_types() -> None:
 
 def test_resolve_date_range_defaults_to_watermark_plus_one_day(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.ranking_engine.service._load_source_date_bounds",
+        service_module,
+        "_load_source_date_bounds",
         lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
     )
     monkeypatch.setattr(
-        "core.ranking_engine.service._get_ranking_watermark",
+        service_module,
+        "_get_ranking_watermark",
         lambda _dsn, _strategy_name: date(2026, 3, 7),
     )
 
@@ -350,11 +353,13 @@ def test_resolve_date_range_defaults_to_watermark_plus_one_day(monkeypatch: pyte
 
 def test_resolve_date_range_returns_noop_when_output_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.ranking_engine.service._load_source_date_bounds",
+        service_module,
+        "_load_source_date_bounds",
         lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
     )
     monkeypatch.setattr(
-        "core.ranking_engine.service._get_ranking_watermark",
+        service_module,
+        "_get_ranking_watermark",
         lambda _dsn, _strategy_name: date(2026, 3, 10),
     )
 
@@ -380,10 +385,11 @@ def test_resolve_date_range_returns_noop_when_output_is_current(monkeypatch: pyt
 
 def test_resolve_date_range_rejects_invalid_explicit_range(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.ranking_engine.service._load_source_date_bounds",
+        service_module,
+        "_load_source_date_bounds",
         lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
     )
-    monkeypatch.setattr("core.ranking_engine.service._get_ranking_watermark", lambda _dsn, _strategy_name: None)
+    monkeypatch.setattr(service_module, "_get_ranking_watermark", lambda _dsn, _strategy_name: None)
 
     with pytest.raises(ValueError, match="Resolved ranking date range is invalid"):
         _resolve_date_range(
@@ -418,13 +424,15 @@ def test_compute_rankings_dataframe_intersects_strategy_and_ranking_universes(mo
         },
     )
     monkeypatch.setattr(
-        "core.ranking_engine.service.universe_service._load_gold_table_specs",
+        service_module.universe_service,
+        "_load_gold_table_specs",
         lambda _dsn: {},
     )
-    monkeypatch.setattr("core.ranking_engine.service._resolve_strategy_universe", lambda _dsn, _config: strategy_universe)
-    monkeypatch.setattr("core.ranking_engine.service._resolve_ranking_universe", lambda _dsn, _schema: ranking_universe)
+    monkeypatch.setattr(service_module, "_resolve_strategy_universe", lambda _dsn, _config: strategy_universe)
+    monkeypatch.setattr(service_module, "_resolve_ranking_universe", lambda _dsn, _schema: ranking_universe)
     monkeypatch.setattr(
-        "core.ranking_engine.service._load_table_frames",
+        service_module,
+        "_load_table_frames",
         lambda _dsn, **kwargs: {
             "market_data": pd.DataFrame(
                 {
@@ -515,13 +523,15 @@ def test_compute_rankings_dataframe_excludes_null_piotroski_rows(monkeypatch) ->
         },
     )
     monkeypatch.setattr(
-        "core.ranking_engine.service.universe_service._load_gold_table_specs",
+        service_module.universe_service,
+        "_load_gold_table_specs",
         lambda _dsn: {},
     )
-    monkeypatch.setattr("core.ranking_engine.service._resolve_strategy_universe", lambda _dsn, _config: strategy_universe)
-    monkeypatch.setattr("core.ranking_engine.service._resolve_ranking_universe", lambda _dsn, _schema: ranking_universe)
+    monkeypatch.setattr(service_module, "_resolve_strategy_universe", lambda _dsn, _config: strategy_universe)
+    monkeypatch.setattr(service_module, "_resolve_ranking_universe", lambda _dsn, _schema: ranking_universe)
     monkeypatch.setattr(
-        "core.ranking_engine.service._load_table_frames",
+        service_module,
+        "_load_table_frames",
         lambda _dsn, **kwargs: {
             "market_data": pd.DataFrame(
                 {
@@ -658,7 +668,7 @@ class _TransactionalConnection:
 
 def test_load_source_date_bounds_raises_when_no_candidate_dates(monkeypatch: pytest.MonkeyPatch) -> None:
     cursor = _FakeCursor(fetchone_results=[(None, None)])
-    monkeypatch.setattr("core.ranking_engine.service.connect", lambda _dsn: _FakeConnection(cursor))
+    monkeypatch.setattr(service_module, "connect", lambda _dsn: _FakeConnection(cursor))
 
     with pytest.raises(ValueError, match="No ranking source data is available"):
         _load_source_date_bounds(
@@ -672,7 +682,8 @@ def test_write_rankings_to_platinum_copies_score_and_rank(monkeypatch: pytest.Mo
     cursor = _FakeCursor()
     copied: dict[str, object] = {}
     monkeypatch.setattr(
-        "core.ranking_engine.service.copy_rows",
+        service_module,
+        "copy_rows",
         lambda _cur, *, table, columns, rows: copied.update(
             {
                 "table": table,
@@ -709,7 +720,8 @@ def test_persist_materialization_commits_run_write_and_watermark_atomically(
 ) -> None:
     committed_actions: list[tuple[str, object]] = []
     monkeypatch.setattr(
-        "core.ranking_engine.service.connect",
+        service_module,
+        "connect",
         lambda _dsn: _TransactionalConnection(committed_actions),
     )
 
@@ -727,10 +739,10 @@ def test_persist_materialization_commits_run_write_and_watermark_atomically(
     def fake_watermark(cursor, **kwargs) -> None:
         cursor.pending.append(("watermark", kwargs["last_ranked_date"]))
 
-    monkeypatch.setattr("core.ranking_engine.service._insert_ranking_run", fake_insert)
-    monkeypatch.setattr("core.ranking_engine.service._write_rankings_to_platinum", fake_write)
-    monkeypatch.setattr("core.ranking_engine.service._update_ranking_run", fake_update)
-    monkeypatch.setattr("core.ranking_engine.service._upsert_ranking_watermark", fake_watermark)
+    monkeypatch.setattr(service_module, "_insert_ranking_run", fake_insert)
+    monkeypatch.setattr(service_module, "_write_rankings_to_platinum", fake_write)
+    monkeypatch.setattr(service_module, "_update_ranking_run", fake_update)
+    monkeypatch.setattr(service_module, "_upsert_ranking_watermark", fake_watermark)
 
     rows_written = _persist_materialization(
         "postgresql://test",
@@ -770,7 +782,8 @@ def test_persist_materialization_rolls_back_when_watermark_update_fails(monkeypa
     attempted_actions: list[str] = []
     committed_actions: list[tuple[str, object]] = []
     monkeypatch.setattr(
-        "core.ranking_engine.service.connect",
+        service_module,
+        "connect",
         lambda _dsn: _TransactionalConnection(committed_actions),
     )
 
@@ -792,10 +805,10 @@ def test_persist_materialization_rolls_back_when_watermark_update_fails(monkeypa
         attempted_actions.append("watermark")
         raise RuntimeError("watermark failure")
 
-    monkeypatch.setattr("core.ranking_engine.service._insert_ranking_run", fake_insert)
-    monkeypatch.setattr("core.ranking_engine.service._write_rankings_to_platinum", fake_write)
-    monkeypatch.setattr("core.ranking_engine.service._update_ranking_run", fake_update)
-    monkeypatch.setattr("core.ranking_engine.service._upsert_ranking_watermark", failing_watermark)
+    monkeypatch.setattr(service_module, "_insert_ranking_run", fake_insert)
+    monkeypatch.setattr(service_module, "_write_rankings_to_platinum", fake_write)
+    monkeypatch.setattr(service_module, "_update_ranking_run", fake_update)
+    monkeypatch.setattr(service_module, "_upsert_ranking_watermark", failing_watermark)
 
     with pytest.raises(RuntimeError, match="watermark failure"):
         _persist_materialization(

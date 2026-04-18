@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from asset_allocation_runtime_common.market_data import delta_core
+import asset_allocation_runtime_common.shared_core.delta_core as delta_core
 from monitoring.domain_metadata import (
     _count_finance_symbols_from_listing,
     collect_delta_table_metadata,

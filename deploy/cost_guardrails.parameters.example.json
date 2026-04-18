@@ -1,0 +1,70 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "contactEmails": {
+      "value": [
+        "ops@example.com"
+      ]
+    },
+    "notificationEmail": {
+      "value": "ops@example.com"
+    },
+    "startDate": {
+      "value": "2026-04-01T00:00:00Z"
+    },
+    "endDate": {
+      "value": "2027-04-01T00:00:00Z"
+    },
+    "resourceGroupFilterValues": {
+      "value": [
+        "AssetAllocationRG"
+      ]
+    },
+    "budgetDefinitions": {
+      "value": [
+        {
+          "name": "asset-allocation-container-apps",
+          "amount": 150,
+          "meterCategories": [
+            "Container Apps"
+          ]
+        },
+        {
+          "name": "asset-allocation-azure-monitor",
+          "amount": 30,
+          "meterCategories": [
+            "Azure Monitor"
+          ]
+        },
+        {
+          "name": "asset-allocation-storage",
+          "amount": 40,
+          "meterCategories": [
+            "Storage"
+          ]
+        },
+        {
+          "name": "asset-allocation-container-registry",
+          "amount": 20,
+          "meterCategories": [
+            "Container Registry"
+          ]
+        },
+        {
+          "name": "asset-allocation-postgres",
+          "amount": 50,
+          "meterCategories": [
+            "Azure Database for PostgreSQL"
+          ]
+        }
+      ]
+    },
+    "anomalyAlertEnabled": {
+      "value": true
+    },
+    "anomalyAlertHourOfDay": {
+      "value": 13
+    }
+  }
+}

@@ -1,24 +1,31 @@
 # Cost Guardrails
 
-This repo now includes Azure-side guardrail automation for the cost controls chosen during the audit:
+This repo keeps the cost guardrail template local to the jobs runtime and deploys it with Azure CLI instead of a repo-local provisioner script.
+
+That split is intentional:
+
+- `deploy/cost_guardrails.bicep` is repo-owned because the filters and budget categories are specific to the Asset Allocation jobs stack.
+- Shared Azure bootstrap scripts stay out of this repo, so there is no `scripts/configure_cost_guardrails.ps1` here.
+- The operational entrypoint is a documented `az deployment sub` run against the local template plus the example parameters file.
+
+The template currently covers:
 
 - monthly subscription-scope budgets filtered to `AssetAllocationRG` and split by meter category
 - a daily subscription-scoped cost anomaly alert
-- default notification target `rdprokes@gmail.com`
 - lightweight tagging defaults for Container Apps Jobs via the deploy manifests
 
-## What gets deployed
+## What Gets Deployed
 
-`[deploy/cost_guardrails.bicep](/mnt/c/Users/rdpro/Projects/AssetAllocation/deploy/cost_guardrails.bicep)` creates:
+`deploy/cost_guardrails.bicep` creates:
 
 - one `Microsoft.Consumption/budgets` resource per configured meter-category group
 - one `Microsoft.CostManagement/scheduledActions` resource of kind `InsightAlert`
 
-`[scripts/configure_cost_guardrails.ps1](/mnt/c/Users/rdpro/Projects/AssetAllocation/scripts/configure_cost_guardrails.ps1)` wraps the subscription deployment and supplies default values for this project.
+`deploy/cost_guardrails.parameters.example.json` is the operator starting point for the subscription deployment.
 
 ## Defaults
 
-The wrapper script assumes these starting monthly budgets:
+The example parameter file assumes these starting monthly budgets:
 
 - `Container Apps`: `150`
 - `Azure Monitor`: `30`
@@ -30,19 +37,27 @@ These are starting guardrails, not usage-derived targets. Tune them after confir
 
 ## Run
 
-Preview the deployment first:
+1. Copy `deploy/cost_guardrails.parameters.example.json` to a local deployment parameters file and replace the example email addresses and dates.
+
+2. Preview the deployment first:
 
 ```powershell
-pwsh ./scripts/configure_cost_guardrails.ps1 -WhatIf
+az deployment sub what-if `
+  --location eastus `
+  --template-file deploy/cost_guardrails.bicep `
+  --parameters @deploy/cost_guardrails.parameters.example.json
 ```
 
-Apply it:
+3. Apply it:
 
 ```powershell
-pwsh ./scripts/configure_cost_guardrails.ps1
+az deployment sub create `
+  --location eastus `
+  --template-file deploy/cost_guardrails.bicep `
+  --parameters @deploy/cost_guardrails.parameters.example.json
 ```
 
-## Important limits
+## Important Limits
 
 - Azure Cost Management budgets can be filtered by meter category and resource group, so those alerts are split the way requested.
 - Azure cost anomaly alerts are subscription-scoped. The repo deploys a single anomaly alert for the subscription because Azure does not expose meter-category-scoped anomaly alerts.
@@ -61,4 +76,4 @@ In the Azure portal, confirm:
 
 - budgets appear under Cost Management for the subscription
 - each budget filters to `AssetAllocationRG` plus the intended meter category
-- the anomaly alert points to `rdprokes@gmail.com`
+- the anomaly alert points to the configured notification email

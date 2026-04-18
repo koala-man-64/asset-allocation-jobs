@@ -152,3 +152,47 @@ def test_contributor_and_security_docs_reference_live_jobs_assets_only() -> None
         text = (root / path).read_text(encoding="utf-8")
         for stale_reference in STALE_DOC_REFERENCES:
             assert stale_reference not in text, f"{path} still references stale asset: {stale_reference}"
+
+
+def test_results_reconcile_job_is_manual_and_not_dry_run() -> None:
+    text = (repo_root() / "deploy" / "job_results_reconcile.yaml").read_text(encoding="utf-8")
+    assert "triggerType: Manual" in text
+    assert "manualTriggerConfig:" in text
+    assert "triggerType: Schedule" not in text
+    assert "RESULTS_RECONCILE_DRY_RUN" not in text
+
+
+def test_backtests_reconcile_job_uses_lower_frequency_and_timeout() -> None:
+    text = (repo_root() / "deploy" / "job_backtests_reconcile.yaml").read_text(encoding="utf-8")
+    assert 'cronExpression: "*/5 * * * *"' in text
+    assert "replicaTimeout: 300" in text
+
+
+def test_silver_finance_job_limits_lock_wait_time() -> None:
+    text = (repo_root() / "deploy" / "job_silver_finance_data.yaml").read_text(encoding="utf-8")
+    assert "name: SILVER_FINANCE_SHARED_LOCK_WAIT_SECONDS" in text
+    assert 'value: "60"' in text
+
+
+def test_dockerfile_uses_repo_local_copy_paths_and_omits_psql_client() -> None:
+    text = (repo_root() / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY asset-allocation-jobs/" not in text
+    assert "postgresql-client" not in text
+
+
+def test_cost_guardrails_docs_use_local_template_and_cli_entrypoint() -> None:
+    text = (repo_root() / "docs" / "ops" / "cost-guardrails.md").read_text(encoding="utf-8")
+    assert "/mnt/c/Users/rdpro/Projects/AssetAllocation/scripts/configure_cost_guardrails.ps1" not in text
+    assert "pwsh ./scripts/configure_cost_guardrails.ps1" not in text
+    assert "az deployment sub create" in text
+    assert "deploy/cost_guardrails.parameters.example.json" in text
+
+
+def test_cost_guardrails_parameters_example_exists() -> None:
+    assert (repo_root() / "deploy" / "cost_guardrails.parameters.example.json").exists()
+
+
+def test_deployment_setup_documents_cost_guardrails_and_manual_results_reconcile() -> None:
+    text = (repo_root() / "DEPLOYMENT_SETUP.md").read_text(encoding="utf-8")
+    assert "deploy/cost_guardrails.bicep" in text
+    assert "results-reconcile" in text

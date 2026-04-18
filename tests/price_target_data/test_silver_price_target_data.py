@@ -240,8 +240,8 @@ def test_write_alpha26_price_target_buckets_partial_update_preserves_untouched_s
     monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ("A", "M"))
     monkeypatch.setattr(
         silver.layer_bucketing,
-        "load_layer_symbol_index",
-        lambda **_kwargs: pd.DataFrame({"symbol": ["AAPL", "MSFT"], "bucket": ["A", "M"]}),
+        "load_layer_symbol_to_bucket_map",
+        lambda **_kwargs: {"AAPL": "A", "MSFT": "M"},
     )
     monkeypatch.setattr(
         silver.layer_bucketing,
@@ -270,8 +270,8 @@ def test_write_alpha26_price_target_buckets_partial_update_fails_closed_without_
     monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ("A", "M"))
     monkeypatch.setattr(
         silver.layer_bucketing,
-        "load_layer_symbol_index",
-        lambda **_kwargs: pd.DataFrame(columns=["symbol", "bucket"]),
+        "load_layer_symbol_to_bucket_map",
+        lambda **_kwargs: {},
     )
 
     with pytest.raises(RuntimeError, match="incremental alpha26 write blocked"):

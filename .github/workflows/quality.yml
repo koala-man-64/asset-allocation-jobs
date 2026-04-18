@@ -128,7 +128,7 @@ jobs:
             --runtime-common-version
             "${{ steps.shared.outputs.runtime_common_version }}"
             --context
-            .
+            asset-allocation-jobs
           )
           if [ -n "${{ steps.python.outputs.pip-config-path }}" ]; then
             build_args+=(--pip-config-path "${{ steps.python.outputs.pip-config-path }}")

@@ -12,9 +12,8 @@ identity:
     "${ACR_PULL_IDENTITY_RESOURCE_ID}": {}
 properties:
   configuration:
-    triggerType: Schedule
-    scheduleTriggerConfig:
-      cronExpression: "*/5 * * * *"
+    triggerType: Manual
+    manualTriggerConfig:
       parallelism: 1
       replicaCompletionCount: 1
     replicaRetryLimit: 1
@@ -39,8 +38,6 @@ properties:
         value: ${ASSET_ALLOCATION_API_BASE_URL}
       - name: ASSET_ALLOCATION_API_SCOPE
         value: ${ASSET_ALLOCATION_API_SCOPE}
-      - name: RESULTS_RECONCILE_DRY_RUN
-        value: "true"
       image: ${JOB_IMAGE}
       imageType: ContainerImage
       name: results-reconcile-job

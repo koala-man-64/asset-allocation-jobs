@@ -287,6 +287,13 @@ def test_build_jobs_image_pushes_and_emits_outputs(monkeypatch: pytest.MonkeyPat
     assert "image_digest=registry/image:tag@sha256:1234" in output_path.read_text(encoding="utf-8")
 
 
+def test_quality_and_release_workflows_build_with_repo_local_docker_context() -> None:
+    root = repo_root()
+    for relative_path in (".github/workflows/quality.yml", ".github/workflows/release.yml"):
+        text = (root / relative_path).read_text(encoding="utf-8")
+        assert "--context\n            asset-allocation-jobs" in text, relative_path
+
+
 def test_capture_current_job_images_uses_manifest_names(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = load_module("scripts/workflows/capture_current_job_images.py", "capture_current_job_images")
     deploy_dir = tmp_path / "deploy"
@@ -503,6 +510,36 @@ def test_trigger_job_supports_backtest_reconcile_alias(monkeypatch: pytest.Monke
             "start",
             "--name",
             "custom-backtests-reconcile-job",
+            "--resource-group",
+            "rg",
+        ]
+    ]
+
+
+def test_trigger_job_supports_results_reconcile_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/ops/trigger_job.py", "trigger_job_results_reconcile")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, check: commands.append(list(command)) or subprocess.CompletedProcess(command, 0),
+    )
+
+    resolved = module.start_job(
+        job_key="results-reconcile",
+        resource_group="rg",
+        environment={"RESULTS_RECONCILE_JOB": "custom-results-reconcile-job"},
+    )
+
+    assert resolved == "custom-results-reconcile-job"
+    assert commands == [
+        [
+            "az",
+            "containerapp",
+            "job",
+            "start",
+            "--name",
+            "custom-results-reconcile-job",
             "--resource-group",
             "rg",
         ]

@@ -2,23 +2,44 @@ import pandas as pd
 import pytest
 from datetime import datetime, timedelta, timezone
 
-import asset_allocation_runtime_common.market_data.core as core_module
-from asset_allocation_runtime_common.market_data.core import (
-    _parse_alpha_vantage_listing_status_csv,
-    _symbols_refresh_due,
+import asset_allocation_runtime_common.shared_core.core as core_module
+from asset_allocation_runtime_common.shared_core.core import (
     merge_symbol_sources,
     strip_source_availability_columns,
     upsert_symbols_to_db,
 )
+from asset_allocation_runtime_common.shared_core.core import _symbols_refresh_due
 
 
-def test_parse_alpha_vantage_listing_status_filters_active_stock():
+def test_get_active_tickers_alpha_vantage_filters_active_stock(monkeypatch: pytest.MonkeyPatch):
+    import asset_allocation_runtime_common.shared_core.alpha_vantage_gateway_client as av_gateway_module
+
     csv_text = """symbol,name,exchange,assetType,ipoDate,delistingDate,status
 AAPL,Apple Inc,NASDAQ,Stock,1980-12-12,null,Active
 ETF1,Example ETF,NYSE,ETF,2000-01-01,null,Active
 OLD,Old Co,NYSE,Stock,1990-01-01,2020-01-01,Delisted
 """
-    df = _parse_alpha_vantage_listing_status_csv(csv_text)
+
+    class _FakeAlphaVantageGateway:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def get_listing_status_csv(self, *, state: str) -> str:
+            assert state == "active"
+            return csv_text
+
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "https://example.test")
+    monkeypatch.setattr(
+        av_gateway_module.AlphaVantageGatewayClient,
+        "from_env",
+        lambda: _FakeAlphaVantageGateway(),
+    )
+
+    df = core_module.get_active_tickers_alpha_vantage()
+
     assert set(df["Symbol"].tolist()) == {"AAPL"}
     assert "Exchange" in df.columns
     assert "AssetType" in df.columns

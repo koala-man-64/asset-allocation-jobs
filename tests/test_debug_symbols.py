@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from asset_allocation_runtime_common.foundation import debug_symbols
-from asset_allocation_runtime_common.foundation.runtime_config import RuntimeConfigItem
+import asset_allocation_runtime_common.shared_core.debug_symbols as debug_symbols
+from asset_allocation_runtime_common.shared_core.runtime_config import RuntimeConfigItem
 
 
 def _item(

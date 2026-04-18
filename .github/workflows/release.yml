@@ -83,7 +83,7 @@ jobs:
             --runtime-common-version
             "${{ steps.shared.outputs.runtime_common_version }}"
             --context
-            .
+            asset-allocation-jobs
             --push
             --github-output
             "$GITHUB_OUTPUT"

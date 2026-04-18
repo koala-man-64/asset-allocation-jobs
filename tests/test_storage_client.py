@@ -1,7 +1,7 @@
 import os
 from unittest.mock import patch
 
-from asset_allocation_runtime_common.market_data import core as mdc
+import asset_allocation_runtime_common.shared_core.core as mdc
 def test_get_storage_client_initializes_when_test_mode_false():
     sentinel = object()
     env = {
@@ -11,7 +11,7 @@ def test_get_storage_client_initializes_when_test_mode_false():
         ),
     }
 
-    with patch.dict(os.environ, env, clear=True), patch("core.core.BlobStorageClient", return_value=sentinel) as ctor:
+    with patch.dict(os.environ, env, clear=True), patch.object(mdc, "BlobStorageClient", return_value=sentinel) as ctor:
         client = mdc.get_storage_client("bronze")
 
     assert client is sentinel
@@ -26,7 +26,7 @@ def test_get_storage_client_skips_when_test_mode_true():
         ),
     }
 
-    with patch.dict(os.environ, env, clear=True), patch("core.core.BlobStorageClient") as ctor:
+    with patch.dict(os.environ, env, clear=True), patch.object(mdc, "BlobStorageClient") as ctor:
         client = mdc.get_storage_client("bronze")
 
     assert client is None
