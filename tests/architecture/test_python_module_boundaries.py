@@ -35,18 +35,31 @@ def _forbidden_imports(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     offenders: list[str] = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in {"core.regime", "core.regime_repository"}:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)} -> remove import {alias.name}")
+            continue
+
         if not isinstance(node, ast.ImportFrom) or not node.module:
             continue
+
         imported_names = {alias.name for alias in node.names}
         if node.module == "core.pipeline" and "DataPaths" in imported_names:
             offenders.append(f"{path.relative_to(REPO_ROOT)} -> from asset_allocation_runtime_common.market_data.pipeline import DataPaths")
-        legacy_regime_imports = sorted(
-            {"DEFAULT_REGIME_MODEL_NAME", "RegimePolicy"} & imported_names
-        )
+        legacy_regime_imports = sorted({"DEFAULT_REGIME_MODEL_NAME", "RegimePolicy"} & imported_names)
         if node.module == "core.regime" and legacy_regime_imports:
             offenders.append(
                 f"{path.relative_to(REPO_ROOT)} -> "
                 f"from asset_allocation_runtime_common.domain.regime import {', '.join(legacy_regime_imports)}"
+            )
+        if node.module in {"core.regime", "core.regime_repository"}:
+            offenders.append(f"{path.relative_to(REPO_ROOT)} -> remove import-from {node.module}")
+        if node.module == "core":
+            forbidden_names = sorted({"regime", "regime_repository"} & imported_names)
+            offenders.extend(
+                f"{path.relative_to(REPO_ROOT)} -> remove from core import {name}"
+                for name in forbidden_names
             )
     return offenders
 
@@ -84,3 +97,8 @@ def test_repo_has_no_legacy_contract_facade_imports() -> None:
         for path in _python_files_under(package):
             offenders.extend(_forbidden_imports(path))
     assert offenders == []
+
+
+def test_repo_has_no_local_regime_shims() -> None:
+    assert not (REPO_ROOT / "core" / "regime.py").exists()
+    assert not (REPO_ROOT / "core" / "regime_repository.py").exists()
