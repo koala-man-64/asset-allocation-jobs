@@ -72,6 +72,14 @@ def _merge_symbol_to_bucket_map(
     return out
 
 
+def _gold_earnings_job_run_id() -> str:
+    execution_name = str(os.environ.get("CONTAINER_APP_JOB_EXECUTION_NAME") or "").strip()
+    if execution_name:
+        return execution_name
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"gold-earnings-job-{stamp}-{os.getpid()}"
+
+
 def _failure_log_value(value: object) -> str:
     text = " ".join(str(value or "").split())
     return text.replace('"', "'").replace(" ", "_") or "n/a"
@@ -557,6 +565,7 @@ def _run_alpha26_earnings_gold(
     failed_symbols = 0
     failed_buckets = 0
     failed_finalization = 0
+    run_id = _gold_earnings_job_run_id()
     watermarks_dirty = False
     symbol_to_bucket = _load_existing_gold_earnings_symbol_to_bucket_map()
     postgres_dsn = resolve_postgres_dsn()

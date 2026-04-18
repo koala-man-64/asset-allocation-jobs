@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Sequence, Tuple, Dict, Any, List, Optional
 
@@ -59,6 +60,16 @@ class GoldFinanceRunResult:
 
 
 _NUMBER_RE = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*([kKmMbBtT])?\s*$")
+
+
+def _gold_finance_job_run_id() -> str:
+    execution_name = str(os.environ.get("CONTAINER_APP_JOB_EXECUTION_NAME") or "").strip()
+    if execution_name:
+        return execution_name
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"gold-finance-job-{stamp}-{os.getpid()}"
+
+
 _REQUIRED_FEATURE_COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
     "revenue": ("total_revenue", "Total Revenue", "Revenue"),
     "gross_profit": ("gross_profit", "Gross Profit"),
@@ -716,6 +727,7 @@ def _run_alpha26_finance_gold(
     failed_symbols = 0
     failed_buckets = 0
     failed_finalization = 0
+    run_id = _gold_finance_job_run_id()
     watermarks_dirty = False
     symbol_to_bucket = _load_existing_gold_finance_symbol_to_bucket_map()
     postgres_dsn = resolve_postgres_dsn()

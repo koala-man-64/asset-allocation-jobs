@@ -62,6 +62,8 @@ def test_integration_workflow_is_the_only_place_cross_repo_checkout_and_contract
     assert "Checkout control-plane repository" in integration
     assert "Checkout runtime-common repository" in integration
     assert "contracts_released" in integration
+    assert "Validate shared dependency compatibility" in integration
+    assert "scripts/workflows/validate_shared_dependency_compatibility.py" in integration
     assert "contents: write" in integration
     assert "requirements.lock.txt" in integration
     assert "git push origin HEAD:${{ steps.inputs.outputs.target_branch }}" in integration

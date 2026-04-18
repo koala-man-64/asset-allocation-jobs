@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional
 
@@ -68,6 +69,14 @@ def _merge_symbol_to_bucket_map(
     out = {symbol: bucket for symbol, bucket in existing.items() if bucket != touched_bucket}
     out.update(touched_symbol_to_bucket)
     return out
+
+
+def _gold_price_target_job_run_id() -> str:
+    execution_name = str(os.environ.get("CONTAINER_APP_JOB_EXECUTION_NAME") or "").strip()
+    if execution_name:
+        return execution_name
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"gold-price-target-job-{stamp}-{os.getpid()}"
 
 
 def _coerce_datetime(series: pd.Series) -> pd.Series:
@@ -343,6 +352,7 @@ def _run_alpha26_price_target_gold(
     failed_symbols = 0
     failed_buckets = 0
     failed_finalization = 0
+    run_id = _gold_price_target_job_run_id()
     watermarks_dirty = False
     symbol_to_bucket = _load_existing_gold_price_target_symbol_to_bucket_map()
     postgres_dsn = resolve_postgres_dsn()

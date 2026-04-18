@@ -4,8 +4,8 @@ FROM python:3.14-slim-bookworm
 
 WORKDIR /app
 
-ARG CONTRACTS_VERSION=2.0.0
-ARG RUNTIME_COMMON_VERSION=2.0.0
+ARG CONTRACTS_VERSION=1.2.0
+ARG RUNTIME_COMMON_VERSION=2.0.1
 
 COPY asset-allocation-jobs/requirements.lock.txt ./
 RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
