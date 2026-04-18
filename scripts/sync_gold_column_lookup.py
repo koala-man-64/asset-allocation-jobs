@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from core.gold_column_lookup_catalog import (
+from asset_allocation_runtime_common.market_data.gold_column_lookup_catalog import (
     TABLE_SOURCE_JOBS,
     SUPPORTED_GOLD_LOOKUP_TABLES,
 )
-from core.postgres import PostgresError, connect, get_dsn
+from asset_allocation_runtime_common.foundation.postgres import PostgresError, connect, get_dsn
 
 CALCULATION_TYPES = {"source", "derived_sql", "derived_python", "external", "manual"}
 STATUSES = {"draft", "reviewed", "approved"}

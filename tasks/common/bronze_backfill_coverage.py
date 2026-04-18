@@ -6,7 +6,7 @@ from typing import Any, Optional, Sequence
 
 import pandas as pd
 
-from core import core as mdc
+from asset_allocation_runtime_common.market_data import core as mdc
 from tasks.common.backfill import get_backfill_range
 
 _COVERAGE_MARKER_PREFIX = "system/backfill_coverage/bronze"

@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from core.finance_contracts import (
+from asset_allocation_contracts.finance import (
     SILVER_FINANCE_COLUMNS_BY_SUBDOMAIN,
     SILVER_FINANCE_SOURCE_ALIASES_BY_SUBDOMAIN,
 )

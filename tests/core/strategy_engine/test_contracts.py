@@ -1,8 +1,6 @@
 from pydantic import ValidationError
 
-from core.strategy_engine import StrategyConfig
-
-
+from asset_allocation_runtime_common.strategy_engine import StrategyConfig
 def _sample_universe_payload() -> dict:
     return {
         "source": "postgres_gold",
@@ -12,8 +10,7 @@ def _sample_universe_payload() -> dict:
             "clauses": [
                 {
                     "kind": "condition",
-                    "table": "market_data",
-                    "column": "close",
+                    "field": "market.close",
                     "operator": "gt",
                     "value": 10,
                 }

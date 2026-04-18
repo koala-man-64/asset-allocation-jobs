@@ -80,7 +80,7 @@ def azure_client():
     Provides a Mocked BlobStorageClient for tests if actual Azure config is missing.
     In actual integration tests, this would use a real client.
     """
-    from core.blob_storage import BlobStorageClient
+    from asset_allocation_runtime_common.foundation.blob_storage import BlobStorageClient
 
     mock_client = MagicMock(spec=BlobStorageClient)
     return mock_client

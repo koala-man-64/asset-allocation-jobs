@@ -59,6 +59,8 @@ properties:
         value: ${ASSET_ALLOCATION_API_BASE_URL}
       - name: ASSET_ALLOCATION_API_SCOPE
         value: ${ASSET_ALLOCATION_API_SCOPE}
+      - name: TRIGGER_NEXT_JOB_NAME
+        value: results-reconcile-job
       - name: JOB_STARTUP_API_CONTAINER_APPS
         value: ${JOB_STARTUP_API_CONTAINER_APPS}
       - name: AZURE_CLIENT_ID

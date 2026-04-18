@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO, BytesIO
 from pathlib import Path
 from typing import Any, Union, Optional, Literal
-from core.massive_provider import get_complete_ticker_list
+from asset_allocation_runtime_common.providers.massive_provider import get_complete_ticker_list
 
 import pandas as pd
 import numpy as np
@@ -23,7 +23,7 @@ from .blob_storage import BlobStorageClient
 from azure.storage.blob import BlobLeaseClient
 from . import config as cfg
 from azure.core.exceptions import HttpResponseError, ResourceExistsError
-from core.postgres import connect, copy_rows
+from asset_allocation_runtime_common.foundation.postgres import connect, copy_rows
 # NOTE: We are importing cfg here. If config depends on core, we have a cycle.
 # Checking market_data.core imports: it imports config. 
 # market_data.config usually just has constants. Safe.
@@ -105,7 +105,7 @@ def log_environment_diagnostics():
 
     applied_runtime_config: dict[str, str] = {}
     try:
-        from core.runtime_config import apply_runtime_config_to_env, default_scopes_by_precedence
+        from asset_allocation_runtime_common.foundation.runtime_config import apply_runtime_config_to_env, default_scopes_by_precedence
 
         applied_runtime_config = apply_runtime_config_to_env(
             scopes_by_precedence=default_scopes_by_precedence()
@@ -120,7 +120,7 @@ def log_environment_diagnostics():
 
     if applied_runtime_config:
         try:
-            from core.config import reload_settings
+            from asset_allocation_runtime_common.foundation.config import reload_settings
 
             reload_settings()
         except Exception as exc:
@@ -139,7 +139,7 @@ def log_environment_diagnostics():
             pass
 
     try:
-        from core.debug_symbols import refresh_debug_symbols_from_db
+        from asset_allocation_runtime_common.foundation.debug_symbols import refresh_debug_symbols_from_db
 
         debug_symbols = refresh_debug_symbols_from_db()
         if debug_symbols:
@@ -229,7 +229,7 @@ def log_environment_diagnostics():
 # Logging Utilities
 # ------------------------------------------------------------------------------
 
-from core.logging_config import configure_logging
+from asset_allocation_runtime_common.foundation.logging_config import configure_logging
 
 # Ensure logging is configured on import
 configure_logging()
@@ -682,7 +682,7 @@ def get_active_tickers_alpha_vantage() -> pd.DataFrame:
         raise RuntimeError(message)
 
     try:
-        from core.alpha_vantage_gateway_client import AlphaVantageGatewayClient
+        from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client import AlphaVantageGatewayClient
 
         with AlphaVantageGatewayClient.from_env() as av_gateway:
             csv_text = av_gateway.get_listing_status_csv(state="active")

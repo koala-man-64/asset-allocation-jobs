@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import os
 from dataclasses import dataclass
@@ -9,13 +11,13 @@ from typing import Any, NoReturn, Sequence
 
 import pandas as pd
 
-from core import core as mdc
-from core.postgres import connect, copy_rows
-from core.regime import build_regime_outputs, compute_curve_state, compute_trend_state
-from core.regime_repository import RegimeRepository
-from core import domain_artifacts
-from core.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
-from core.gold_sync_contracts import load_domain_sync_state
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.foundation.postgres import connect, copy_rows
+from asset_allocation_runtime_common.domain.regime import build_regime_outputs, compute_curve_state, compute_trend_state
+from asset_allocation_runtime_common.regime_repository import RegimeRepository
+from asset_allocation_runtime_common.market_data import domain_artifacts
+from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
+from asset_allocation_runtime_common.market_data.gold_sync_contracts import load_domain_sync_state
 from tasks.common.job_trigger import ensure_api_awake_from_env
 from tasks.common.system_health_markers import write_system_health_marker
 from tasks.common.watermarks import save_last_success, save_watermarks
@@ -559,6 +561,7 @@ def _write_storage_outputs(
     history: pd.DataFrame,
     latest: pd.DataFrame,
     transitions: pd.DataFrame,
+    active_revisions: Sequence[dict[str, Any]],
 ) -> None:
     client = mdc.get_storage_client(gold_container)
     if client is None:
@@ -577,6 +580,23 @@ def _write_storage_outputs(
             "column": "as_of_date",
             "source": "artifact",
         }
+    source_fingerprint = hashlib.md5(
+        json.dumps(
+            {
+                "activeModels": [
+                    {
+                        "name": revision.get("name"),
+                        "version": revision.get("version"),
+                        "activatedAt": revision.get("activated_at"),
+                    }
+                    for revision in active_revisions
+                ],
+                "dateRange": date_range,
+            },
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
     artifact_path = domain_artifacts.domain_artifact_path(layer="gold", domain="regime")
     now = computed_at_iso()
     payload = {
@@ -588,11 +608,15 @@ def _write_storage_outputs(
         "artifactPath": artifact_path,
         "updatedAt": now,
         "computedAt": now,
+        "publishedAt": now,
         "producerJobName": JOB_NAME,
+        "sourceCommit": source_fingerprint,
         "symbolCount": 0,
         "columnCount": len(sorted(set(inputs.columns) | set(history.columns) | set(latest.columns) | set(transitions.columns))),
         "columns": sorted(set(inputs.columns) | set(history.columns) | set(latest.columns) | set(transitions.columns)),
         "dateRange": date_range,
+        "affectedAsOfStart": date_range.get("min") if isinstance(date_range, dict) else None,
+        "affectedAsOfEnd": date_range.get("max") if isinstance(date_range, dict) else None,
         "totalRows": int(len(history)),
         "fileCount": 4,
         "warnings": [],
@@ -662,6 +686,7 @@ def main() -> int:
         history=history,
         latest=latest,
         transitions=transitions,
+        active_revisions=active_revisions,
     )
 
     save_watermarks(
@@ -695,6 +720,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     from tasks.common.job_entrypoint import run_logged_job
+    from tasks.common.job_trigger import trigger_next_job_from_env
 
     job_name = JOB_NAME
     with mdc.JobLock(job_name, conflict_policy="fail"):
@@ -703,6 +729,9 @@ if __name__ == "__main__":
             run_logged_job(
                 job_name=job_name,
                 run=main,
-                on_success=(lambda: write_system_health_marker(layer="gold", domain="regime", job_name=job_name),),
+                on_success=(
+                    lambda: write_system_health_marker(layer="gold", domain="regime", job_name=job_name),
+                    trigger_next_job_from_env,
+                ),
             )
         )

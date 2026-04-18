@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from core.control_plane_transport import (
+from asset_allocation_runtime_common.control_plane_transport import (
     ControlPlaneRequestError,
     ControlPlaneTransport,
     ControlPlaneTransportConfig,

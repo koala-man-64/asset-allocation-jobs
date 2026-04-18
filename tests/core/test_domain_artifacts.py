@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from core import domain_artifacts
-from core import domain_metadata_snapshots
-
-
+from asset_allocation_runtime_common.market_data import domain_artifacts
+from asset_allocation_runtime_common.market_data import domain_metadata_snapshots
 def test_summarize_frame_tracks_finance_subdomains() -> None:
     df = pd.DataFrame(
         {
@@ -84,6 +82,7 @@ def test_write_domain_artifact_aggregates_bucket_sidecars(monkeypatch) -> None:
             }
         ),
         date_column="date",
+        source_commit="silver-commit-a",
     )
     domain_artifacts.write_bucket_artifact(
         layer="silver",
@@ -97,6 +96,7 @@ def test_write_domain_artifact_aggregates_bucket_sidecars(monkeypatch) -> None:
             }
         ),
         date_column="date",
+        source_commit="silver-commit-m",
     )
 
     payload = domain_artifacts.write_domain_artifact(
@@ -115,8 +115,15 @@ def test_write_domain_artifact_aggregates_bucket_sidecars(monkeypatch) -> None:
     assert payload["dateRange"]["max"].startswith("2026-01-03")
     assert payload["totalBytes"] == 448
     assert payload["artifactPath"] == "market-data/_metadata/domain.json"
+    assert payload["affectedAsOfStart"].startswith("2026-01-01")
+    assert payload["affectedAsOfEnd"].startswith("2026-01-03")
     assert "metadata/domain-metadata.json" in common_storage
     assert "metadata/ui-cache/domain-metadata-snapshot.json" in common_storage
+
+    bucket_payload = storage["market-data/_metadata/buckets/A.json"]
+    assert bucket_payload["sourceCommit"] == "silver-commit-a"
+    assert bucket_payload["affectedAsOfStart"].startswith("2026-01-01")
+    assert bucket_payload["affectedAsOfEnd"].startswith("2026-01-02")
 
     snapshot_doc = common_storage["metadata/domain-metadata.json"]
     snapshot_entry = snapshot_doc["entries"]["silver/market"]["metadata"]

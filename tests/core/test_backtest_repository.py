@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import httpx
 
-from core.backtest_repository import BacktestRepository
-from core.control_plane_transport import ControlPlaneTransport, ControlPlaneTransportConfig
+from asset_allocation_runtime_common.backtest_repository import BacktestRepository
+from asset_allocation_runtime_common.control_plane_transport import ControlPlaneTransport, ControlPlaneTransportConfig
 
 
 def _build_transport(handler) -> ControlPlaneTransport:

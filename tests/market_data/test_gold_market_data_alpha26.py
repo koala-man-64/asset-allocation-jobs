@@ -3,12 +3,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from core import core as core_module
-from core import delta_core as delta_core_module
+from asset_allocation_runtime_common.market_data import core as core_module
+from asset_allocation_runtime_common.market_data import delta_core as delta_core_module
 from asset_allocation_contracts.paths import DataPaths
-from core.postgres import PostgresError
+from asset_allocation_runtime_common.foundation.postgres import PostgresError
 from tasks.market_data import gold_market_data as gold
-from core.gold_sync_contracts import GoldSyncResult
+from asset_allocation_runtime_common.market_data.gold_sync_contracts import GoldSyncResult
 
 
 def _silver_bucket_df(symbol: str) -> pd.DataFrame:

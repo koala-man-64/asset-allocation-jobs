@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.strategy_engine import universe as universe_service
-
-
+from asset_allocation_runtime_common.strategy_engine import universe as universe_service
 def list_gold_ranking_catalog(dsn: str) -> dict[str, Any]:
     specs = universe_service._load_gold_table_specs(dsn)
     tables: list[dict[str, Any]] = []

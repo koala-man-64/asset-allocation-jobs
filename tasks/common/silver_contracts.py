@@ -5,9 +5,7 @@ from typing import Any, Sequence
 
 import pandas as pd
 
-from core import core as mdc
-
-
+from asset_allocation_runtime_common.market_data import core as mdc
 class ContractViolation(ValueError):
     """Raised when job input does not satisfy a data contract."""
 

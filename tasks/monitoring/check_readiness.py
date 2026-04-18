@@ -1,7 +1,7 @@
 import logging
-from core import config as cfg
-from core import core as mdc
-from core.logging_config import configure_logging
+from asset_allocation_runtime_common.foundation import config as cfg
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.foundation.logging_config import configure_logging
 
 # Configure logging (force JSON for machine readability during checks if needed, but respect env)
 configure_logging()

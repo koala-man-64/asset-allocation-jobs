@@ -4,9 +4,9 @@ from typing import Optional
 
 import pandas as pd
 
-from core import core as mdc
-from core import finance_contracts
-from core import layer_bucketing
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_contracts import finance
+from asset_allocation_runtime_common.market_data import layer_bucketing
 from tasks.finance_data import config as cfg
 from tasks.common.delta_write_policy import prepare_delta_write_frame
 from tasks.common.silver_contracts import coerce_to_naive_datetime

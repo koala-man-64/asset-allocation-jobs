@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from core import config as _cfg
-
+from asset_allocation_runtime_common.foundation import config as _cfg
 AZURE_FOLDER_FINANCE = _cfg.AZURE_FOLDER_FINANCE
 
 

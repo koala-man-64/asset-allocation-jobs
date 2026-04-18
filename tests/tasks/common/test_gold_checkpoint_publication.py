@@ -80,6 +80,8 @@ def test_publish_gold_checkpoint_aggregate_merges_symbols_and_persists_watermark
         "run_id": "run-123",
         "total_bytes_override": 2048,
         "file_count_override": 11,
+        "source_commit": 123.0,
+        "published_at": checkpoint_time.isoformat(),
     }
     assert saved == [
         (
@@ -196,6 +198,7 @@ def test_finalize_gold_publication_publishes_root_artifact_when_no_failures(monk
         "job_name": "gold-market-job",
         "job_run_id": "run-1",
         "run_id": "run-1",
+        "source_commit": None,
     }
     assert any(
         "artifact_publication_status layer=gold domain=market status=published reason=none "

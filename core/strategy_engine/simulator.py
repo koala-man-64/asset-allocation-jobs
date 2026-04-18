@@ -3,11 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from core.strategy_engine.contracts import StrategyConfig
-from core.strategy_engine.exit_rules import ExitRuleEvaluator
-from core.strategy_engine.position_state import PositionState, PriceBar, TemporalValue
-
-
+from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
+from asset_allocation_runtime_common.strategy_engine.exit_rules import ExitRuleEvaluator
+from asset_allocation_runtime_common.strategy_engine.position_state import PositionState, PriceBar, TemporalValue
 @dataclass(frozen=True)
 class SimulatedTrade:
     symbol: str

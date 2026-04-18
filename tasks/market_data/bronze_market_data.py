@@ -13,17 +13,17 @@ from typing import Any, Callable, Dict, Optional
 
 import pandas as pd
 
-from core.massive_gateway_client import (
+from asset_allocation_runtime_common.providers.massive_gateway_client import (
     MassiveGatewayClient,
     MassiveGatewayError,
     MassiveGatewayNotFoundError,
     MassiveGatewayRateLimitError,
 )
-from core.market_history_contract import MARKET_HISTORY_START_DATE, MARKET_HISTORY_STATUS_NO_HISTORY
-from core import symbol_availability
-from core import core as mdc
-from core.pipeline import ListManager
-from core import bronze_bucketing
+from asset_allocation_contracts.market_history import MARKET_HISTORY_START_DATE, MARKET_HISTORY_STATUS_NO_HISTORY
+from asset_allocation_runtime_common.market_data import symbol_availability
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data.pipeline import ListManager
+from asset_allocation_runtime_common.market_data import bronze_bucketing
 from tasks.common.bronze_alpha26_publish import (
     finalize_alpha26_bronze_publish,
     start_alpha26_bronze_publish,

@@ -15,20 +15,19 @@ import numpy as np
 import pandas as pd
 from asset_allocation_runtime_common import BACKTEST_RESULTS_SCHEMA_VERSION, persist_backtest_results
 
-from core.backtest_repository import BacktestRepository
-from core.postgres import connect
-from core.ranking_engine import service as ranking_service
-from core.ranking_engine.contracts import RankingSchemaConfig
+from asset_allocation_runtime_common.backtest_repository import BacktestRepository
+from asset_allocation_runtime_common.foundation.postgres import connect
+from asset_allocation_runtime_common.ranking_engine import service as ranking_service
+from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
 from asset_allocation_contracts.regime import DEFAULT_REGIME_MODEL_NAME, RegimePolicy
-from core.regime_repository import RegimeRepository
-from core.ranking_repository import RankingRepository
-from core.strategy_engine import StrategyConfig, UniverseDefinition
-from core.strategy_engine.exit_rules import ExitRuleEvaluator
-from core.strategy_engine.position_state import PositionState, PriceBar
-from core.strategy_engine import universe as universe_service
-from core.strategy_repository import StrategyRepository
-from core.universe_repository import UniverseRepository
-
+from asset_allocation_runtime_common.regime_repository import RegimeRepository
+from asset_allocation_runtime_common.ranking_repository import RankingRepository
+from asset_allocation_runtime_common.strategy_engine import StrategyConfig, UniverseDefinition
+from asset_allocation_runtime_common.strategy_engine.exit_rules import ExitRuleEvaluator
+from asset_allocation_runtime_common.strategy_engine.position_state import PositionState, PriceBar
+from asset_allocation_runtime_common.strategy_engine import universe as universe_service
+from asset_allocation_runtime_common.strategy_repository import StrategyRepository
+from asset_allocation_runtime_common.universe_repository import UniverseRepository
 logger = logging.getLogger(__name__)
 
 _PRICE_TABLE = "market_data"

@@ -239,6 +239,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - Jobs call the control plane over authenticated HTTP via runtime-common transport and clients.
 - Jobs must not import control-plane Python modules directly for normal runtime behavior.
 - Backtesting worker preflight depends on a dedicated authenticated readiness endpoint in the control plane before claim/start flow is allowed to proceed.
+- Universe selection payloads now use stable public field ids at the contract edge. Jobs resolves those ids to warehouse columns locally inside `core/strategy_engine/universe.py` and `core/ranking_engine/service.py`; the warehouse mapping is not part of the external contract.
 
 ### Identity and secret boundaries
 

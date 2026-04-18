@@ -5,9 +5,8 @@ from typing import Any, Callable, Optional, Sequence, Set
 
 import pandas as pd
 
-from core import bronze_bucketing
-from core import layer_bucketing
-
+from asset_allocation_runtime_common.market_data import bronze_bucketing
+from asset_allocation_runtime_common.market_data import layer_bucketing
 from tasks.common.backfill import apply_backfill_start_cutoff
 
 

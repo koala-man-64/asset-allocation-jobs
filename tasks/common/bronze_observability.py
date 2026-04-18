@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core import core as mdc
-
-
+from asset_allocation_runtime_common.market_data import core as mdc
 def should_log_bronze_success(
     count: int,
     *,

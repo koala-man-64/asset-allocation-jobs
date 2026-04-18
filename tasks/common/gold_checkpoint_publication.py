@@ -4,12 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from core import core as mdc
-
-from core import domain_artifacts
-from core import layer_bucketing
-
-
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data import domain_artifacts
+from asset_allocation_runtime_common.market_data import layer_bucketing
 @dataclass(frozen=True)
 class GoldCheckpointPublicationResult:
     symbol_to_bucket: dict[str, str]
@@ -173,6 +170,8 @@ def publish_gold_checkpoint_aggregate(
                 run_id=run_id,
                 total_bytes_override=_metric_override(prior_artifact, "totalBytes"),
                 file_count_override=_metric_override(prior_artifact, "fileCount"),
+                source_commit=source_commit,
+                published_at=checkpoint_time.isoformat(),
             )
             domain_artifact_path = (
                 str(artifact.get("artifactPath") or "").strip()
@@ -217,6 +216,7 @@ def finalize_gold_publication(
     index_path: Optional[str] = None,
     job_run_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    source_commit: Any = None,
 ) -> GoldPublicationFinalizationResult:
     clean_domain = domain_artifacts.normalize_domain(domain)
     clean_reason = str(publication_reason or "").strip() or None
@@ -275,6 +275,7 @@ def finalize_gold_publication(
                     job_name=job_name,
                     job_run_id=job_run_id,
                     run_id=run_id,
+                    source_commit=source_commit,
                 )
                 domain_artifact_path = (
                     str(artifact.get("artifactPath") or "").strip()

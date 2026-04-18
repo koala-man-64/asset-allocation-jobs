@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 
-from core.backtest_repository import BacktestRepository
+from asset_allocation_runtime_common.backtest_repository import BacktestRepository
 
 logger = logging.getLogger("asset-allocation.tasks.backtesting")
 

@@ -10,9 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from core import core as mdc
-
-
+from asset_allocation_runtime_common.market_data import core as mdc
 _LogFn = Callable[[str], None]
 _RunFn = Callable[[], int | None]
 _CallbackFn = Callable[[], Any]

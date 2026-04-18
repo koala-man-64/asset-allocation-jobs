@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from core import core as mdc
-from core.datetime_utils import parse_utc_datetime, utc_isoformat
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.foundation.datetime_utils import parse_utc_datetime, utc_isoformat
 
 
 def _is_enabled() -> bool:

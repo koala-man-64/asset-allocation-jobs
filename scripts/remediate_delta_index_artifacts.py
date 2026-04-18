@@ -15,9 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, List
 
-from core import core as mdc
-from core import delta_core
-
+from asset_allocation_runtime_common.market_data import core as mdc
+from asset_allocation_runtime_common.market_data import delta_core
 _NON_ALNUM_RE = re.compile(r"[^0-9a-z]+")
 _INDEX_ARTIFACT_EXACT_NAMES = {
     "index",

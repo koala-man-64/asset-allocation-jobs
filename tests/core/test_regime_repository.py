@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import httpx
 
-from core.control_plane_transport import ControlPlaneTransport, ControlPlaneTransportConfig
-from core.regime_repository import RegimeRepository
+from asset_allocation_runtime_common.control_plane_transport import ControlPlaneTransport, ControlPlaneTransportConfig
+from asset_allocation_runtime_common.regime_repository import RegimeRepository
 
 
 def _build_transport(handler) -> ControlPlaneTransport:

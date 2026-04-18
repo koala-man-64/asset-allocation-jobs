@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 # Transitional compatibility wrapper; remove after call-site migration.
-from core import gold_sync_contracts as _owner
-
-
+from asset_allocation_runtime_common.market_data import gold_sync_contracts as _owner
 def __getattr__(name: str):
     return getattr(_owner, name)
 

@@ -19,14 +19,14 @@ from typing import Any, Iterator, Optional
 
 import numpy as np
 import pandas as pd
-from core.postgres import PostgresError, connect
+from asset_allocation_runtime_common.foundation.postgres import PostgresError, connect
 
 from tasks.common.watermarks import load_watermarks, save_watermarks
 from tasks.common.backfill import apply_backfill_start_cutoff, get_backfill_range
-from core import domain_artifacts
+from asset_allocation_runtime_common.market_data import domain_artifacts
 from tasks.common import gold_checkpoint_publication
-from core import layer_bucketing
-from core.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
+from asset_allocation_runtime_common.market_data import layer_bucketing
+from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from tasks.technical_analysis.market_structure import add_market_structure_features
 from tasks.technical_analysis.technical_indicators import (
     add_candlestick_patterns,
@@ -40,7 +40,7 @@ from tasks.common.market_reconciliation import (
     enforce_backfill_cutoff_on_bucket_tables,
     purge_orphan_rows_from_bucket_tables,
 )
-from core.gold_sync_contracts import (
+from asset_allocation_runtime_common.market_data.gold_sync_contracts import (
     bucket_sync_is_current,
     load_domain_sync_state,
     resolve_postgres_dsn,
@@ -178,8 +178,7 @@ def _log_bucket_progress(
     silver_commit_present: Optional[bool] = None,
     gold_commit_present: Optional[bool] = None,
 ) -> None:
-    from core import core as mdc
-
+    from asset_allocation_runtime_common.market_data import core as mdc
     fields = [f"bucket={bucket}", f"stage={stage}"]
     if silver_path:
         fields.append(f"silver_path={silver_path}")
@@ -421,8 +420,8 @@ def _run_market_reconciliation(*, silver_container: str, gold_container: str) ->
     - number of blobs deleted while purging orphans
     """
 
-    from core import core as mdc
-    from core import delta_core
+    from asset_allocation_runtime_common.market_data import core as mdc
+    from asset_allocation_runtime_common.market_data import delta_core
     from asset_allocation_contracts.paths import DataPaths
 
     silver_client = mdc.get_storage_client(silver_container)
@@ -560,8 +559,7 @@ def _gold_market_staging_chunk_blob_path(*, run_id: str, bucket: str, chunk_numb
 
 
 def _get_gold_market_storage_client(gold_container: str):
-    from core import core as mdc
-
+    from asset_allocation_runtime_common.market_data import core as mdc
     client = mdc.get_storage_client(gold_container)
     if client is None:
         raise RuntimeError(f"Gold market staging requires storage client for container={gold_container}.")
@@ -588,8 +586,7 @@ def _write_staged_market_chunk(
     chunk_number: int,
     is_first_chunk: bool,
 ) -> BucketChunkWriteResult:
-    from core import delta_core
-
+    from asset_allocation_runtime_common.market_data import delta_core
     if not chunk_frames:
         raise ValueError("chunk_frames must not be empty")
 
@@ -751,8 +748,7 @@ def _write_gold_market_bucket_artifact_from_summaries(
     job_run_id: str,
     data_path: str,
 ) -> Optional[dict[str, Any]]:
-    from core import core as mdc
-
+    from asset_allocation_runtime_common.market_data import core as mdc
     storage_client = _get_gold_market_storage_client(gold_container)
     aggregate_summary = domain_artifacts.aggregate_summaries(
         summaries,
@@ -826,8 +822,7 @@ def _stage_market_bucket_outputs(
     backfill_start: Optional[pd.Timestamp],
     run_id: str,
 ) -> BucketStageResult:
-    from core import delta_core
-
+    from asset_allocation_runtime_common.market_data import delta_core
     df_silver_bucket = delta_core.load_delta(
         silver_container,
         silver_path,
@@ -960,8 +955,7 @@ def _stage_market_bucket_outputs(
                     )
                     raise RuntimeError(f"critical_symbol::{ticker}::{exc}") from exc
                 bucket_symbol_failures += 1
-                from core import core as mdc
-
+                from asset_allocation_runtime_common.market_data import core as mdc
                 mdc.write_warning(f"Gold market alpha26 compute failed for {ticker}: {exc}")
             if (
                 processed_symbols == 1
@@ -1004,8 +998,7 @@ def _stage_market_bucket_outputs(
         if message.startswith("critical_symbol::"):
             _, critical_symbol, detail = message.split("::", 2)
             critical_compute_failure_symbol = critical_symbol
-            from core import core as mdc
-
+            from asset_allocation_runtime_common.market_data import core as mdc
             mdc.write_error(f"Gold market alpha26 compute failed for critical symbol {critical_symbol}: {detail}")
         else:
             raise
@@ -1088,8 +1081,7 @@ def _verify_postgres_critical_market_symbols(
     dsn: str,
     sync_state: dict[str, dict[str, Any]],
 ) -> None:
-    from core import core as mdc
-
+    from asset_allocation_runtime_common.market_data import core as mdc
     required_symbols = tuple(REGIME_REQUIRED_MARKET_SYMBOLS)
     required_buckets = {
         symbol: layer_bucketing.bucket_letter(symbol)
@@ -1205,10 +1197,9 @@ def _run_alpha26_market_gold(
     - retry-pending bucket count
     """
 
-    from core import core as mdc
+    from asset_allocation_runtime_common.market_data import core as mdc
     from asset_allocation_contracts.paths import DataPaths
-    from core import delta_core
-
+    from asset_allocation_runtime_common.market_data import delta_core
     backfill_start = pd.to_datetime(backfill_start_iso).normalize() if backfill_start_iso else None
 
     # Track per-run outcomes for caller status and logging.
@@ -1570,6 +1561,7 @@ def _run_alpha26_market_gold(
                         job_run_id=run_id,
                         run_id=run_id,
                         data_path=gold_path,
+                        source_commit=silver_commit,
                     )
                 except Exception as exc:
                     mdc.write_warning(f"Gold market metadata bucket artifact write failed bucket={bucket}: {exc}")
@@ -1776,6 +1768,7 @@ def _run_alpha26_market_gold(
         index_path=index_path,
         job_run_id=run_id,
         run_id=run_id,
+        source_commit=silver_commit,
     )
     mdc.write_line(
         "layer_handoff_status transition=silver_to_gold status=complete "
@@ -1800,8 +1793,7 @@ def _run_alpha26_market_gold(
 def main() -> int:
     """Run the gold market feature engineering pipeline and return process exit code."""
 
-    from core import core as mdc
-
+    from asset_allocation_runtime_common.market_data import core as mdc
     # Emit environment diagnostics to simplify operations troubleshooting.
     mdc.log_environment_diagnostics()
     job_cfg = _build_job_config()
@@ -1869,9 +1861,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    from core import core as mdc
+    from asset_allocation_runtime_common.market_data import core as mdc
     from tasks.common.job_entrypoint import run_logged_job
-    from tasks.common.job_trigger import ensure_api_awake_from_env
+    from tasks.common.job_trigger import ensure_api_awake_from_env, trigger_next_job_from_env
     from tasks.common.system_health_markers import write_system_health_marker
 
     job_name = "gold-market-job"
@@ -1883,6 +1875,9 @@ if __name__ == "__main__":
             run_logged_job(
                 job_name=job_name,
                 run=main,
-                on_success=(lambda: write_system_health_marker(layer="gold", domain="market", job_name=job_name),),
+                on_success=(
+                    lambda: write_system_health_marker(layer="gold", domain="market", job_name=job_name),
+                    trigger_next_job_from_env,
+                ),
             )
         )

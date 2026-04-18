@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-import core.alpha_vantage_gateway_client as alpha_vantage_gateway_client_module
-from core.alpha_vantage_gateway_client import (
+import asset_allocation_runtime_common.providers.alpha_vantage_gateway_client as alpha_vantage_gateway_client_module
+from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client import (
     AlphaVantageGatewayClient,
     AlphaVantageGatewayClientConfig,
     AlphaVantageGatewayError,

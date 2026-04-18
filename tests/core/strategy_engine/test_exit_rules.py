@@ -1,4 +1,4 @@
-from core.strategy_engine import (
+from asset_allocation_runtime_common.strategy_engine import (
     ExitRuleEvaluator,
     PositionState,
     PriceBar,

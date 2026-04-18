@@ -4,10 +4,11 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from collections.abc import Mapping
 from typing import Any
 
-from core.postgres import connect
-from core.strategy_engine.contracts import (
+from asset_allocation_runtime_common.foundation.postgres import connect
+from asset_allocation_runtime_common.strategy_engine.contracts import (
     UniverseCondition,
     UniverseConditionOperator,
     UniverseDefinition,
@@ -80,27 +81,63 @@ class UniverseTableSpec:
     as_of_kind: str = "slower"
 
 
+@dataclass(frozen=True)
+class UniverseFieldDefinition:
+    field: str
+    value_kind: str
+    operators: tuple[UniverseConditionOperator, ...]
+
+
+@dataclass(frozen=True)
+class _UniverseFieldBinding:
+    field: str
+    table: str
+    column: str
+    value_kind: str
+    operators: tuple[UniverseConditionOperator, ...]
+
+
+_FIELD_BINDING_SPECS: tuple[tuple[str, str, str, str, tuple[UniverseConditionOperator, ...]], ...] = (
+    ("market.close", "market_data", "close", "number", _NUMBER_OPERATORS),
+    ("security.is_active", "market_data", "active", "boolean", _BOOLEAN_OPERATORS),
+    ("security.sector", "market_data", "sector", "string", _STRING_OPERATORS),
+    ("security.delisted_at", "market_data", "delisted_at", "date", _NUMBER_OPERATORS),
+    ("market.trade_date", "market_data", "trade_date", "date", _NUMBER_OPERATORS),
+    ("market.timestamp", "market_data", "timestamp", "datetime", _NUMBER_OPERATORS),
+    ("returns.return_20d", "market_data", "return_20d", "number", _NUMBER_OPERATORS),
+    ("returns.return_126d", "market_data", "return_126d", "number", _NUMBER_OPERATORS),
+    ("quality.piotroski_f_score", "finance_data", "piotroski_f_score", "number", _NUMBER_OPERATORS),
+    ("earnings.surprise_pct", "earnings_data", "surprise_pct", "number", _NUMBER_OPERATORS),
+)
+
+_FIELD_BINDINGS: tuple[_UniverseFieldBinding, ...] = tuple(
+    _UniverseFieldBinding(
+        field=field,
+        table=table,
+        column=column,
+        value_kind=value_kind,
+        operators=operators,
+    )
+    for field, table, column, value_kind, operators in _FIELD_BINDING_SPECS
+)
+_FIELD_BINDINGS_BY_FIELD = {binding.field: binding for binding in _FIELD_BINDINGS}
+_FIELD_BINDINGS_BY_SOURCE = {(binding.table, binding.column): binding for binding in _FIELD_BINDINGS}
+
+
 def list_gold_universe_catalog(dsn: str) -> dict[str, Any]:
     table_specs = _load_gold_table_specs(dsn)
-    tables = [
-                {
-                    "name": spec.name,
-                    "asOfColumn": spec.as_of_column,
-                    "asOfKind": spec.as_of_kind,
-                    "columns": [
-                        {
-                            "name": column.name,
-                    "dataType": column.data_type,
-                    "valueKind": column.value_kind,
-                    "operators": list(column.operators),
-                }
-                for column in spec.columns.values()
-            ],
+    fields = [
+        {
+            "field": definition.field,
+            "valueKind": definition.value_kind,
+            "operators": list(definition.operators),
         }
-        for spec in table_specs.values()
+        for binding in _FIELD_BINDINGS
+        if binding.table in table_specs and binding.column in table_specs[binding.table].columns
+        for definition in (_field_definition_payload(binding),)
     ]
-    logger.info("Universe catalog loaded: gold_tables=%d", len(tables))
-    return {"source": "postgres_gold", "tables": tables}
+    logger.info("Universe catalog loaded: gold_fields=%d", len(fields))
+    return {"source": "postgres_gold", "fields": fields}
 
 
 def preview_gold_universe(
@@ -114,7 +151,7 @@ def preview_gold_universe(
 
     table_specs = _load_gold_table_specs(dsn)
     with connect(dsn) as conn:
-        symbols, tables_used = _evaluate_node(conn, universe.root, table_specs)
+        symbols, fields_used = _evaluate_node(conn, _node_attr(universe, "root"), table_specs)
 
     ordered_symbols = sorted(symbols)
     warnings: list[str] = []
@@ -122,8 +159,8 @@ def preview_gold_universe(
         warnings.append("Universe preview matched zero symbols.")
 
     logger.info(
-        "Universe preview resolved: tables=%s symbol_count=%d sample_limit=%d",
-        ",".join(sorted(tables_used)),
+        "Universe preview resolved: fields=%s symbol_count=%d sample_limit=%d",
+        ",".join(sorted(fields_used)),
         len(ordered_symbols),
         sample_limit,
     )
@@ -131,7 +168,7 @@ def preview_gold_universe(
         "source": "postgres_gold",
         "symbolCount": len(ordered_symbols),
         "sampleSymbols": ordered_symbols[:sample_limit],
-        "tablesUsed": sorted(tables_used),
+        "fieldsUsed": sorted(fields_used),
         "warnings": warnings,
     }
 
@@ -205,50 +242,133 @@ def is_intraday_table_spec(spec: UniverseTableSpec) -> bool:
     return spec.as_of_kind == "intraday"
 
 
+def _field_definition_payload(binding: _UniverseFieldBinding) -> UniverseFieldDefinition:
+    return UniverseFieldDefinition(
+        field=binding.field,
+        value_kind=binding.value_kind,
+        operators=binding.operators,
+    )
+
+
+def _resolve_condition_binding(
+    condition: UniverseCondition | Mapping[str, Any] | Any,
+    table_specs: dict[str, UniverseTableSpec],
+) -> _UniverseFieldBinding:
+    field = str(_node_attr(condition, "field") or "").strip()
+    if field:
+        binding = _FIELD_BINDINGS_BY_FIELD.get(field)
+        if binding is None:
+            raise ValueError(f"Unknown universe field '{field}'.")
+        table_spec = table_specs.get(binding.table)
+        if table_spec is None:
+            raise ValueError(f"Unknown gold table '{binding.table}' for field '{field}'.")
+        if binding.column not in table_spec.columns:
+            raise ValueError(
+                f"Unknown column '{binding.column}' for gold.{binding.table} referenced by field '{field}'."
+            )
+        return binding
+
+    table_name = str(_node_attr(condition, "table") or "").strip().lower()
+    column_name = str(_node_attr(condition, "column") or "").strip().lower()
+    if not table_name or not column_name:
+        raise ValueError("Universe condition must define either 'field' or 'table'/'column'.")
+    normalized_table_name = _normalize_identifier(table_name, "table")
+    normalized_column_name = _normalize_identifier(column_name, "column")
+    table_spec = table_specs.get(normalized_table_name)
+    if table_spec is None:
+        raise ValueError(f"Unknown gold table '{table_name}'.")
+    if normalized_column_name not in table_spec.columns:
+        raise ValueError(f"Unknown column '{column_name}' for gold.{table_spec.name}.")
+    return _FIELD_BINDINGS_BY_SOURCE.get(
+        (table_spec.name, normalized_column_name),
+        _UniverseFieldBinding(
+            field=f"{table_spec.name}.{normalized_column_name}",
+            table=table_spec.name,
+            column=normalized_column_name,
+            value_kind=table_spec.columns[normalized_column_name].value_kind,
+            operators=table_spec.columns[normalized_column_name].operators,
+        ),
+    )
+
+
+def _collect_required_source_columns(
+    node: UniverseGroup | UniverseCondition | Mapping[str, Any] | Any,
+    required: dict[str, set[str]],
+    *,
+    table_specs: dict[str, UniverseTableSpec],
+) -> None:
+    if _node_kind(node) == "condition":
+        binding = _resolve_condition_binding(node, table_specs)
+        required.setdefault(binding.table, set()).add(binding.column)
+        return
+    for clause in _node_clauses(node):
+        _collect_required_source_columns(clause, required, table_specs=table_specs)
+
+
+def _node_attr(node: UniverseGroup | UniverseCondition | Mapping[str, Any] | Any, name: str, default: Any = None) -> Any:
+    if isinstance(node, Mapping):
+        return node.get(name, default)
+    return getattr(node, name, default)
+
+
+def _node_kind(node: UniverseGroup | UniverseCondition | Mapping[str, Any] | Any) -> str:
+    return str(_node_attr(node, "kind") or "").strip().lower()
+
+
+def _node_operator(node: UniverseGroup | UniverseCondition | Mapping[str, Any] | Any) -> str:
+    return str(_node_attr(node, "operator") or "").strip().lower()
+
+
+def _node_clauses(node: UniverseGroup | UniverseCondition | Mapping[str, Any] | Any) -> list[Any]:
+    clauses = _node_attr(node, "clauses", [])
+    if clauses is None:
+        return []
+    return list(clauses)
+
+
 def _evaluate_node(
     conn: Any,
-    node: UniverseGroup | UniverseCondition,
+    node: UniverseGroup | UniverseCondition | Mapping[str, Any] | Any,
     table_specs: dict[str, UniverseTableSpec],
 ) -> tuple[set[str], set[str]]:
-    if isinstance(node, UniverseCondition):
-        table_name = _normalize_identifier(node.table, "table")
-        table_spec = table_specs.get(table_name)
-        if table_spec is None:
-            raise ValueError(f"Unknown gold table '{node.table}'.")
-        symbols = _fetch_condition_symbols(conn, table_spec, node)
-        return symbols, {table_spec.name}
+    node_kind = _node_kind(node)
+    if node_kind == "condition":
+        binding = _resolve_condition_binding(node, table_specs)
+        table_spec = table_specs[binding.table]
+        symbols = _fetch_condition_symbols(conn, table_spec, node, binding)
+        return symbols, {binding.field}
 
     child_symbols: list[set[str]] = []
-    tables_used: set[str] = set()
-    for clause in node.clauses:
+    fields_used: set[str] = set()
+    for clause in _node_clauses(node):
         clause_symbols, clause_tables = _evaluate_node(conn, clause, table_specs)
         child_symbols.append(clause_symbols)
-        tables_used.update(clause_tables)
+        fields_used.update(clause_tables)
 
-    if node.operator == "and":
+    if _node_operator(node) == "and":
         resolved = set(child_symbols[0])
         for item in child_symbols[1:]:
             resolved.intersection_update(item)
-        return resolved, tables_used
+        return resolved, fields_used
 
     resolved = set()
     for item in child_symbols:
         resolved.update(item)
-    return resolved, tables_used
+    return resolved, fields_used
 
 
 def _fetch_condition_symbols(
     conn: Any,
     table_spec: UniverseTableSpec,
-    condition: UniverseCondition,
+    condition: UniverseCondition | Mapping[str, Any] | Any,
+    binding: _UniverseFieldBinding,
 ) -> set[str]:
-    column_name = _normalize_identifier(condition.column, "column")
-    column_spec = table_spec.columns.get(column_name)
+    column_spec = table_spec.columns.get(binding.column)
     if column_spec is None:
-        raise ValueError(f"Unknown column '{condition.column}' for gold.{table_spec.name}.")
-    if condition.operator not in column_spec.operators:
+        raise ValueError(f"Unknown column '{binding.column}' for gold.{table_spec.name}.")
+    if _node_attr(condition, "operator") not in column_spec.operators:
         raise ValueError(
-            f"Operator '{condition.operator}' is not supported for gold.{table_spec.name}.{column_spec.name}."
+            f"Operator '{_node_attr(condition, 'operator')}' is not supported for gold.{table_spec.name}.{column_spec.name}."
         )
 
     predicate_sql, params = _build_predicate(condition, column_spec)
@@ -275,23 +395,26 @@ def _fetch_condition_symbols(
 
 
 def _build_predicate(
-    condition: UniverseCondition,
+    condition: UniverseCondition | Mapping[str, Any] | Any,
     column_spec: UniverseColumnSpec,
 ) -> tuple[str, list[Any]]:
-    if condition.operator == "is_null":
+    operator = _node_attr(condition, "operator")
+    if operator == "is_null":
         return "candidate_value IS NULL", []
-    if condition.operator == "is_not_null":
+    if operator == "is_not_null":
         return "candidate_value IS NOT NULL", []
 
-    if condition.operator in {"in", "not_in"}:
-        assert condition.values is not None
-        coerced = _coerce_values(condition.values, column_spec)
+    if operator in {"in", "not_in"}:
+        values = _node_attr(condition, "values")
+        assert values is not None
+        coerced = _coerce_values(list(values), column_spec)
         placeholders = ", ".join(["%s"] * len(coerced))
-        comparator = "IN" if condition.operator == "in" else "NOT IN"
+        comparator = "IN" if operator == "in" else "NOT IN"
         return f"candidate_value {comparator} ({placeholders})", coerced
 
-    assert condition.value is not None
-    coerced_value = _coerce_value(condition.value, column_spec)
+    value = _node_attr(condition, "value")
+    assert value is not None
+    coerced_value = _coerce_value(value, column_spec)
     comparator = {
         "eq": "=",
         "ne": "<>",
@@ -299,9 +422,9 @@ def _build_predicate(
         "gte": ">=",
         "lt": "<",
         "lte": "<=",
-    }.get(condition.operator)
+    }.get(operator)
     if comparator is None:
-        raise ValueError(f"Unsupported operator '{condition.operator}'.")
+        raise ValueError(f"Unsupported operator '{operator}'.")
     return f"candidate_value {comparator} %s", [coerced_value]
 
 

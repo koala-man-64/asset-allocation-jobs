@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import os
 
-from core import config as _cfg
-
+from asset_allocation_runtime_common.foundation import config as _cfg
 AZURE_FOLDER_TARGETS = _cfg.AZURE_FOLDER_TARGETS
 NASDAQ_API_KEY = os.environ.get("NASDAQ_API_KEY")
 
