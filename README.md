@@ -8,10 +8,19 @@ Runtime-owned jobs repository for:
 Local development installs versioned shared packages rather than sibling repos:
 
 ```powershell
-python -m pip install asset-allocation-contracts==1.2.0
-python -m pip install asset-allocation-runtime-common==2.0.1
+python -m pip install asset-allocation-contracts==2.1.0
+python -m pip install asset-allocation-runtime-common==2.0.5
 python -m pytest -q
 ```
+
+Refresh the shared package pins with Codex:
+
+```powershell
+.\scripts\refresh_shared_dependencies_with_codex.ps1
+.\scripts\refresh_shared_dependencies_with_codex.ps1 -ExecutionMode full-auto
+```
+
+The wrapper stores the generated prompt, console log, and final Codex summary under `artifacts/codex/shared-dependency-refresh/<timestamp>/`.
 
 Cross-repo control data is read from the control-plane over HTTP. Configure:
 

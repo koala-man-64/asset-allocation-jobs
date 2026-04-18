@@ -43,6 +43,12 @@ API_BOOTSTRAP_JOB_MANIFESTS = (
     "job_platinum_rankings.yaml",
 )
 
+MARKET_PIPELINE_JOB_MANIFESTS = (
+    "job_bronze_market_data.yaml",
+    "job_silver_market_data.yaml",
+    "job_gold_market_data.yaml",
+)
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -87,6 +93,43 @@ def test_api_backed_manual_jobs_define_control_plane_env_vars() -> None:
         assert "value: ${ASSET_ALLOCATION_API_BASE_URL}" in text, manifest_name
         assert "name: ASSET_ALLOCATION_API_SCOPE" in text, manifest_name
         assert "value: ${ASSET_ALLOCATION_API_SCOPE}" in text, manifest_name
+
+
+def test_market_job_manifests_use_contract_storage_account_variable() -> None:
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name in MARKET_PIPELINE_JOB_MANIFESTS:
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        assert "name: AZURE_STORAGE_ACCOUNT_NAME" in text, manifest_name
+        assert "value: ${AZURE_STORAGE_ACCOUNT_NAME}" in text, manifest_name
+        assert "value: assetallocstorage001" not in text, manifest_name
+
+
+def test_market_job_manifests_keep_folder_envs_aligned_to_contract_names() -> None:
+    expected_lines = {
+        "job_bronze_market_data.yaml": (
+            "value: ${AZURE_FOLDER_MARKET}",
+            "value: ${AZURE_FOLDER_FINANCE}",
+            "value: ${AZURE_FOLDER_EARNINGS}",
+            "value: ${AZURE_FOLDER_TARGETS}",
+        ),
+        "job_silver_market_data.yaml": (
+            "value: ${AZURE_FOLDER_MARKET}",
+            "value: ${AZURE_FOLDER_FINANCE}",
+            "value: ${AZURE_FOLDER_EARNINGS}",
+            "value: ${AZURE_FOLDER_TARGETS}",
+        ),
+        "job_gold_market_data.yaml": (
+            "value: ${AZURE_FOLDER_MARKET}",
+            "value: ${AZURE_FOLDER_FINANCE}",
+            "value: ${AZURE_FOLDER_EARNINGS}",
+            "value: ${AZURE_FOLDER_TARGETS}",
+        ),
+    }
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name, lines in expected_lines.items():
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        for line in lines:
+            assert line in text, f"{manifest_name} missing expected folder mapping: {line}"
 
 
 def test_platinum_rankings_job_does_not_define_deploy_time_ranking_overrides() -> None:

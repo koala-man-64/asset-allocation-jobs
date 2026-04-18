@@ -6,36 +6,31 @@ from asset_allocation_runtime_common.market_data import delta_core
 from asset_allocation_contracts.paths import DataPaths
 from tasks.market_data import gold_market_data as gold
 
+
 def test_run_market_reconciliation_cutoff_store_path_sanitizes_index_artifacts(monkeypatch, tmp_path):
     class _FakeGoldClient:
         def delete_prefix(self, _path: str) -> int:
             return 0
 
     fake_gold = _FakeGoldClient()
-
-    def _fake_get_storage_client(container: str):
-        if container == "silver":
-            return object()
-        if container == "gold":
-            return fake_gold
-        return None
-
-    monkeypatch.setattr("core.core.get_storage_client", _fake_get_storage_client)
+    monkeypatch.setattr(
+        gold,
+        "_resolve_gold_market_reconciliation_clients",
+        lambda **_kwargs: (object(), fake_gold),
+    )
     monkeypatch.setattr(gold, "collect_delta_market_symbols", lambda *, client, root_prefix: {"AAPL"})
     monkeypatch.setattr(gold, "get_backfill_range", lambda: (pd.Timestamp("2016-01-01"), None))
-
-    monkeypatch.setattr(delta_core, "_ensure_container_exists", lambda _container: None)
-    monkeypatch.setattr(delta_core, "get_delta_table_uri", lambda _container, _path: str(tmp_path / "gold_market"))
-    monkeypatch.setattr(delta_core, "get_delta_storage_options", lambda _container=None: {})
-    monkeypatch.setattr(delta_core, "_get_existing_delta_schema_columns", lambda _uri, _opts: None)
+    monkeypatch.setattr(gold, "_load_gold_market_bucket", lambda _path, *, gold_container: None)
 
     captured: dict[str, object] = {}
 
-    def fake_write_deltalake(_uri, df: pd.DataFrame, **kwargs) -> None:
+    def _fake_store_delta(df: pd.DataFrame, container: str, path: str, mode: str = "overwrite") -> None:
+        assert mode == "overwrite"
         captured["df"] = df.copy()
-        captured["kwargs"] = dict(kwargs)
+        captured["path"] = path
+        captured["gold_container"] = container
 
-    monkeypatch.setattr(delta_core, "write_deltalake", fake_write_deltalake)
+    monkeypatch.setattr(delta_core, "store_delta", _fake_store_delta)
 
     def _fake_enforce_backfill_cutoff_on_bucket_tables(**kwargs):
         dirty = pd.DataFrame(

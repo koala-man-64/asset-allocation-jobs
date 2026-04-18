@@ -26,6 +26,7 @@ from tasks.common.watermarks import (
     should_process_blob_since_last_success,
 )
 from tasks.common.delta_write_policy import prepare_delta_write_frame
+from tasks.common.delta_write_sanitizer import sanitize_delta_write_frame
 from tasks.common.silver_contracts import normalize_columns_to_snake_case
 from tasks.common.silver_precision import apply_precision_policy
 from tasks.common.market_reconciliation import (
@@ -137,6 +138,29 @@ def _merge_symbol_to_bucket_map(
         existing,
         touched_buckets=touched_buckets,
         touched_symbol_to_bucket=touched_symbol_to_bucket,
+    )
+
+
+def _read_bronze_market_bucket_bytes(blob_name: str) -> bytes:
+    return mdc.read_raw_bytes(blob_name, client=bronze_client)
+
+
+def _load_silver_market_bucket(path: str) -> pd.DataFrame | None:
+    return delta_core.load_delta(cfg.AZURE_CONTAINER_SILVER, path)
+
+
+def _store_silver_market_bucket(df: pd.DataFrame, path: str) -> None:
+    delta_core.store_delta(sanitize_delta_write_frame(df), cfg.AZURE_CONTAINER_SILVER, path, mode="overwrite")
+
+
+def _vacuum_silver_market_bucket(path: str) -> None:
+    delta_core.vacuum_delta_table(
+        cfg.AZURE_CONTAINER_SILVER,
+        path,
+        retention_hours=0,
+        dry_run=False,
+        enforce_retention_duration=False,
+        full=True,
     )
 
 
@@ -431,7 +455,7 @@ def process_alpha26_bucket_blob(
         return "skipped_unchanged"
 
     try:
-        raw_bytes = mdc.read_raw_bytes(blob_name, client=bronze_client)
+        raw_bytes = _read_bronze_market_bucket_bytes(blob_name)
         df_bucket = pd.read_parquet(BytesIO(raw_bytes))
     except Exception as exc:
         mdc.write_error(f"Failed to read market alpha26 bucket {blob_name}: {exc}")
@@ -558,12 +582,7 @@ def _write_alpha26_market_buckets(
             f"bucket={bucket} action={'skip' if write_decision.action == 'skip_empty_no_schema' else 'write'} "
             f"reason={write_decision.reason} path={silver_bucket_path}"
         )
-        delta_core.store_delta(
-            write_decision.frame,
-            cfg.AZURE_CONTAINER_SILVER,
-            silver_bucket_path,
-            mode="overwrite",
-        )
+        _store_silver_market_bucket(write_decision.frame, silver_bucket_path)
         try:
             domain_artifacts.write_bucket_artifact(
                 layer="silver",
@@ -662,17 +681,10 @@ def _run_market_reconciliation(*, bronze_blob_list: list[dict]) -> tuple[int, in
         table_paths_for_symbol=lambda symbol: [
             DataPaths.get_silver_market_bucket_path(layer_bucketing.bucket_letter(symbol))
         ],
-        load_table=lambda path: delta_core.load_delta(cfg.AZURE_CONTAINER_SILVER, path),
-        store_table=lambda df, path: delta_core.store_delta(df, cfg.AZURE_CONTAINER_SILVER, path, mode="overwrite"),
+        load_table=_load_silver_market_bucket,
+        store_table=_store_silver_market_bucket,
         delete_prefix=silver_client.delete_prefix,
-        vacuum_table=lambda path: delta_core.vacuum_delta_table(
-            cfg.AZURE_CONTAINER_SILVER,
-            path,
-            retention_hours=0,
-            dry_run=False,
-            enforce_retention_duration=False,
-            full=True,
-        ),
+        vacuum_table=_vacuum_silver_market_bucket,
     )
     deleted_blobs = purge_stats.deleted_blobs
     if orphan_symbols:
@@ -689,20 +701,13 @@ def _run_market_reconciliation(*, bronze_blob_list: list[dict]) -> tuple[int, in
     backfill_start, _ = get_backfill_range()
     cutoff_stats = enforce_backfill_cutoff_on_bucket_tables(
         table_paths=layer_bucketing.all_silver_bucket_paths(domain="market"),
-        load_table=lambda path: delta_core.load_delta(cfg.AZURE_CONTAINER_SILVER, path),
-        store_table=lambda df, path: delta_core.store_delta(df, cfg.AZURE_CONTAINER_SILVER, path, mode="overwrite"),
+        load_table=_load_silver_market_bucket,
+        store_table=_store_silver_market_bucket,
         delete_prefix=silver_client.delete_prefix,
         date_column_candidates=("date", "Date"),
         backfill_start=backfill_start,
         context="silver market reconciliation cutoff",
-        vacuum_table=lambda path: delta_core.vacuum_delta_table(
-            cfg.AZURE_CONTAINER_SILVER,
-            path,
-            retention_hours=0,
-            dry_run=False,
-            enforce_retention_duration=False,
-            full=True,
-        ),
+        vacuum_table=_vacuum_silver_market_bucket,
     )
     if cutoff_stats.rows_dropped > 0 or cutoff_stats.tables_rewritten > 0 or cutoff_stats.deleted_blobs > 0:
         mdc.write_line(

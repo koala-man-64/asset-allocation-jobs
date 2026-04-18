@@ -34,6 +34,7 @@ from tasks.technical_analysis.technical_indicators import (
 )
 from tasks.common.silver_contracts import normalize_columns_to_snake_case
 from tasks.common.delta_write_policy import prepare_delta_write_frame
+from tasks.common.delta_write_sanitizer import sanitize_delta_write_frame
 from tasks.common.gold_output_contracts import project_gold_output_frame
 from tasks.common.market_reconciliation import (
     collect_delta_market_symbols,
@@ -412,6 +413,47 @@ def _build_job_config() -> FeatureJobConfig:
     )
 
 
+def _resolve_gold_market_reconciliation_clients(
+    *,
+    silver_container: str,
+    gold_container: str,
+):
+    from asset_allocation_runtime_common.market_data import core as mdc
+
+    silver_client = mdc.get_storage_client(silver_container)
+    gold_client = mdc.get_storage_client(gold_container)
+    if silver_client is None:
+        raise RuntimeError("Gold market reconciliation requires silver storage client.")
+    if gold_client is None:
+        raise RuntimeError("Gold market reconciliation requires gold storage client.")
+    return silver_client, gold_client
+
+
+def _load_gold_market_bucket(path: str, *, gold_container: str) -> pd.DataFrame | None:
+    from asset_allocation_runtime_common.market_data import delta_core
+
+    return delta_core.load_delta(gold_container, path)
+
+
+def _store_gold_market_bucket(df: pd.DataFrame, path: str, *, gold_container: str) -> None:
+    from asset_allocation_runtime_common.market_data import delta_core
+
+    delta_core.store_delta(sanitize_delta_write_frame(df), gold_container, path, mode="overwrite")
+
+
+def _vacuum_gold_market_bucket(path: str, *, gold_container: str) -> None:
+    from asset_allocation_runtime_common.market_data import delta_core
+
+    delta_core.vacuum_delta_table(
+        gold_container,
+        path,
+        retention_hours=0,
+        dry_run=False,
+        enforce_retention_duration=False,
+        full=True,
+    )
+
+
 def _run_market_reconciliation(*, silver_container: str, gold_container: str) -> tuple[int, int]:
     """Reconcile gold market tables with silver source symbols and backfill policy.
 
@@ -421,15 +463,12 @@ def _run_market_reconciliation(*, silver_container: str, gold_container: str) ->
     """
 
     from asset_allocation_runtime_common.market_data import core as mdc
-    from asset_allocation_runtime_common.market_data import delta_core
     from asset_allocation_contracts.paths import DataPaths
 
-    silver_client = mdc.get_storage_client(silver_container)
-    gold_client = mdc.get_storage_client(gold_container)
-    if silver_client is None:
-        raise RuntimeError("Gold market reconciliation requires silver storage client.")
-    if gold_client is None:
-        raise RuntimeError("Gold market reconciliation requires gold storage client.")
+    silver_client, gold_client = _resolve_gold_market_reconciliation_clients(
+        silver_container=silver_container,
+        gold_container=gold_container,
+    )
 
     # Discover symbol sets directly from Delta table prefixes.
     silver_symbols = collect_delta_market_symbols(client=silver_client, root_prefix="market-data")
@@ -442,17 +481,10 @@ def _run_market_reconciliation(*, silver_container: str, gold_container: str) ->
         table_paths_for_symbol=lambda symbol: [
             DataPaths.get_gold_market_bucket_path(layer_bucketing.bucket_letter(symbol))
         ],
-        load_table=lambda path: delta_core.load_delta(gold_container, path),
-        store_table=lambda df, path: delta_core.store_delta(df, gold_container, path, mode="overwrite"),
+        load_table=lambda path: _load_gold_market_bucket(path, gold_container=gold_container),
+        store_table=lambda df, path: _store_gold_market_bucket(df, path, gold_container=gold_container),
         delete_prefix=gold_client.delete_prefix,
-        vacuum_table=lambda path: delta_core.vacuum_delta_table(
-            gold_container,
-            path,
-            retention_hours=0,
-            dry_run=False,
-            enforce_retention_duration=False,
-            full=True,
-        ),
+        vacuum_table=lambda path: _vacuum_gold_market_bucket(path, gold_container=gold_container),
     )
     deleted_blobs = purge_stats.deleted_blobs
     if orphan_symbols:
@@ -470,20 +502,13 @@ def _run_market_reconciliation(*, silver_container: str, gold_container: str) ->
     backfill_start, _ = get_backfill_range()
     cutoff_stats = enforce_backfill_cutoff_on_bucket_tables(
         table_paths=layer_bucketing.all_gold_bucket_paths(domain="market"),
-        load_table=lambda path: delta_core.load_delta(gold_container, path),
-        store_table=lambda df, path: delta_core.store_delta(df, gold_container, path, mode="overwrite"),
+        load_table=lambda path: _load_gold_market_bucket(path, gold_container=gold_container),
+        store_table=lambda df, path: _store_gold_market_bucket(df, path, gold_container=gold_container),
         delete_prefix=gold_client.delete_prefix,
         date_column_candidates=("date", "Date"),
         backfill_start=backfill_start,
         context="gold market reconciliation cutoff",
-        vacuum_table=lambda path: delta_core.vacuum_delta_table(
-            gold_container,
-            path,
-            retention_hours=0,
-            dry_run=False,
-            enforce_retention_duration=False,
-            full=True,
-        ),
+        vacuum_table=lambda path: _vacuum_gold_market_bucket(path, gold_container=gold_container),
     )
     if cutoff_stats.rows_dropped > 0 or cutoff_stats.tables_rewritten > 0 or cutoff_stats.deleted_blobs > 0:
         mdc.write_line(
