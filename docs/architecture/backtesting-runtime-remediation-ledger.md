@@ -1,7 +1,7 @@
 # Backtesting Runtime Remediation Ledger
 
 ## Purpose
-- Single source of truth for decisions, actions, PRs, validation evidence, and rollout notes for the backtesting runtime v2 remediation.
+- Single source of truth for decisions, actions, PRs, validation evidence, and rollout notes for the backtesting runtime v2-to-v4 remediation.
 - Canonical file path: `C:/Users/rdpro/Projects/asset-allocation-jobs/docs/architecture/backtesting-runtime-remediation-ledger.md`.
 - Update this file in every repo PR that changes scope, interfaces, status, or test evidence.
 
@@ -15,10 +15,11 @@
 
 | Workstream | Repo | Status | PR / Branch | Test Evidence | Blockers / Notes |
 | --- | --- | --- | --- | --- | --- |
-| Contracts v2 fields | `asset-allocation-contracts` | Implemented locally | Uncommitted workspace | `22 passed`, `npm run typecheck`, targeted `ruff` passed | Package publication and downstream version adoption still pending |
+| Contracts v4 fields | `asset-allocation-contracts` | Implemented locally | Uncommitted workspace | Pending re-run after local v4 edits | Package publication and downstream version adoption still pending |
 | Control-plane readiness endpoint | `asset-allocation-control-plane` | Implemented locally | Uncommitted workspace | `29 passed`, reconcile smoke `1 passed`, targeted `ruff` passed | Uses local response synthesis until published contracts package is consumed |
-| Runtime-common probe and persistence | `asset-allocation-runtime-common` | Implemented locally | Uncommitted workspace | `8 passed`, targeted `ruff` passed | Package publication still pending |
-| Jobs runtime behavior | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `26 passed`, runtime gate `12 passed`, targeted `ruff` passed | Live profiling not run because safe DB inputs were unavailable |
+| Runtime-common v4 persistence | `asset-allocation-runtime-common` | Implemented locally | Uncommitted workspace | Pending re-run after local v4 edits | Package publication still pending |
+| Jobs runtime behavior | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | Pending re-run after local v4 edits | Live profiling not run because safe DB inputs were unavailable |
+| Closed-position analytics surface | `asset-allocation-control-plane`, `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | Pending re-run after local v4 edits | Requires additive Postgres migrations `0035` and `0036` in both repos |
 | Worker preflight | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | Included in `tests/tasks/test_backtesting_worker.py` and runtime gate | Depends on control-plane readiness endpoint remaining stable |
 | Dedicated runtime quality gate | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `python scripts/run_quality_gate.py test-backtesting-runtime` passed | CI workflow updated but not exercised in GitHub Actions here |
 | Docs and traceability | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | Docs updated; ledger evidence recorded below | PR links and release notes remain `TBD` until commit/publish |
@@ -26,6 +27,7 @@
 ## Execution Log
 
 ### 2026-04-17
+- Summary: Extended the earlier v2 remediation into additive v3 and v4 result schemas: corrected `net_exposure`, added gross-return and cost-drag summary fields, added `position_id` and `trade_role` to trade rows, and added flat-to-flat closed-position analytics plus summary trade-quality metrics.
 
 - Repo: `asset-allocation-jobs`
 - Branch / PR: TBD

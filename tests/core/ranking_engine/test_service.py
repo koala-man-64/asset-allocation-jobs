@@ -1,18 +1,106 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
+import pytest
 
 from core.ranking_engine.naming import build_scoped_identifier, slugify_strategy_output_table
 from core.ranking_engine.service import (
+    _MaterializationContext,
+    _ResolvedDateRange,
     _apply_transforms,
     _compute_rankings_dataframe,
     _evaluate_universe_mask,
+    _load_source_date_bounds,
+    _normalize_loaded_column,
+    _persist_materialization,
+    _resolve_date_range,
     _write_rankings_to_platinum,
 )
 from core.ranking_engine.contracts import RankingSchemaConfig
 from core.strategy_engine.contracts import StrategyConfig, UniverseDefinition
+
+
+def _build_strategy_config(*, ranking_schema_name: str = "quality") -> StrategyConfig:
+    return StrategyConfig.model_validate(
+        {
+            "universeConfigName": "large-cap-quality",
+            "rankingSchemaName": ranking_schema_name,
+            "rebalance": "monthly",
+            "longOnly": True,
+            "topN": 20,
+            "lookbackWindow": 63,
+            "holdingPeriod": 21,
+            "costModel": "default",
+            "intrabarConflictPolicy": "stop_first",
+            "exits": [],
+        }
+    )
+
+
+def _build_ranking_schema_config() -> RankingSchemaConfig:
+    return RankingSchemaConfig.model_validate(
+        {
+            "universeConfigName": "quality-universe",
+            "groups": [
+                {
+                    "name": "quality",
+                    "weight": 1,
+                    "factors": [
+                        {
+                            "name": "momentum",
+                            "table": "market_data",
+                            "column": "return_20d",
+                            "weight": 1,
+                            "direction": "desc",
+                            "missingValuePolicy": "exclude",
+                            "transforms": [],
+                        }
+                    ],
+                    "transforms": [],
+                }
+            ],
+            "overallTransforms": [],
+        }
+    )
+
+
+def _build_universe() -> UniverseDefinition:
+    return UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "market_data",
+                        "column": "close",
+                        "operator": "gt",
+                        "value": 10,
+                    }
+                ],
+            },
+        }
+    )
+
+
+def _build_context() -> _MaterializationContext:
+    universe = _build_universe()
+    return _MaterializationContext(
+        strategy_name="alpha",
+        output_table_name="mom_spy_res",
+        strategy_config=_build_strategy_config(),
+        ranking_schema_name="quality",
+        ranking_schema_version=3,
+        ranking_schema=_build_ranking_schema_config(),
+        strategy_universe=universe,
+        ranking_universe=universe,
+        table_specs={},
+        required_columns={"market_data": {"return_20d"}},
+    )
 
 
 def test_slugify_strategy_output_table_normalizes_invalid_characters() -> None:
@@ -92,6 +180,251 @@ def test_evaluate_universe_mask_handles_nested_groups() -> None:
     mask = _evaluate_universe_mask(frame, universe.root)
 
     assert mask.tolist() == [False, False, True]
+
+
+def test_evaluate_universe_mask_handles_string_and_null_safely() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_data__sector": pd.Series(["Technology", "Financials", pd.NA], dtype="string"),
+        }
+    )
+    equals_node = UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "market_data",
+                        "column": "sector",
+                        "operator": "eq",
+                        "value": "Technology",
+                    }
+                ],
+            },
+        }
+    )
+    not_in_node = UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "market_data",
+                        "column": "sector",
+                        "operator": "not_in",
+                        "values": ["Financials"],
+                    }
+                ],
+            },
+        }
+    )
+
+    assert _evaluate_universe_mask(frame, equals_node.root).tolist() == [True, False, False]
+    assert _evaluate_universe_mask(frame, not_in_node.root).tolist() == [True, False, False]
+
+
+def test_evaluate_universe_mask_handles_date_datetime_boolean_and_numeric_types() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_data__trade_date": [date(2026, 3, 7), date(2026, 3, 8), None],
+            "market_data__timestamp": pd.to_datetime(
+                ["2026-03-07T12:00:00Z", "2026-03-08T13:00:00Z", None],
+                utc=True,
+            ).tz_localize(None),
+            "market_data__active": pd.Series([True, False, pd.NA], dtype="boolean"),
+            "market_data__close": [10.0, 12.0, None],
+        }
+    )
+    date_node = UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "market_data",
+                        "column": "trade_date",
+                        "operator": "gte",
+                        "value": "2026-03-08",
+                    }
+                ],
+            },
+        }
+    )
+    datetime_node = UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "market_data",
+                        "column": "timestamp",
+                        "operator": "gte",
+                        "value": "2026-03-08T00:00:00Z",
+                    }
+                ],
+            },
+        }
+    )
+    boolean_node = UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "market_data",
+                        "column": "active",
+                        "operator": "eq",
+                        "value": True,
+                    }
+                ],
+            },
+        }
+    )
+    numeric_node = UniverseDefinition.model_validate(
+        {
+            "source": "postgres_gold",
+            "root": {
+                "kind": "group",
+                "operator": "and",
+                "clauses": [
+                    {
+                        "kind": "condition",
+                        "table": "market_data",
+                        "column": "close",
+                        "operator": "gte",
+                        "value": 11,
+                    }
+                ],
+            },
+        }
+    )
+
+    assert _evaluate_universe_mask(frame, date_node.root).tolist() == [False, True, False]
+    assert _evaluate_universe_mask(frame, datetime_node.root).tolist() == [False, True, False]
+    assert _evaluate_universe_mask(frame, boolean_node.root).tolist() == [True, False, False]
+    assert _evaluate_universe_mask(frame, numeric_node.root).tolist() == [False, True, False]
+
+
+def test_normalize_loaded_column_preserves_supported_types() -> None:
+    string_series = _normalize_loaded_column(pd.Series(["AAPL", None]), value_kind="string")
+    boolean_series = _normalize_loaded_column(pd.Series([True, None]), value_kind="boolean")
+    date_series = _normalize_loaded_column(pd.Series(["2026-03-07", None]), value_kind="date")
+    datetime_series = _normalize_loaded_column(pd.Series(["2026-03-07T12:00:00Z", None]), value_kind="datetime")
+    number_series = _normalize_loaded_column(pd.Series(["1.25", "bad"]), value_kind="number")
+
+    assert str(string_series.dtype) == "string"
+    assert string_series.iloc[0] == "AAPL"
+    assert pd.isna(string_series.iloc[1])
+
+    assert str(boolean_series.dtype) == "boolean"
+    assert bool(boolean_series.iloc[0]) is True
+    assert pd.isna(boolean_series.iloc[1])
+
+    assert date_series.iloc[0] == date(2026, 3, 7)
+    assert pd.isna(date_series.iloc[1])
+
+    assert str(datetime_series.dtype) == "datetime64[ns]"
+    assert datetime_series.iloc[0].to_pydatetime() == datetime(2026, 3, 7, 12, 0)
+    assert pd.isna(datetime_series.iloc[1])
+
+    assert number_series.iloc[0] == 1.25
+    assert pd.isna(number_series.iloc[1])
+
+
+def test_resolve_date_range_defaults_to_watermark_plus_one_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "core.ranking_engine.service._load_source_date_bounds",
+        lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
+    )
+    monkeypatch.setattr(
+        "core.ranking_engine.service._get_ranking_watermark",
+        lambda _dsn, _strategy_name: date(2026, 3, 7),
+    )
+
+    resolved = _resolve_date_range(
+        "postgresql://test",
+        strategy_name="alpha",
+        strategy_config=_build_strategy_config(),
+        ranking_schema=_build_ranking_schema_config(),
+        start_date=None,
+        end_date=None,
+        table_specs={"market_data": object()},
+        strategy_universe=_build_universe(),
+        ranking_universe=_build_universe(),
+        required_columns={"market_data": {"close"}},
+    )
+
+    assert resolved.start_date == date(2026, 3, 8)
+    assert resolved.end_date == date(2026, 3, 10)
+    assert resolved.previous_watermark == date(2026, 3, 7)
+    assert resolved.noop is False
+
+
+def test_resolve_date_range_returns_noop_when_output_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "core.ranking_engine.service._load_source_date_bounds",
+        lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
+    )
+    monkeypatch.setattr(
+        "core.ranking_engine.service._get_ranking_watermark",
+        lambda _dsn, _strategy_name: date(2026, 3, 10),
+    )
+
+    resolved = _resolve_date_range(
+        "postgresql://test",
+        strategy_name="alpha",
+        strategy_config=_build_strategy_config(),
+        ranking_schema=_build_ranking_schema_config(),
+        start_date=None,
+        end_date=None,
+        table_specs={"market_data": object()},
+        strategy_universe=_build_universe(),
+        ranking_universe=_build_universe(),
+        required_columns={"market_data": {"close"}},
+    )
+
+    assert resolved.start_date == date(2026, 3, 10)
+    assert resolved.end_date == date(2026, 3, 10)
+    assert resolved.previous_watermark == date(2026, 3, 10)
+    assert resolved.noop is True
+    assert resolved.reason == "Ranking output already current."
+
+
+def test_resolve_date_range_rejects_invalid_explicit_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "core.ranking_engine.service._load_source_date_bounds",
+        lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
+    )
+    monkeypatch.setattr("core.ranking_engine.service._get_ranking_watermark", lambda _dsn, _strategy_name: None)
+
+    with pytest.raises(ValueError, match="Resolved ranking date range is invalid"):
+        _resolve_date_range(
+            "postgresql://test",
+            strategy_name="alpha",
+            strategy_config=_build_strategy_config(),
+            ranking_schema=_build_ranking_schema_config(),
+            start_date=date(2026, 3, 11),
+            end_date=date(2026, 3, 10),
+            table_specs={"market_data": object()},
+            strategy_universe=_build_universe(),
+            ranking_universe=_build_universe(),
+            required_columns={"market_data": {"close"}},
+        )
 
 
 def test_compute_rankings_dataframe_intersects_strategy_and_ranking_universes(monkeypatch) -> None:
@@ -329,8 +662,9 @@ def test_compute_rankings_dataframe_excludes_null_piotroski_rows(monkeypatch) ->
 
 
 class _FakeCursor:
-    def __init__(self) -> None:
+    def __init__(self, fetchone_results: list[tuple[object, ...] | None] | None = None) -> None:
         self.execute_calls: list[tuple[str, tuple[object, ...] | None]] = []
+        self._fetchone_results = list(fetchone_results or [])
 
     def __enter__(self) -> "_FakeCursor":
         return self
@@ -340,6 +674,11 @@ class _FakeCursor:
 
     def execute(self, sql: str, params=None) -> None:
         self.execute_calls.append((sql, params))
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        if self._fetchone_results:
+            return self._fetchone_results.pop(0)
+        return None
 
 
 class _FakeConnection:
@@ -356,10 +695,49 @@ class _FakeConnection:
         return self._cursor
 
 
-def test_write_rankings_to_platinum_copies_score_and_rank(monkeypatch) -> None:
+class _TransactionalCursor:
+    def __init__(self, pending: list[tuple[str, object]]) -> None:
+        self.pending = pending
+
+    def __enter__(self) -> "_TransactionalCursor":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class _TransactionalConnection:
+    def __init__(self, committed: list[tuple[str, object]]) -> None:
+        self._committed = committed
+        self._pending: list[tuple[str, object]] = []
+
+    def __enter__(self) -> "_TransactionalConnection":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is None:
+            self._committed.extend(self._pending)
+        return False
+
+    def cursor(self) -> _TransactionalCursor:
+        return _TransactionalCursor(self._pending)
+
+
+def test_load_source_date_bounds_raises_when_no_candidate_dates(monkeypatch: pytest.MonkeyPatch) -> None:
+    cursor = _FakeCursor(fetchone_results=[(None, None)])
+    monkeypatch.setattr("core.ranking_engine.service.connect", lambda _dsn: _FakeConnection(cursor))
+
+    with pytest.raises(ValueError, match="No ranking source data is available"):
+        _load_source_date_bounds(
+            "postgresql://test",
+            table_specs={"market_data": type("Spec", (), {"as_of_column": "date"})()},
+            required_columns={"market_data": {"close"}},
+        )
+
+
+def test_write_rankings_to_platinum_copies_score_and_rank(monkeypatch: pytest.MonkeyPatch) -> None:
     cursor = _FakeCursor()
     copied: dict[str, object] = {}
-    monkeypatch.setattr("core.ranking_engine.service.connect", lambda _dsn: _FakeConnection(cursor))
     monkeypatch.setattr(
         "core.ranking_engine.service.copy_rows",
         lambda _cur, *, table, columns, rows: copied.update(
@@ -372,7 +750,7 @@ def test_write_rankings_to_platinum_copies_score_and_rank(monkeypatch) -> None:
     )
 
     row_count = _write_rankings_to_platinum(
-        "postgresql://test:test@localhost:5432/asset_allocation",
+        cursor,
         table_name="mom_spy_res",
         ranked=pd.DataFrame(
             [
@@ -391,3 +769,126 @@ def test_write_rankings_to_platinum_copies_score_and_rank(monkeypatch) -> None:
     assert row_count == 1
     assert copied["columns"] == ("date", "symbol", "rank", "score", "last_updated_date")
     assert copied["rows"][0][:4] == (date(2026, 3, 7), "AAPL", 1, 0.91)
+
+
+def test_persist_materialization_commits_run_write_and_watermark_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    committed_actions: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        "core.ranking_engine.service.connect",
+        lambda _dsn: _TransactionalConnection(committed_actions),
+    )
+
+    def fake_insert(cursor, **kwargs) -> None:
+        cursor.pending.append(("insert_run", kwargs["status"]))
+
+    def fake_write(cursor, **kwargs) -> int:
+        row_count = int(len(kwargs["ranked"]))
+        cursor.pending.append(("copy", row_count))
+        return row_count
+
+    def fake_update(cursor, **kwargs) -> None:
+        cursor.pending.append(("update_run", kwargs["status"]))
+
+    def fake_watermark(cursor, **kwargs) -> None:
+        cursor.pending.append(("watermark", kwargs["last_ranked_date"]))
+
+    monkeypatch.setattr("core.ranking_engine.service._insert_ranking_run", fake_insert)
+    monkeypatch.setattr("core.ranking_engine.service._write_rankings_to_platinum", fake_write)
+    monkeypatch.setattr("core.ranking_engine.service._update_ranking_run", fake_update)
+    monkeypatch.setattr("core.ranking_engine.service._upsert_ranking_watermark", fake_watermark)
+
+    rows_written = _persist_materialization(
+        "postgresql://test",
+        run_id="run-123",
+        context=_build_context(),
+        resolved_range=_ResolvedDateRange(
+            start_date=date(2026, 3, 7),
+            end_date=date(2026, 3, 8),
+            source_start_date=date(2026, 3, 1),
+            source_end_date=date(2026, 3, 8),
+            previous_watermark=date(2026, 3, 6),
+        ),
+        ranked=pd.DataFrame(
+            [
+                {
+                    "date": date(2026, 3, 7),
+                    "symbol": "AAPL",
+                    "score": 0.91,
+                    "rank": 1,
+                }
+            ]
+        ),
+        triggered_by="manual",
+        date_count=1,
+    )
+
+    assert rows_written == 1
+    assert committed_actions == [
+        ("insert_run", "running"),
+        ("copy", 1),
+        ("update_run", "success"),
+        ("watermark", date(2026, 3, 8)),
+    ]
+
+
+def test_persist_materialization_rolls_back_when_watermark_update_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempted_actions: list[str] = []
+    committed_actions: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        "core.ranking_engine.service.connect",
+        lambda _dsn: _TransactionalConnection(committed_actions),
+    )
+
+    def fake_insert(cursor, **kwargs) -> None:
+        attempted_actions.append("insert_run")
+        cursor.pending.append(("insert_run", kwargs["status"]))
+
+    def fake_write(cursor, **kwargs) -> int:
+        attempted_actions.append("copy")
+        row_count = int(len(kwargs["ranked"]))
+        cursor.pending.append(("copy", row_count))
+        return row_count
+
+    def fake_update(cursor, **kwargs) -> None:
+        attempted_actions.append("update_run")
+        cursor.pending.append(("update_run", kwargs["status"]))
+
+    def failing_watermark(cursor, **kwargs) -> None:
+        attempted_actions.append("watermark")
+        raise RuntimeError("watermark failure")
+
+    monkeypatch.setattr("core.ranking_engine.service._insert_ranking_run", fake_insert)
+    monkeypatch.setattr("core.ranking_engine.service._write_rankings_to_platinum", fake_write)
+    monkeypatch.setattr("core.ranking_engine.service._update_ranking_run", fake_update)
+    monkeypatch.setattr("core.ranking_engine.service._upsert_ranking_watermark", failing_watermark)
+
+    with pytest.raises(RuntimeError, match="watermark failure"):
+        _persist_materialization(
+            "postgresql://test",
+            run_id="run-123",
+            context=_build_context(),
+            resolved_range=_ResolvedDateRange(
+                start_date=date(2026, 3, 7),
+                end_date=date(2026, 3, 8),
+                source_start_date=date(2026, 3, 1),
+                source_end_date=date(2026, 3, 8),
+                previous_watermark=date(2026, 3, 6),
+            ),
+            ranked=pd.DataFrame(
+                [
+                    {
+                        "date": date(2026, 3, 7),
+                        "symbol": "AAPL",
+                        "score": 0.91,
+                        "rank": 1,
+                    }
+                ]
+            ),
+            triggered_by="manual",
+            date_count=1,
+        )
+
+    assert attempted_actions == ["insert_run", "copy", "update_run", "watermark"]
+    assert committed_actions == []

@@ -8,7 +8,9 @@ import pytest
 from core.backtest_runtime import (
     ResolvedBacktestDefinition,
     _apply_rebalance_target,
+    _apply_trade_to_position,
     _build_snapshot_symbol_index,
+    execute_backtest_run,
     _market_row,
     _maybe_update_heartbeat,
     _regime_context_for_session,
@@ -376,6 +378,7 @@ def test_cadence_aware_metrics_scale_from_intraday_bar_size() -> None:
     summary = _compute_summary(
         timeseries,
         trades,
+        pd.DataFrame(columns=["realized_pnl", "realized_return"]),
         run_id="run-123",
         run_name="intraday-test",
         periods_per_year=periods_per_year,
@@ -395,3 +398,351 @@ def test_cadence_aware_metrics_scale_from_intraday_bar_size() -> None:
     assert rolling["window_days"].tolist() == [63, 63]
     assert rolling["window_periods"].tolist() == [2, 2]
     assert rolling["rolling_return"].iloc[-1] == pytest.approx((1.000001 * 1.000002) - 1.0)
+
+
+def test_compute_summary_reports_cost_drag_and_closed_position_stats() -> None:
+    timeseries = pd.DataFrame(
+        {
+            "date": [
+                "2026-03-03T14:30:00Z",
+                "2026-03-03T14:35:00Z",
+                "2026-03-03T14:40:00Z",
+            ],
+            "portfolio_value": [100000.0, 102000.0, 101000.0],
+            "gross_portfolio_value": [100000.0, 102500.0, 101500.0],
+            "drawdown": [0.0, 0.0, -0.009803921568627416],
+            "period_return": [0.0, 0.02, -0.009803921568627416],
+            "daily_return": [0.0, 0.02, -0.009803921568627416],
+            "cumulative_return": [0.0, 0.02, 0.01],
+            "cash": [100000.0, 2000.0, 101000.0],
+            "gross_exposure": [0.0, 0.98, 0.0],
+            "net_exposure": [0.0, 0.94, 0.0],
+            "turnover": [0.0, 0.98, 0.99],
+            "commission": [0.0, 20.0, 5.0],
+            "slippage_cost": [0.0, 8.0, 2.0],
+            "trade_count": [0, 1, 1],
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "commission": [20.0, 5.0],
+            "slippage_cost": [8.0, 2.0],
+        }
+    )
+    closed_positions = pd.DataFrame(
+        {
+            "realized_pnl": [200.0, -100.0],
+            "realized_return": [0.05, -0.02],
+        }
+    )
+
+    summary = _compute_summary(
+        timeseries,
+        trades,
+        closed_positions,
+        run_id="run-123",
+        run_name="cost-drag-test",
+        periods_per_year=252.0,
+        initial_cash_override=100000.0,
+    )
+
+    assert summary["total_return"] == pytest.approx(0.01)
+    assert summary["gross_total_return"] == pytest.approx(0.015)
+    assert summary["total_commission"] == pytest.approx(25.0)
+    assert summary["total_slippage_cost"] == pytest.approx(10.0)
+    assert summary["total_transaction_cost"] == pytest.approx(35.0)
+    assert summary["cost_drag_bps"] == pytest.approx(50.0)
+    assert summary["avg_gross_exposure"] == pytest.approx((0.0 + 0.98 + 0.0) / 3.0)
+    assert summary["avg_net_exposure"] == pytest.approx((0.0 + 0.94 + 0.0) / 3.0)
+    assert summary["closed_positions"] == 2
+    assert summary["winning_positions"] == 1
+    assert summary["losing_positions"] == 1
+    assert summary["hit_rate"] == pytest.approx(0.5)
+    assert summary["avg_win_pnl"] == pytest.approx(200.0)
+    assert summary["avg_loss_pnl"] == pytest.approx(-100.0)
+    assert summary["payoff_ratio"] == pytest.approx(2.0)
+    assert summary["profit_factor"] == pytest.approx(2.0)
+    assert summary["expectancy_pnl"] == pytest.approx(50.0)
+    assert summary["expectancy_return"] == pytest.approx(0.015)
+    assert summary["sortino_ratio"] > 0.0
+    assert summary["calmar_ratio"] > 0.0
+
+
+def test_compute_summary_handles_empty_and_single_row_inputs() -> None:
+    empty_summary = _compute_summary(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        run_id="run-empty",
+        run_name=None,
+        periods_per_year=252.0,
+    )
+    single_row_timeseries = pd.DataFrame(
+        {
+            "date": ["2026-03-03T14:30:00Z"],
+            "portfolio_value": [100000.0],
+            "gross_portfolio_value": [100100.0],
+            "drawdown": [0.0],
+            "period_return": [0.0],
+            "daily_return": [0.0],
+            "cumulative_return": [0.0],
+            "cash": [40000.0],
+            "gross_exposure": [1.2],
+            "net_exposure": [0.6],
+            "turnover": [0.0],
+            "commission": [0.0],
+            "slippage_cost": [0.0],
+            "trade_count": [0],
+        }
+    )
+    single_row_summary = _compute_summary(
+        single_row_timeseries,
+        pd.DataFrame(columns=["commission", "slippage_cost"]),
+        pd.DataFrame(columns=["realized_pnl", "realized_return"]),
+        run_id="run-single",
+        run_name="single-row",
+        periods_per_year=252.0,
+        initial_cash_override=100000.0,
+    )
+    rolling = _compute_rolling_metrics(single_row_timeseries, periods_per_year=252.0, window_periods=1)
+
+    assert empty_summary["final_equity"] == 0.0
+    assert empty_summary["gross_total_return"] == 0.0
+    assert single_row_summary["annualized_volatility"] == 0.0
+    assert single_row_summary["sharpe_ratio"] == 0.0
+    assert single_row_summary["gross_total_return"] == pytest.approx(0.001)
+    assert single_row_summary["avg_net_exposure"] == pytest.approx(0.6)
+    assert rolling["gross_exposure_avg"].iloc[0] == pytest.approx(1.2)
+    assert rolling["net_exposure_avg"].iloc[0] == pytest.approx(0.6)
+
+
+def test_apply_trade_to_position_tracks_partial_reductions_until_flat() -> None:
+    opened, closed_position = _apply_trade_to_position(
+        None,
+        symbol="AAPL",
+        ts=datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc),
+        quantity_delta=10.0,
+        trade_price=100.0,
+        commission=1.0,
+        slippage=0.5,
+        position_id="pos-1",
+    )
+    assert opened is not None
+    assert closed_position is None
+    assert opened.position_id == "pos-1"
+    assert opened.average_cost == pytest.approx(100.0)
+
+    resized, closed_position = _apply_trade_to_position(
+        opened,
+        symbol="AAPL",
+        ts=datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
+        quantity_delta=5.0,
+        trade_price=110.0,
+        commission=1.0,
+        slippage=0.0,
+    )
+    assert resized is not None
+    assert closed_position is None
+    assert resized.quantity == pytest.approx(15.0)
+    assert resized.average_cost == pytest.approx((10.0 * 100.0 + 5.0 * 110.0) / 15.0)
+    assert resized.resize_count == 1
+
+    reduced, closed_position = _apply_trade_to_position(
+        resized,
+        symbol="AAPL",
+        ts=datetime(2026, 3, 3, 14, 40, tzinfo=timezone.utc),
+        quantity_delta=-6.0,
+        trade_price=120.0,
+        commission=0.5,
+        slippage=0.0,
+    )
+    assert reduced is not None
+    assert closed_position is None
+    assert reduced.quantity == pytest.approx(9.0)
+    assert reduced.resize_count == 2
+
+    flattened, closed_position = _apply_trade_to_position(
+        reduced,
+        symbol="AAPL",
+        ts=datetime(2026, 3, 3, 14, 45, tzinfo=timezone.utc),
+        quantity_delta=-9.0,
+        trade_price=115.0,
+        commission=0.5,
+        slippage=0.0,
+        exit_reason="rebalance_exit",
+    )
+    assert flattened is None
+    assert closed_position is not None
+    assert closed_position["position_id"] == "pos-1"
+    assert closed_position["resize_count"] == 2
+    assert closed_position["exit_reason"] == "rebalance_exit"
+    assert closed_position["realized_pnl"] > 0.0
+    assert closed_position["realized_return"] > 0.0
+
+
+def test_execute_backtest_run_publishes_full_v4_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    schedule = [
+        datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc),
+        datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
+        datetime(2026, 3, 3, 14, 40, tzinfo=timezone.utc),
+    ]
+    run_state = {
+        "run_id": "run-123",
+        "status": "queued",
+        "start_ts": schedule[0],
+        "end_ts": schedule[-1],
+        "bar_size": "5m",
+        "strategy_name": "mom-spy-res",
+        "strategy_version": 3,
+        "run_name": "Publish path",
+        "regime_model_name": None,
+        "regime_model_version": None,
+    }
+    captured: dict[str, object] = {}
+    heartbeats: list[str] = []
+
+    class _FakeRepo:
+        def __init__(self, _dsn: str) -> None:
+            self._state = run_state
+
+        def get_run(self, run_id: str):  # type: ignore[no-untyped-def]
+            if run_id != self._state["run_id"]:
+                return None
+            return dict(self._state)
+
+        def start_run(self, run_id: str, execution_name: str | None = None) -> None:
+            assert run_id == self._state["run_id"]
+            self._state["status"] = "running"
+            self._state["execution_name"] = execution_name
+
+        def update_heartbeat(self, run_id: str) -> None:
+            heartbeats.append(run_id)
+
+        def complete_run(self, run_id: str, summary: dict[str, object]) -> None:
+            assert run_id == self._state["run_id"]
+            captured["completed_summary"] = dict(summary)
+            self._state["status"] = "completed"
+
+    def _definition() -> ResolvedBacktestDefinition:
+        base = _sample_definition()
+        return ResolvedBacktestDefinition(
+            **(
+                base.__dict__
+                | {
+                    "strategy_config_raw": {
+                        **base.strategy_config_raw,
+                        "initialCash": 100000.0,
+                        "costs": {"commissionBps": 10.0, "slippageBps": 5.0},
+                    }
+                }
+            )
+        )
+
+    def _snapshot_for_ts(current_ts: datetime, **_: object) -> pd.DataFrame:
+        prices = {
+            schedule[0]: {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+            schedule[1]: {"open": 100.0, "high": 101.0, "low": 99.5, "close": 101.0},
+            schedule[2]: {"open": 102.0, "high": 102.5, "low": 101.5, "close": 102.0},
+        }[current_ts]
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "market_data__open": prices["open"],
+                    "market_data__high": prices["high"],
+                    "market_data__low": prices["low"],
+                    "market_data__close": prices["close"],
+                }
+            ]
+        )
+
+    def _ranking_for_ts(
+        _snapshot: pd.DataFrame,
+        *,
+        definition: ResolvedBacktestDefinition,
+        rebalance_ts: datetime,
+        target_weight_multiplier: float = 1.0,
+    ) -> pd.DataFrame:
+        assert definition.strategy_name == "mom-spy-res"
+        assert target_weight_multiplier == pytest.approx(1.0)
+        if rebalance_ts == schedule[0]:
+            rows = [
+                {
+                    "rebalance_ts": rebalance_ts.isoformat(),
+                    "ordinal": 1,
+                    "symbol": "AAPL",
+                    "score": 1.0,
+                    "selected": True,
+                    "target_weight": 1.0,
+                }
+            ]
+        else:
+            rows = [
+                {
+                    "rebalance_ts": rebalance_ts.isoformat(),
+                    "ordinal": 1,
+                    "symbol": "AAPL",
+                    "score": 0.2,
+                    "selected": False,
+                    "target_weight": 0.0,
+                }
+            ]
+        return pd.DataFrame(rows)
+
+    def _capture_persist(
+        dsn: str,
+        *,
+        run_id: str,
+        summary: dict[str, object],
+        timeseries_rows,
+        rolling_metric_rows,
+        trade_rows,
+        closed_position_rows,
+        selection_trace_rows,
+        regime_trace_rows,
+        results_schema_version: int,
+    ) -> None:
+        captured["dsn"] = dsn
+        captured["run_id"] = run_id
+        captured["summary"] = dict(summary)
+        captured["timeseries_rows"] = list(timeseries_rows)
+        captured["rolling_metric_rows"] = list(rolling_metric_rows)
+        captured["trade_rows"] = list(trade_rows)
+        captured["closed_position_rows"] = list(closed_position_rows)
+        captured["selection_trace_rows"] = list(selection_trace_rows)
+        captured["regime_trace_rows"] = list(regime_trace_rows)
+        captured["results_schema_version"] = results_schema_version
+
+    monkeypatch.setattr("core.backtest_runtime.BacktestRepository", _FakeRepo)
+    monkeypatch.setattr("core.backtest_runtime.resolve_backtest_definition", lambda *args, **kwargs: _definition())
+    monkeypatch.setattr("core.backtest_runtime.validate_backtest_submission", lambda *args, **kwargs: schedule)
+    monkeypatch.setattr("core.backtest_runtime._load_regime_schedule_map", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._required_columns", lambda definition: {})
+    monkeypatch.setattr("core.backtest_runtime._load_intraday_session_frames", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._load_slow_frames", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._snapshot_for_timestamp", _snapshot_for_ts)
+    monkeypatch.setattr("core.backtest_runtime._score_snapshot", _ranking_for_ts)
+    monkeypatch.setattr(universe_service, "_load_gold_table_specs", lambda _dsn: {})
+    monkeypatch.setattr("core.backtest_runtime.persist_backtest_results", _capture_persist)
+
+    result = execute_backtest_run("postgresql://test", run_id="run-123")
+
+    summary = result["summary"]
+    assert summary["gross_total_return"] == pytest.approx(0.02)
+    assert summary["total_transaction_cost"] == pytest.approx(303.0)
+    assert summary["cost_drag_bps"] == pytest.approx(30.3)
+    assert summary["closed_positions"] == 1
+    assert captured["summary"] == captured["completed_summary"]
+    assert captured["results_schema_version"] == 4
+    assert len(captured["timeseries_rows"]) == 2
+    assert len(captured["rolling_metric_rows"]) == 2
+    assert len(captured["trade_rows"]) == 2
+    assert len(captured["closed_position_rows"]) == 1
+    assert len(captured["selection_trace_rows"]) == 2
+    assert len(captured["regime_trace_rows"]) == 3
+    first_trade, second_trade = captured["trade_rows"]
+    assert first_trade["trade_role"] == "entry"
+    assert second_trade["trade_role"] == "exit"
+    assert first_trade["position_id"] == second_trade["position_id"]
+    assert captured["closed_position_rows"][0]["exit_reason"] == "rebalance_exit"
+    assert heartbeats

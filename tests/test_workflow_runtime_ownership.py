@@ -96,6 +96,13 @@ def test_platinum_rankings_job_does_not_define_deploy_time_ranking_overrides() -
     assert "RANKING_END_DATE" not in text
 
 
+def test_ranking_materialization_doc_lists_required_api_env_vars() -> None:
+    text = (repo_root() / "docs" / "ops" / "ranking-materialization.md").read_text(encoding="utf-8")
+    assert "`POSTGRES_DSN`" in text
+    assert "`ASSET_ALLOCATION_API_BASE_URL`" in text
+    assert "`ASSET_ALLOCATION_API_SCOPE`" in text
+
+
 def test_contributor_and_security_docs_reference_live_jobs_assets_only() -> None:
     root = repo_root()
     for path in ("CONTRIBUTING.md", "SECURITY.md"):

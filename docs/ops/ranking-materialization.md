@@ -64,11 +64,21 @@ Worker entrypoint:
 Relevant environment variables:
 
 - `POSTGRES_DSN`
+- `ASSET_ALLOCATION_API_BASE_URL`
+- `ASSET_ALLOCATION_API_SCOPE`
 
 Behavior:
 
 - The worker scans saved strategies and materializes each strategy that references an existing ranking schema.
-- The worker derives a best-effort full date range from the referenced gold tables based on whatever data is currently present.
+- The worker uses the strategy payload returned from the list endpoint when it already contains `config`, and only fetches per-strategy detail when that config is missing.
+- If `start_date` and `end_date` are omitted, the worker defaults incrementally:
+  - `start_date = ranking_watermark + 1 day` when a watermark exists
+  - otherwise `start_date = earliest available source date`
+  - `end_date = latest available source date`
+- If the ranking watermark is already current, the worker records a `noop` run and does not rewrite platinum rows or advance the watermark.
+- If the referenced gold tables have no candidate source dates, the worker fails explicitly and does not advance the watermark.
+- Each strategy run writes platinum rows, marks the run `success`, and updates the watermark in a single database transaction.
+- The worker continues materializing later strategies after a per-strategy failure, then exits non-zero if any strategy failed.
 - The worker does not accept ranking-specific deploy-time environment overrides.
 - Universe configs cannot be deleted while they are still referenced by saved strategies or ranking schemas.
 

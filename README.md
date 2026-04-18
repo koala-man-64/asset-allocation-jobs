@@ -38,6 +38,6 @@ Backtest lifecycle state is owned by `asset-allocation-contracts` plus the contr
 - `deploy/job_backtests.yaml` remains the manual single-run worker job.
 - `deploy/job_backtests_reconcile.yaml` is the scheduled recovery job that asks the control plane to redispatch stranded queued runs and fail stale running runs.
 - `tasks/backtesting/worker.py` now performs fail-fast dependency preflight before looking up a targeted run or claiming queued work.
-- `core/backtest_runtime.py` sends wall-clock heartbeats during long sections, writes artifacts under `backtests/<run_id>/...`, and keeps run-local snapshot caches only. There is no cross-run persistent cache.
+- `core/backtest_runtime.py` sends wall-clock heartbeats during long sections, writes Postgres-backed v4 results, and now publishes net and gross return metrics, cost drag, corrected `net_exposure`, trade lifecycle fields, and flat-to-flat closed-position analytics. There is no cross-run persistent cache.
 - `scripts/profile_backtest_runtime.py` is the profiling harness for the multiprocessing gate. `BACKTEST_RANKING_MAX_WORKERS` remains a benchmark-only knob and defaults to `1`.
 - Multiprocessing is intentionally disabled by default. Scale backtests by starting more ACA executions, not by turning one worker into a multi-run drain loop.

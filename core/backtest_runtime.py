@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time as monotonic_time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timezone
@@ -590,6 +591,123 @@ def _apply_rebalance_target(
     return replace(position, quantity=float(target_quantity))
 
 
+def _new_position_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _trade_role_for_target(*, current_quantity: float, target_quantity: float) -> str:
+    if current_quantity <= 1e-9:
+        return "entry"
+    if target_quantity <= 1e-9:
+        return "exit"
+    if target_quantity > current_quantity:
+        return "rebalance_increase"
+    return "rebalance_decrease"
+
+
+def _apply_trade_to_position(
+    position: PositionState | None,
+    *,
+    symbol: str,
+    ts: datetime,
+    quantity_delta: float,
+    trade_price: float,
+    commission: float,
+    slippage: float,
+    position_id: str | None = None,
+    exit_reason: str | None = None,
+    exit_rule_id: str | None = None,
+) -> tuple[PositionState | None, dict[str, Any] | None]:
+    if math.isclose(quantity_delta, 0.0, abs_tol=1e-12):
+        return position, None
+
+    trade_cost = float(commission + slippage)
+    if position is None:
+        if quantity_delta <= 0.0:
+            return None, None
+        created = PositionState(
+            position_id=position_id or _new_position_id(),
+            symbol=symbol,
+            entry_date=ts,
+            entry_price=float(trade_price),
+            quantity=float(quantity_delta),
+            opened_at=ts,
+            average_cost=float(trade_price),
+            commission_accrued=float(commission),
+            slippage_accrued=float(slippage),
+            max_quantity=float(abs(quantity_delta)),
+            realized_pnl_accrued=float(-trade_cost),
+        )
+        return created, None
+
+    current_quantity = float(position.quantity)
+    average_cost = float(position.average_cost or position.entry_price)
+    new_quantity = float(current_quantity + quantity_delta)
+    total_commission = float(position.commission_accrued + commission)
+    total_slippage = float(position.slippage_accrued + slippage)
+    max_quantity = float(max(position.max_quantity or abs(current_quantity), abs(new_quantity)))
+
+    if quantity_delta > 0.0:
+        weighted_cost = (current_quantity * average_cost) + (float(quantity_delta) * float(trade_price))
+        updated = replace(
+            position,
+            quantity=float(new_quantity),
+            average_cost=float(weighted_cost / new_quantity),
+            commission_accrued=total_commission,
+            slippage_accrued=total_slippage,
+            max_quantity=max_quantity,
+            resize_count=position.resize_count + 1,
+            realized_pnl_accrued=float(position.realized_pnl_accrued - trade_cost),
+        )
+        return updated, None
+
+    sell_quantity = float(min(current_quantity, abs(quantity_delta)))
+    realized_basis_increment = float(sell_quantity * average_cost)
+    realized_pnl_accrued = float(
+        position.realized_pnl_accrued + (sell_quantity * (float(trade_price) - average_cost)) - trade_cost
+    )
+    realized_basis_accrued = float(position.realized_basis_accrued + realized_basis_increment)
+
+    if new_quantity <= 1e-9:
+        total_transaction_cost = float(total_commission + total_slippage)
+        realized_return = float(realized_pnl_accrued / realized_basis_accrued) if realized_basis_accrued > 0 else 0.0
+        closed_position = {
+            "position_id": position.position_id,
+            "symbol": position.symbol,
+            "opened_at": (
+                position.opened_at.isoformat()
+                if isinstance(position.opened_at, datetime)
+                else str(position.opened_at)
+            ),
+            "closed_at": ts.isoformat(),
+            "holding_period_bars": int(position.bars_held),
+            "average_cost": float(average_cost),
+            "exit_price": float(trade_price),
+            "max_quantity": float(position.max_quantity or abs(current_quantity)),
+            "resize_count": int(position.resize_count),
+            "realized_pnl": realized_pnl_accrued,
+            "realized_return": realized_return,
+            "total_commission": total_commission,
+            "total_slippage_cost": total_slippage,
+            "total_transaction_cost": total_transaction_cost,
+            "exit_reason": exit_reason,
+            "exit_rule_id": exit_rule_id,
+        }
+        return None, closed_position
+
+    updated = replace(
+        position,
+        quantity=float(new_quantity),
+        commission_accrued=total_commission,
+        slippage_accrued=total_slippage,
+        max_quantity=max_quantity,
+        resize_count=position.resize_count + 1,
+        realized_pnl_accrued=realized_pnl_accrued,
+        realized_basis_accrued=realized_basis_accrued,
+    )
+    return updated, None
+
+
 def _heartbeat_interval_seconds() -> float:
     raw_value = str(os.environ.get("BACKTEST_HEARTBEAT_INTERVAL_SECONDS") or "").strip()
     if not raw_value:
@@ -902,6 +1020,8 @@ def _execute_trade(
     cash: float,
     commission_bps: float,
     slippage_bps: float,
+    position_id: str | None,
+    trade_role: str | None,
 ) -> tuple[float, float, float]:
     if math.isclose(quantity_delta, 0.0, abs_tol=1e-12):
         return cash, 0.0, 0.0
@@ -920,6 +1040,8 @@ def _execute_trade(
             "commission": float(commission),
             "slippage_cost": float(slippage),
             "cash_after": float(cash_after),
+            "position_id": position_id,
+            "trade_role": trade_role,
         }
     )
     return cash_after, commission, slippage
@@ -928,12 +1050,14 @@ def _execute_trade(
 def _compute_summary(
     timeseries: pd.DataFrame,
     trades: pd.DataFrame,
+    closed_positions: pd.DataFrame,
     *,
     run_id: str,
     run_name: str | None,
     periods_per_year: float,
+    initial_cash_override: float | None = None,
 ) -> dict[str, Any]:
-    if timeseries.empty:
+    def _empty_summary() -> dict[str, Any]:
         return {
             "run_id": run_id,
             "run_name": run_name,
@@ -943,19 +1067,102 @@ def _compute_summary(
             "sharpe_ratio": 0.0,
             "max_drawdown": 0.0,
             "trades": int(len(trades)),
-            "initial_cash": 0.0,
+            "initial_cash": float(initial_cash_override or 0.0),
             "final_equity": 0.0,
-    }
-    initial_cash = float(timeseries["portfolio_value"].iloc[0])
+            "gross_total_return": 0.0,
+            "gross_annualized_return": 0.0,
+            "total_commission": 0.0,
+            "total_slippage_cost": 0.0,
+            "total_transaction_cost": 0.0,
+            "cost_drag_bps": 0.0,
+            "avg_gross_exposure": 0.0,
+            "avg_net_exposure": 0.0,
+            "sortino_ratio": 0.0,
+            "calmar_ratio": 0.0,
+            "closed_positions": 0,
+            "winning_positions": 0,
+            "losing_positions": 0,
+            "hit_rate": 0.0,
+            "avg_win_pnl": 0.0,
+            "avg_loss_pnl": 0.0,
+            "avg_win_return": 0.0,
+            "avg_loss_return": 0.0,
+            "payoff_ratio": 0.0,
+            "profit_factor": 0.0,
+            "expectancy_pnl": 0.0,
+            "expectancy_return": 0.0,
+        }
+
+    if timeseries.empty:
+        return _empty_summary()
+
+    initial_cash = float(initial_cash_override if initial_cash_override is not None else timeseries["portfolio_value"].iloc[0])
     final_equity = float(timeseries["portfolio_value"].iloc[-1])
+    gross_final_equity = float(timeseries.get("gross_portfolio_value", timeseries["portfolio_value"]).iloc[-1])
     total_return = (final_equity / initial_cash - 1.0) if initial_cash else 0.0
+    gross_total_return = (gross_final_equity / initial_cash - 1.0) if initial_cash else 0.0
     returns = pd.to_numeric(timeseries["period_return"], errors="coerce").fillna(0.0)
     periods = max(len(returns), 1)
     annualization = float(periods_per_year)
     annualized_return = (1.0 + total_return) ** (annualization / periods) - 1.0 if periods > 0 else 0.0
+    gross_annualized_return = (1.0 + gross_total_return) ** (annualization / periods) - 1.0 if periods > 0 else 0.0
     annualized_volatility = float(returns.std(ddof=0) * math.sqrt(annualization)) if len(returns) > 1 else 0.0
     sharpe_ratio = annualized_return / annualized_volatility if annualized_volatility > 0 else 0.0
     max_drawdown = float(pd.to_numeric(timeseries["drawdown"], errors="coerce").min() or 0.0)
+    downside_returns = returns.where(returns < 0.0, 0.0)
+    downside_deviation = float(np.sqrt(np.square(downside_returns).mean()) * math.sqrt(annualization)) if len(returns) else 0.0
+    sortino_ratio = annualized_return / downside_deviation if downside_deviation > 0 else 0.0
+    calmar_ratio = annualized_return / abs(max_drawdown) if max_drawdown < 0 else 0.0
+    total_commission = float(pd.to_numeric(trades.get("commission"), errors="coerce").fillna(0.0).sum()) if not trades.empty else 0.0
+    total_slippage_cost = float(pd.to_numeric(trades.get("slippage_cost"), errors="coerce").fillna(0.0).sum()) if not trades.empty else 0.0
+    total_transaction_cost = float(total_commission + total_slippage_cost)
+    cost_drag_bps = float(((gross_final_equity - final_equity) / initial_cash) * 10000.0) if initial_cash else 0.0
+    avg_gross_exposure = float(pd.to_numeric(timeseries.get("gross_exposure"), errors="coerce").fillna(0.0).mean())
+    avg_net_exposure = float(pd.to_numeric(timeseries.get("net_exposure"), errors="coerce").fillna(0.0).mean())
+
+    if closed_positions.empty:
+        closed_positions_summary = {
+            "closed_positions": 0,
+            "winning_positions": 0,
+            "losing_positions": 0,
+            "hit_rate": 0.0,
+            "avg_win_pnl": 0.0,
+            "avg_loss_pnl": 0.0,
+            "avg_win_return": 0.0,
+            "avg_loss_return": 0.0,
+            "payoff_ratio": 0.0,
+            "profit_factor": 0.0,
+            "expectancy_pnl": 0.0,
+            "expectancy_return": 0.0,
+        }
+    else:
+        realized_pnl = pd.to_numeric(closed_positions["realized_pnl"], errors="coerce").fillna(0.0)
+        realized_return = pd.to_numeric(closed_positions["realized_return"], errors="coerce").fillna(0.0)
+        winners = closed_positions[realized_pnl > 0.0]
+        losers = closed_positions[realized_pnl < 0.0]
+        winner_pnl = pd.to_numeric(winners.get("realized_pnl"), errors="coerce").fillna(0.0)
+        loser_pnl = pd.to_numeric(losers.get("realized_pnl"), errors="coerce").fillna(0.0)
+        winner_returns = pd.to_numeric(winners.get("realized_return"), errors="coerce").fillna(0.0)
+        loser_returns = pd.to_numeric(losers.get("realized_return"), errors="coerce").fillna(0.0)
+        gross_profit = float(winner_pnl.sum())
+        gross_loss = float(abs(loser_pnl.sum()))
+        avg_win_pnl = float(winner_pnl.mean()) if not winner_pnl.empty else 0.0
+        avg_loss_pnl = float(loser_pnl.mean()) if not loser_pnl.empty else 0.0
+        closed_positions_summary = {
+            "closed_positions": int(len(closed_positions)),
+            "winning_positions": int(len(winners)),
+            "losing_positions": int(len(losers)),
+            "hit_rate": float(len(winners) / len(closed_positions)) if len(closed_positions) else 0.0,
+            "avg_win_pnl": avg_win_pnl,
+            "avg_loss_pnl": avg_loss_pnl,
+            "avg_win_return": float(winner_returns.mean()) if not winner_returns.empty else 0.0,
+            "avg_loss_return": float(loser_returns.mean()) if not loser_returns.empty else 0.0,
+            "payoff_ratio": float(abs(avg_win_pnl / avg_loss_pnl)) if avg_loss_pnl < 0 else 0.0,
+            "profit_factor": float(gross_profit / gross_loss) if gross_loss > 0 else 0.0,
+            "expectancy_pnl": float(realized_pnl.mean()) if not realized_pnl.empty else 0.0,
+            "expectancy_return": float(realized_return.mean()) if not realized_return.empty else 0.0,
+        }
+
     return {
         "run_id": run_id,
         "run_name": run_name,
@@ -969,6 +1176,17 @@ def _compute_summary(
         "trades": int(len(trades)),
         "initial_cash": float(initial_cash),
         "final_equity": float(final_equity),
+        "gross_total_return": float(gross_total_return),
+        "gross_annualized_return": float(gross_annualized_return),
+        "total_commission": total_commission,
+        "total_slippage_cost": total_slippage_cost,
+        "total_transaction_cost": total_transaction_cost,
+        "cost_drag_bps": cost_drag_bps,
+        "avg_gross_exposure": avg_gross_exposure,
+        "avg_net_exposure": avg_net_exposure,
+        "sortino_ratio": float(sortino_ratio),
+        "calmar_ratio": float(calmar_ratio),
+        **closed_positions_summary,
     }
 
 
@@ -1100,11 +1318,13 @@ def execute_backtest_run(
     evaluator = ExitRuleEvaluator()
     commission_bps, slippage_bps = _costs_from_raw_config(definition.strategy_config_raw)
     cash = float(definition.strategy_config_raw.get("initialCash") or 100000.0)
+    gross_cash = float(cash)
     positions: dict[str, PositionState] = {}
     pending_target_weights: dict[str, float] = {}
     selection_trace_rows: list[dict[str, Any]] = []
     regime_trace_rows: list[dict[str, Any]] = []
     trade_rows: list[dict[str, Any]] = []
+    closed_position_rows: list[dict[str, Any]] = []
     timeseries_rows: list[dict[str, Any]] = []
     previous_equity = cash
     initial_equity = cash
@@ -1246,6 +1466,9 @@ def execute_backtest_run(
                     delta_qty = target_qty - current_qty
                     if math.isclose(delta_qty, 0.0, abs_tol=1e-9):
                         continue
+                    existing_position = positions.get(symbol)
+                    position_id = existing_position.position_id if existing_position is not None else _new_position_id()
+                    trade_role = _trade_role_for_target(current_quantity=float(current_qty), target_quantity=float(target_qty))
                     cash, commission, slippage = _execute_trade(
                         trades=trade_rows,
                         ts=current_ts,
@@ -1255,21 +1478,31 @@ def execute_backtest_run(
                         cash=cash,
                         commission_bps=commission_bps,
                         slippage_bps=slippage_bps,
+                        position_id=position_id,
+                        trade_role=trade_role,
                     )
+                    gross_cash -= float(delta_qty * open_price)
                     total_commission += commission
                     total_slippage += slippage
                     trade_count += 1
-                    if target_qty <= 1e-9:
+                    updated_position, closed_position = _apply_trade_to_position(
+                        existing_position,
+                        symbol=symbol,
+                        ts=current_ts,
+                        quantity_delta=float(delta_qty),
+                        trade_price=float(open_price),
+                        commission=float(commission),
+                        slippage=float(slippage),
+                        position_id=position_id,
+                        exit_reason="rebalance_exit" if target_qty <= 1e-9 else None,
+                    )
+                    if closed_position is not None:
+                        closed_position_rows.append(closed_position)
+                    if updated_position is None:
                         positions.pop(symbol, None)
                         previous_close_by_symbol.pop(symbol, None)
                     else:
-                        positions[symbol] = _apply_rebalance_target(
-                            positions.get(symbol),
-                            symbol=symbol,
-                            entry_date=current_ts,
-                            entry_price=open_price,
-                            target_quantity=float(target_qty),
-                        )
+                        positions[symbol] = updated_position
 
             pending_target_weights = {}
 
@@ -1282,7 +1515,8 @@ def execute_backtest_run(
                     bar = _price_bar(current_ts, row)
                     price_bar_cache[symbol] = bar
                 evaluation = evaluator.evaluate_bar(definition.strategy_config, position, bar)
-                positions[symbol] = evaluation.position_state
+                advanced_position = evaluation.position_state
+                positions[symbol] = advanced_position
                 if evaluation.decision is None:
                     previous_close_by_symbol[symbol] = bar.close or previous_close_by_symbol.get(symbol, position.entry_price)
                     continue
@@ -1290,20 +1524,42 @@ def execute_backtest_run(
                     trades=trade_rows,
                     ts=current_ts,
                     symbol=symbol,
-                    quantity_delta=-position.quantity,
+                    quantity_delta=-advanced_position.quantity,
                     price=float(evaluation.decision.exit_price),
                     cash=cash,
                     commission_bps=commission_bps,
                     slippage_bps=slippage_bps,
+                    position_id=advanced_position.position_id,
+                    trade_role="exit",
                 )
+                gross_cash += float(advanced_position.quantity * float(evaluation.decision.exit_price))
                 total_commission += commission
                 total_slippage += slippage
                 trade_count += 1
+                updated_position, closed_position = _apply_trade_to_position(
+                    advanced_position,
+                    symbol=symbol,
+                    ts=current_ts,
+                    quantity_delta=float(-advanced_position.quantity),
+                    trade_price=float(evaluation.decision.exit_price),
+                    commission=float(commission),
+                    slippage=float(slippage),
+                    position_id=advanced_position.position_id,
+                    exit_reason=evaluation.decision.exit_reason,
+                    exit_rule_id=evaluation.decision.rule_id,
+                )
+                if closed_position is not None:
+                    closed_position_rows.append(closed_position)
+                if updated_position is not None:
+                    positions[symbol] = updated_position
+                    continue
                 positions.pop(symbol, None)
                 previous_close_by_symbol.pop(symbol, None)
 
             close_equity = cash
+            gross_close_equity = gross_cash
             gross_exposure = 0.0
+            net_market_value = 0.0
             for symbol, position in positions.items():
                 row = _market_row(snapshot_index, symbol)
                 close_price = None
@@ -1314,7 +1570,9 @@ def execute_backtest_run(
                 previous_close_by_symbol[symbol] = float(close_price)
                 position_value = float(position.quantity * close_price)
                 close_equity += position_value
+                gross_close_equity += position_value
                 gross_exposure += abs(position_value)
+                net_market_value += position_value
 
             period_return = (close_equity / previous_equity - 1.0) if previous_equity else 0.0
             running_peak = max(running_peak, close_equity)
@@ -1327,9 +1585,10 @@ def execute_backtest_run(
                     "period_return": float(period_return),
                     "daily_return": float(period_return),
                     "cumulative_return": float(close_equity / initial_equity - 1.0) if initial_equity else 0.0,
+                    "gross_portfolio_value": float(gross_close_equity),
                     "cash": float(cash),
                     "gross_exposure": float(gross_exposure / close_equity) if close_equity else 0.0,
-                    "net_exposure": float(gross_exposure / close_equity) if close_equity else 0.0,
+                    "net_exposure": float(net_market_value / close_equity) if close_equity else 0.0,
                     "turnover": float(
                         sum(abs(trade["notional"]) for trade in trade_rows[-trade_count:]) / previous_equity
                     ) if previous_equity and trade_count else 0.0,
@@ -1360,6 +1619,7 @@ def execute_backtest_run(
 
     timeseries = pd.DataFrame(timeseries_rows)
     trades = pd.DataFrame(trade_rows)
+    closed_positions = pd.DataFrame(closed_position_rows)
     rolling_metrics = _compute_rolling_metrics(
         timeseries,
         periods_per_year=periods_per_year,
@@ -1368,9 +1628,11 @@ def execute_backtest_run(
     summary = _compute_summary(
         timeseries,
         trades,
+        closed_positions,
         run_id=run_id,
         run_name=run.get("run_name"),
         periods_per_year=periods_per_year,
+        initial_cash_override=initial_equity,
     )
 
     _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="postgres_publish_start")
@@ -1381,16 +1643,18 @@ def execute_backtest_run(
         timeseries_rows=len(timeseries_rows),
         rolling_rows=len(rolling_metrics),
         trade_rows=len(trade_rows),
+        closed_position_rows=len(closed_position_rows),
         selection_rows=len(selection_trace_rows),
         regime_rows=len(regime_trace_rows),
     )
     persist_backtest_results(
         dsn,
-        run_id,
+        run_id=run_id,
         summary=summary,
         timeseries_rows=timeseries_rows,
         rolling_metric_rows=rolling_metrics.to_dict("records"),
         trade_rows=trade_rows,
+        closed_position_rows=closed_position_rows,
         selection_trace_rows=selection_trace_rows,
         regime_trace_rows=regime_trace_rows,
         results_schema_version=BACKTEST_RESULTS_SCHEMA_VERSION,
@@ -1403,6 +1667,7 @@ def execute_backtest_run(
         timeseries_rows=len(timeseries_rows),
         rolling_rows=len(rolling_metrics),
         trade_rows=len(trade_rows),
+        closed_position_rows=len(closed_position_rows),
         selection_rows=len(selection_trace_rows),
         regime_rows=len(regime_trace_rows),
     )

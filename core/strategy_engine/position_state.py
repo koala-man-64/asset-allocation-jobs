@@ -45,9 +45,28 @@ class PositionState:
     entry_date: TemporalValue
     entry_price: float
     quantity: float
+    position_id: str | None = None
+    opened_at: TemporalValue | None = None
+    average_cost: float | None = None
+    commission_accrued: float = 0.0
+    slippage_accrued: float = 0.0
+    max_quantity: float | None = None
+    resize_count: int = 0
+    realized_pnl_accrued: float = 0.0
+    realized_basis_accrued: float = 0.0
     bars_held: int = 0
     highest_since_entry: float | None = None
     lowest_since_entry: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.opened_at is None:
+            object.__setattr__(self, "opened_at", self.entry_date)
+        if self.average_cost is None:
+            object.__setattr__(self, "average_cost", float(self.entry_price))
+        if self.max_quantity is None:
+            object.__setattr__(self, "max_quantity", float(abs(self.quantity)))
+        if self.position_id is None:
+            object.__setattr__(self, "position_id", f"{self.symbol}:{self.entry_date}")
 
     def advance(self, bar: PriceBar) -> "PositionState":
         highest = self.highest_since_entry if self.highest_since_entry is not None else self.entry_price

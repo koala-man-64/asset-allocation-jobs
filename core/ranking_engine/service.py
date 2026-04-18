@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import math
 import uuid
-from datetime import date, datetime, timezone
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -27,6 +29,31 @@ from core.universe_repository import UniverseRepository
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _MaterializationContext:
+    strategy_name: str
+    output_table_name: str
+    strategy_config: StrategyConfig
+    ranking_schema_name: str
+    ranking_schema_version: int
+    ranking_schema: RankingSchemaConfig
+    strategy_universe: UniverseDefinition
+    ranking_universe: UniverseDefinition
+    table_specs: dict[str, Any]
+    required_columns: dict[str, set[str]]
+
+
+@dataclass(frozen=True)
+class _ResolvedDateRange:
+    start_date: date
+    end_date: date
+    source_start_date: date
+    source_end_date: date
+    previous_watermark: date | None
+    noop: bool = False
+    reason: str | None = None
+
+
 def preview_strategy_rankings(
     dsn: str,
     *,
@@ -36,12 +63,21 @@ def preview_strategy_rankings(
     limit: int = 25,
 ) -> dict[str, Any]:
     strategy = _load_strategy(dsn, strategy_name)
+    strategy_config: StrategyConfig = strategy["config"]
+    strategy_universe = _resolve_strategy_universe(dsn, strategy_config)
+    ranking_universe = _resolve_ranking_universe(dsn, schema)
+    table_specs = universe_service._load_gold_table_specs(dsn)
+    required_columns = _collect_required_columns(strategy_universe, ranking_universe, schema)
     ranked = _compute_rankings_dataframe(
         dsn,
-        strategy_config=strategy["config"],
+        strategy_config=strategy_config,
         ranking_schema=schema,
         start_date=as_of_date,
         end_date=as_of_date,
+        table_specs=table_specs,
+        strategy_universe=strategy_universe,
+        ranking_universe=ranking_universe,
+        required_columns=required_columns,
     )
     preview_rows = [
         RankingPreviewRow(symbol=str(row["symbol"]), rank=int(row["rank"]), score=float(row["score"])).model_dump()
@@ -63,8 +99,120 @@ def materialize_strategy_rankings(
     start_date: date | None = None,
     end_date: date | None = None,
     triggered_by: str = "manual",
+    strategy_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    strategy = _load_strategy(dsn, strategy_name)
+    context = _load_materialization_context(dsn, strategy_name, strategy_payload=strategy_payload)
+    resolved_range = _resolve_date_range(
+        dsn,
+        strategy_name=strategy_name,
+        strategy_config=context.strategy_config,
+        ranking_schema=context.ranking_schema,
+        start_date=start_date,
+        end_date=end_date,
+        table_specs=context.table_specs,
+        strategy_universe=context.strategy_universe,
+        ranking_universe=context.ranking_universe,
+        required_columns=context.required_columns,
+    )
+
+    if resolved_range.noop:
+        run_id = uuid.uuid4().hex
+        try:
+            _persist_noop_run(
+                dsn,
+                run_id=run_id,
+                context=context,
+                resolved_range=resolved_range,
+                triggered_by=triggered_by,
+            )
+        except Exception:
+            logger.exception("Ranking no-op run recording failed for strategy '%s'.", strategy_name)
+            _update_ranking_run_after_failure(dsn, run_id=run_id, error="Failed to record no-op ranking run.")
+            raise
+        return _build_materialization_result(
+            run_id=run_id,
+            context=context,
+            resolved_range=resolved_range,
+            row_count=0,
+            date_count=0,
+            status="noop",
+            reason=resolved_range.reason,
+            current_watermark=resolved_range.previous_watermark,
+        )
+
+    ranked = _compute_rankings_dataframe(
+        dsn,
+        strategy_config=context.strategy_config,
+        ranking_schema=context.ranking_schema,
+        start_date=resolved_range.start_date,
+        end_date=resolved_range.end_date,
+        table_specs=context.table_specs,
+        strategy_universe=context.strategy_universe,
+        ranking_universe=context.ranking_universe,
+        required_columns=context.required_columns,
+    )
+    run_id = uuid.uuid4().hex
+    date_count = int(ranked["date"].nunique()) if not ranked.empty else 0
+
+    try:
+        rows_written = _persist_materialization(
+            dsn,
+            run_id=run_id,
+            context=context,
+            resolved_range=resolved_range,
+            ranked=ranked,
+            triggered_by=triggered_by,
+            date_count=date_count,
+        )
+    except Exception as exc:
+        logger.exception("Ranking materialization failed for strategy '%s'.", strategy_name)
+        _update_ranking_run_after_failure(dsn, run_id=run_id, error=str(exc))
+        raise
+
+    return _build_materialization_result(
+        run_id=run_id,
+        context=context,
+        resolved_range=resolved_range,
+        row_count=rows_written,
+        date_count=date_count,
+        status="success",
+        reason=None,
+        current_watermark=resolved_range.end_date,
+    )
+
+
+def _load_strategy(
+    dsn: str,
+    strategy_name: str,
+    *,
+    strategy_payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    strategy: dict[str, Any] | None = None
+    if strategy_payload is not None:
+        candidate = dict(strategy_payload)
+        candidate_name = str(candidate.get("name") or strategy_name).strip()
+        if candidate_name == strategy_name and candidate.get("config") is not None:
+            strategy = candidate
+
+    if strategy is None:
+        repo = StrategyRepository(dsn)
+        strategy = repo.get_strategy(strategy_name)
+
+    if not strategy:
+        raise ValueError(f"Strategy '{strategy_name}' not found.")
+
+    normalized = dict(strategy)
+    normalized["config"] = StrategyConfig.model_validate(strategy.get("config") or {})
+    return normalized
+
+
+def _load_materialization_context(
+    dsn: str,
+    strategy_name: str,
+    *,
+    strategy_payload: Mapping[str, Any] | None = None,
+) -> _MaterializationContext:
+    strategy = _load_strategy(dsn, strategy_name, strategy_payload=strategy_payload)
     strategy_config: StrategyConfig = strategy["config"]
     if not strategy_config.rankingSchemaName:
         raise ValueError(f"Strategy '{strategy_name}' does not reference a ranking schema.")
@@ -75,99 +223,96 @@ def materialize_strategy_rankings(
         raise ValueError(f"Ranking schema '{strategy_config.rankingSchemaName}' not found.")
 
     ranking_schema = RankingSchemaConfig.model_validate(ranking_schema_record["config"])
-    resolved_start, resolved_end = _resolve_date_range(dsn, ranking_schema, strategy_config, start_date, end_date)
-    run_id = uuid.uuid4().hex
-    output_table_name = str(strategy.get("output_table_name") or slugify_strategy_output_table(strategy_name))
-    _insert_ranking_run(
-        dsn,
-        run_id=run_id,
+    strategy_universe = _resolve_strategy_universe(dsn, strategy_config)
+    ranking_universe = _resolve_ranking_universe(dsn, ranking_schema)
+    table_specs = universe_service._load_gold_table_specs(dsn)
+    required_columns = _collect_required_columns(strategy_universe, ranking_universe, ranking_schema)
+    output_table_name = str(strategy.get("output_table_name") or "").strip() or slugify_strategy_output_table(strategy_name)
+    return _MaterializationContext(
         strategy_name=strategy_name,
+        output_table_name=output_table_name,
+        strategy_config=strategy_config,
         ranking_schema_name=strategy_config.rankingSchemaName,
         ranking_schema_version=int(ranking_schema_record["version"]),
-        output_table_name=output_table_name,
-        start_date=resolved_start,
-        end_date=resolved_end,
-        status="running",
-        triggered_by=triggered_by,
+        ranking_schema=ranking_schema,
+        strategy_universe=strategy_universe,
+        ranking_universe=ranking_universe,
+        table_specs=table_specs,
+        required_columns=required_columns,
     )
-
-    try:
-        ranked = _compute_rankings_dataframe(
-            dsn,
-            strategy_config=strategy_config,
-            ranking_schema=ranking_schema,
-            start_date=resolved_start,
-            end_date=resolved_end,
-        )
-        rows_written = _write_rankings_to_platinum(
-            dsn,
-            table_name=output_table_name,
-            ranked=ranked,
-            start_date=resolved_start,
-            end_date=resolved_end,
-        )
-        _update_ranking_run(
-            dsn,
-            run_id=run_id,
-            status="success",
-            row_count=rows_written,
-            date_count=int(ranked["date"].nunique()) if not ranked.empty else 0,
-            error=None,
-        )
-        _upsert_ranking_watermark(
-            dsn,
-            strategy_name=strategy_name,
-            ranking_schema_name=strategy_config.rankingSchemaName,
-            ranking_schema_version=int(ranking_schema_record["version"]),
-            output_table_name=output_table_name,
-            last_ranked_date=resolved_end,
-        )
-        summary = RankingMaterializationSummary(
-            runId=run_id,
-            strategyName=strategy_name,
-            rankingSchemaName=strategy_config.rankingSchemaName,
-            rankingSchemaVersion=int(ranking_schema_record["version"]),
-            outputTableName=output_table_name,
-            startDate=resolved_start,
-            endDate=resolved_end,
-            rowCount=rows_written,
-            dateCount=int(ranked["date"].nunique()) if not ranked.empty else 0,
-        )
-        return summary.model_dump()
-    except Exception as exc:
-        logger.exception("Ranking materialization failed for strategy '%s'.", strategy_name)
-        _update_ranking_run(dsn, run_id=run_id, status="error", row_count=0, date_count=0, error=str(exc))
-        raise
-
-
-def _load_strategy(dsn: str, strategy_name: str) -> dict[str, Any]:
-    repo = StrategyRepository(dsn)
-    strategy = repo.get_strategy(strategy_name)
-    if not strategy:
-        raise ValueError(f"Strategy '{strategy_name}' not found.")
-    strategy["config"] = StrategyConfig.model_validate(strategy.get("config") or {})
-    return strategy
 
 
 def _resolve_date_range(
     dsn: str,
-    ranking_schema: RankingSchemaConfig,
+    *,
+    strategy_name: str,
     strategy_config: StrategyConfig,
+    ranking_schema: RankingSchemaConfig,
     start_date: date | None,
     end_date: date | None,
-) -> tuple[date, date]:
-    if start_date and end_date:
-        return start_date, end_date
+    table_specs: dict[str, Any] | None = None,
+    strategy_universe: UniverseDefinition | None = None,
+    ranking_universe: UniverseDefinition | None = None,
+    required_columns: dict[str, set[str]] | None = None,
+) -> _ResolvedDateRange:
+    resolved_table_specs = table_specs or universe_service._load_gold_table_specs(dsn)
+    resolved_strategy_universe = strategy_universe or _resolve_strategy_universe(dsn, strategy_config)
+    resolved_ranking_universe = ranking_universe or _resolve_ranking_universe(dsn, ranking_schema)
+    referenced_columns = required_columns or _collect_required_columns(
+        resolved_strategy_universe,
+        resolved_ranking_universe,
+        ranking_schema,
+    )
+    source_start_date, source_end_date = _load_source_date_bounds(
+        dsn,
+        table_specs=resolved_table_specs,
+        required_columns=referenced_columns,
+    )
+    previous_watermark = _get_ranking_watermark(dsn, strategy_name)
 
-    table_specs = universe_service._load_gold_table_specs(dsn)
-    strategy_universe = _resolve_strategy_universe(dsn, strategy_config)
-    ranking_universe = _resolve_ranking_universe(dsn, ranking_schema)
-    referenced_tables = _collect_required_columns(strategy_universe, ranking_universe, ranking_schema)
+    resolved_start = start_date or (
+        previous_watermark + timedelta(days=1) if previous_watermark is not None else source_start_date
+    )
+    resolved_end = end_date or source_end_date
+
+    if resolved_start > resolved_end:
+        if start_date is None and end_date is None and previous_watermark is not None and previous_watermark >= source_end_date:
+            return _ResolvedDateRange(
+                start_date=source_end_date,
+                end_date=source_end_date,
+                source_start_date=source_start_date,
+                source_end_date=source_end_date,
+                previous_watermark=previous_watermark,
+                noop=True,
+                reason="Ranking output already current.",
+            )
+        raise ValueError(
+            "Resolved ranking date range is invalid: "
+            f"start_date={resolved_start.isoformat()} end_date={resolved_end.isoformat()}"
+        )
+
+    return _ResolvedDateRange(
+        start_date=resolved_start,
+        end_date=resolved_end,
+        source_start_date=source_start_date,
+        source_end_date=source_end_date,
+        previous_watermark=previous_watermark,
+    )
+
+
+def _load_source_date_bounds(
+    dsn: str,
+    *,
+    table_specs: dict[str, Any],
+    required_columns: dict[str, set[str]],
+) -> tuple[date, date]:
     candidate_dates: list[date] = []
     with connect(dsn) as conn:
         with conn.cursor() as cur:
-            for table_name in referenced_tables.keys():
-                spec = table_specs[table_name]
+            for table_name in required_columns.keys():
+                spec = table_specs.get(table_name)
+                if spec is None:
+                    raise ValueError(f"Unknown gold table '{table_name}'.")
                 cur.execute(
                     f"""
                     SELECT MIN({universe_service._quote_identifier(spec.as_of_column)}),
@@ -176,17 +321,80 @@ def _resolve_date_range(
                     """
                 )
                 row = cur.fetchone()
-                if not row or not row[1]:
+                if not row:
                     continue
-                if row[0]:
-                    candidate_dates.append(row[0])
-                candidate_dates.append(row[1])
+                for value in row:
+                    normalized = _normalize_as_of_value(value)
+                    if normalized is not None:
+                        candidate_dates.append(normalized)
+
     if not candidate_dates:
-        today = datetime.now(timezone.utc).date()
-        return start_date or today, end_date or today
-    resolved_start = start_date or min(candidate_dates)
-    resolved_end = end_date or max(candidate_dates)
-    return resolved_start, resolved_end
+        raise ValueError("No ranking source data is available for the referenced gold tables.")
+
+    return min(candidate_dates), max(candidate_dates)
+
+
+def _get_ranking_watermark(dsn: str, strategy_name: str) -> date | None:
+    with connect(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT last_ranked_date
+                FROM core.ranking_watermarks
+                WHERE strategy_name = %s
+                """,
+                (strategy_name,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return _normalize_as_of_value(row[0])
+
+
+def _normalize_as_of_value(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    normalized = pd.to_datetime(value, errors="coerce")
+    if pd.isna(normalized):
+        return None
+    return normalized.date()
+
+
+def _build_materialization_result(
+    *,
+    run_id: str,
+    context: _MaterializationContext,
+    resolved_range: _ResolvedDateRange,
+    row_count: int,
+    date_count: int,
+    status: str,
+    reason: str | None,
+    current_watermark: date | None,
+) -> dict[str, Any]:
+    result = RankingMaterializationSummary(
+        runId=run_id,
+        strategyName=context.strategy_name,
+        rankingSchemaName=context.ranking_schema_name,
+        rankingSchemaVersion=context.ranking_schema_version,
+        outputTableName=context.output_table_name,
+        startDate=resolved_range.start_date,
+        endDate=resolved_range.end_date,
+        rowCount=row_count,
+        dateCount=date_count,
+    ).model_dump()
+    result.update(
+        {
+            "status": status,
+            "reason": reason,
+            "previousWatermark": resolved_range.previous_watermark,
+            "currentWatermark": current_watermark,
+        }
+    )
+    return result
 
 
 def _compute_rankings_dataframe(
@@ -196,18 +404,33 @@ def _compute_rankings_dataframe(
     ranking_schema: RankingSchemaConfig,
     start_date: date,
     end_date: date,
+    table_specs: dict[str, Any] | None = None,
+    strategy_universe: UniverseDefinition | None = None,
+    ranking_universe: UniverseDefinition | None = None,
+    required_columns: dict[str, set[str]] | None = None,
 ) -> pd.DataFrame:
-    table_specs = universe_service._load_gold_table_specs(dsn)
-    strategy_universe = _resolve_strategy_universe(dsn, strategy_config)
-    ranking_universe = _resolve_ranking_universe(dsn, ranking_schema)
-    required_columns = _collect_required_columns(strategy_universe, ranking_universe, ranking_schema)
-    frames = _load_table_frames(dsn, table_specs=table_specs, required_columns=required_columns, start_date=start_date, end_date=end_date)
+    resolved_table_specs = table_specs or universe_service._load_gold_table_specs(dsn)
+    resolved_strategy_universe = strategy_universe or _resolve_strategy_universe(dsn, strategy_config)
+    resolved_ranking_universe = ranking_universe or _resolve_ranking_universe(dsn, ranking_schema)
+    resolved_required_columns = required_columns or _collect_required_columns(
+        resolved_strategy_universe,
+        resolved_ranking_universe,
+        ranking_schema,
+    )
+    frames = _load_table_frames(
+        dsn,
+        table_specs=resolved_table_specs,
+        required_columns=resolved_required_columns,
+        start_date=start_date,
+        end_date=end_date,
+    )
     merged = _merge_frames(frames)
     if merged.empty:
         return pd.DataFrame(columns=["date", "symbol", "score", "rank"])
 
     filtered = merged[
-        _evaluate_universe_mask(merged, strategy_universe.root) & _evaluate_universe_mask(merged, ranking_universe.root)
+        _evaluate_universe_mask(merged, resolved_strategy_universe.root)
+        & _evaluate_universe_mask(merged, resolved_ranking_universe.root)
     ].copy()
     if filtered.empty:
         return pd.DataFrame(columns=["date", "symbol", "score", "rank"])
@@ -319,20 +542,32 @@ def _load_table_frames(
                 rows = cur.fetchall()
                 columns_in_result = [desc.name for desc in cur.description]
             frame = pd.DataFrame(rows, columns=columns_in_result)
+            normalized_columns = [f"{table_name}__{column}" for column in selected_columns]
             if frame.empty:
-                frames[table_name] = pd.DataFrame(columns=["date", "symbol", *[f"{table_name}__{column}" for column in selected_columns]])
+                frames[table_name] = pd.DataFrame(columns=["date", "symbol", *normalized_columns])
                 continue
             frame["symbol"] = frame["symbol"].astype("string").str.upper()
-            frame["date"] = pd.to_datetime(frame["date"]).dt.date
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.date
             for column in selected_columns:
+                column_spec = spec.columns.get(column)
+                if column_spec is None:
+                    raise ValueError(f"Unknown column '{column}' for gold.{table_name}.")
                 normalized = f"{table_name}__{column}"
-                series = frame[column]
-                if str(series.dtype) == "bool":
-                    frame[normalized] = series.astype(int)
-                else:
-                    frame[normalized] = pd.to_numeric(series, errors="coerce")
-            frames[table_name] = frame[["date", "symbol", *[f"{table_name}__{column}" for column in selected_columns]]]
+                frame[normalized] = _normalize_loaded_column(frame[column], value_kind=column_spec.value_kind)
+            frames[table_name] = frame[["date", "symbol", *normalized_columns]]
     return frames
+
+
+def _normalize_loaded_column(series: pd.Series, *, value_kind: str) -> pd.Series:
+    if value_kind == "number":
+        return pd.to_numeric(series, errors="coerce")
+    if value_kind == "boolean":
+        return series.astype("boolean")
+    if value_kind == "date":
+        return pd.to_datetime(series, errors="coerce").dt.date
+    if value_kind == "datetime":
+        return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_localize(None)
+    return series.astype("string")
 
 
 def _merge_frames(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -352,29 +587,34 @@ def _evaluate_universe_mask(df: pd.DataFrame, node: UniverseGroup | UniverseCond
     if isinstance(node, UniverseCondition):
         column_name = f"{node.table}__{node.column}"
         if column_name not in df.columns:
-            return pd.Series(False, index=df.index)
+            return pd.Series(False, index=df.index, dtype="boolean")
         series = df[column_name]
         operator = node.operator
-        if operator == "eq":
-            return series == node.value
-        if operator == "ne":
-            return series != node.value
-        if operator == "gt":
-            return series > node.value
-        if operator == "gte":
-            return series >= node.value
-        if operator == "lt":
-            return series < node.value
-        if operator == "lte":
-            return series <= node.value
-        if operator == "in":
-            return series.isin(node.values or [])
-        if operator == "not_in":
-            return ~series.isin(node.values or [])
         if operator == "is_null":
-            return series.isna()
+            return _finalize_mask(series.isna(), df.index)
         if operator == "is_not_null":
-            return series.notna()
+            return _finalize_mask(series.notna(), df.index)
+
+        if operator == "in":
+            values = _normalize_comparison_values(series, node.values or [])
+            return _finalize_mask(series.notna() & series.isin(values), df.index)
+        if operator == "not_in":
+            values = _normalize_comparison_values(series, node.values or [])
+            return _finalize_mask(series.notna() & ~series.isin(values), df.index)
+
+        comparison_value = _normalize_comparison_value(series, node.value)
+        if operator == "eq":
+            return _finalize_mask(series.notna() & series.eq(comparison_value), df.index)
+        if operator == "ne":
+            return _finalize_mask(series.notna() & series.ne(comparison_value), df.index)
+        if operator == "gt":
+            return _finalize_mask(series.notna() & series.gt(comparison_value), df.index)
+        if operator == "gte":
+            return _finalize_mask(series.notna() & series.ge(comparison_value), df.index)
+        if operator == "lt":
+            return _finalize_mask(series.notna() & series.lt(comparison_value), df.index)
+        if operator == "lte":
+            return _finalize_mask(series.notna() & series.le(comparison_value), df.index)
         raise ValueError(f"Unsupported universe operator '{operator}'.")
 
     child_masks = [_evaluate_universe_mask(df, clause) for clause in node.clauses]
@@ -382,11 +622,50 @@ def _evaluate_universe_mask(df: pd.DataFrame, node: UniverseGroup | UniverseCond
         result = child_masks[0].copy()
         for mask in child_masks[1:]:
             result &= mask
-        return result
+        return _finalize_mask(result, df.index)
     result = child_masks[0].copy()
     for mask in child_masks[1:]:
         result |= mask
-    return result
+    return _finalize_mask(result, df.index)
+
+
+def _normalize_comparison_values(series: pd.Series, values: list[Any]) -> list[Any]:
+    return [_normalize_comparison_value(series, value) for value in values]
+
+
+def _normalize_comparison_value(series: pd.Series, value: Any) -> Any:
+    if value is None:
+        return None
+    if pd.api.types.is_datetime64_any_dtype(series):
+        normalized = pd.to_datetime(value, errors="coerce", utc=True)
+        if pd.isna(normalized):
+            return value
+        return normalized.tz_convert("UTC").tz_localize(None)
+    non_null = series[series.notna()]
+    if not non_null.empty:
+        sample = non_null.iloc[0]
+        if isinstance(sample, date) and not isinstance(sample, datetime):
+            if isinstance(value, date) and not isinstance(value, datetime):
+                return value
+            text = str(value or "").strip()
+            if not text:
+                return value
+            normalized = text.replace("Z", "+00:00")
+            try:
+                return date.fromisoformat(normalized)
+            except ValueError:
+                try:
+                    return datetime.fromisoformat(normalized).date()
+                except ValueError:
+                    return value
+    return value
+
+
+def _finalize_mask(mask: pd.Series, index: pd.Index) -> pd.Series:
+    normalized = mask.reindex(index, fill_value=False).fillna(False)
+    if str(normalized.dtype) != "bool":
+        normalized = normalized.astype(bool)
+    return normalized
 
 
 def _score_group(df: pd.DataFrame, group: RankingGroup) -> tuple[pd.Series, list[pd.Series]]:
@@ -476,45 +755,125 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
-def _write_rankings_to_platinum(
+def _persist_materialization(
     dsn: str,
+    *,
+    run_id: str,
+    context: _MaterializationContext,
+    resolved_range: _ResolvedDateRange,
+    ranked: pd.DataFrame,
+    triggered_by: str,
+    date_count: int,
+) -> int:
+    with connect(dsn) as conn:
+        with conn.cursor() as cur:
+            _insert_ranking_run(
+                cur,
+                run_id=run_id,
+                strategy_name=context.strategy_name,
+                ranking_schema_name=context.ranking_schema_name,
+                ranking_schema_version=context.ranking_schema_version,
+                output_table_name=context.output_table_name,
+                start_date=resolved_range.start_date,
+                end_date=resolved_range.end_date,
+                status="running",
+                triggered_by=triggered_by,
+            )
+            rows_written = _write_rankings_to_platinum(
+                cur,
+                table_name=context.output_table_name,
+                ranked=ranked,
+                start_date=resolved_range.start_date,
+                end_date=resolved_range.end_date,
+            )
+            _update_ranking_run(
+                cur,
+                run_id=run_id,
+                status="success",
+                row_count=rows_written,
+                date_count=date_count,
+                error=None,
+            )
+            _upsert_ranking_watermark(
+                cur,
+                strategy_name=context.strategy_name,
+                ranking_schema_name=context.ranking_schema_name,
+                ranking_schema_version=context.ranking_schema_version,
+                output_table_name=context.output_table_name,
+                last_ranked_date=resolved_range.end_date,
+            )
+    return int(len(ranked))
+
+
+def _persist_noop_run(
+    dsn: str,
+    *,
+    run_id: str,
+    context: _MaterializationContext,
+    resolved_range: _ResolvedDateRange,
+    triggered_by: str,
+) -> None:
+    with connect(dsn) as conn:
+        with conn.cursor() as cur:
+            _insert_ranking_run(
+                cur,
+                run_id=run_id,
+                strategy_name=context.strategy_name,
+                ranking_schema_name=context.ranking_schema_name,
+                ranking_schema_version=context.ranking_schema_version,
+                output_table_name=context.output_table_name,
+                start_date=resolved_range.start_date,
+                end_date=resolved_range.end_date,
+                status="running",
+                triggered_by=triggered_by,
+            )
+            _update_ranking_run(
+                cur,
+                run_id=run_id,
+                status="noop",
+                row_count=0,
+                date_count=0,
+                error=None,
+            )
+
+
+def _write_rankings_to_platinum(
+    cursor: Any,
     *,
     table_name: str,
     ranked: pd.DataFrame,
     start_date: date,
     end_date: date,
 ) -> int:
-    with connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute("CREATE SCHEMA IF NOT EXISTS platinum")
-            _ensure_platinum_output_table(cur, table_name)
-            cur.execute(
-                f"""
-                DELETE FROM "platinum".{universe_service._quote_identifier(table_name)}
-                WHERE date >= %s AND date <= %s
-                """,
-                (start_date, end_date),
-            )
-            if ranked.empty:
-                return 0
-            last_updated_date = datetime.now(timezone.utc).date()
-            rows = (
-                (
-                    row["date"],
-                    str(row["symbol"]),
-                    int(row["rank"]),
-                    float(row["score"]),
-                    last_updated_date,
-                )
-                for _, row in ranked.iterrows()
-            )
-            copy_rows(
-                cur,
-                table=f'"platinum".{universe_service._quote_identifier(table_name)}',
-                columns=("date", "symbol", "rank", "score", "last_updated_date"),
-                rows=rows,
-            )
-            return int(len(ranked))
+    cursor.execute("CREATE SCHEMA IF NOT EXISTS platinum")
+    _ensure_platinum_output_table(cursor, table_name)
+    cursor.execute(
+        f"""
+        DELETE FROM "platinum".{universe_service._quote_identifier(table_name)}
+        WHERE date >= %s AND date <= %s
+        """,
+        (start_date, end_date),
+    )
+    if ranked.empty:
+        return 0
+    last_updated_date = datetime.now(timezone.utc).date()
+    rows = (
+        (
+            row.date,
+            str(row.symbol),
+            int(row.rank),
+            float(row.score),
+            last_updated_date,
+        )
+        for row in ranked.itertuples(index=False)
+    )
+    copy_rows(
+        cursor,
+        table=f'"platinum".{universe_service._quote_identifier(table_name)}',
+        columns=("date", "symbol", "rank", "score", "last_updated_date"),
+        rows=rows,
+    )
+    return int(len(ranked))
 
 
 def _ensure_platinum_output_table(cursor: Any, table_name: str) -> None:
@@ -554,7 +913,7 @@ def _ensure_platinum_output_table(cursor: Any, table_name: str) -> None:
 
 
 def _insert_ranking_run(
-    dsn: str,
+    cursor: Any,
     *,
     run_id: str,
     strategy_name: str,
@@ -566,40 +925,38 @@ def _insert_ranking_run(
     status: str,
     triggered_by: str,
 ) -> None:
-    with connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO core.ranking_runs (
-                    run_id,
-                    strategy_name,
-                    ranking_schema_name,
-                    ranking_schema_version,
-                    output_table_name,
-                    start_date,
-                    end_date,
-                    status,
-                    triggered_by,
-                    started_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """,
-                (
-                    run_id,
-                    strategy_name,
-                    ranking_schema_name,
-                    ranking_schema_version,
-                    output_table_name,
-                    start_date,
-                    end_date,
-                    status,
-                    triggered_by,
-                ),
-            )
+    cursor.execute(
+        """
+        INSERT INTO core.ranking_runs (
+            run_id,
+            strategy_name,
+            ranking_schema_name,
+            ranking_schema_version,
+            output_table_name,
+            start_date,
+            end_date,
+            status,
+            triggered_by,
+            started_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        """,
+        (
+            run_id,
+            strategy_name,
+            ranking_schema_name,
+            ranking_schema_version,
+            output_table_name,
+            start_date,
+            end_date,
+            status,
+            triggered_by,
+        ),
+    )
 
 
 def _update_ranking_run(
-    dsn: str,
+    cursor: Any,
     *,
     run_id: str,
     status: str,
@@ -607,24 +964,43 @@ def _update_ranking_run(
     date_count: int,
     error: str | None,
 ) -> None:
-    with connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE core.ranking_runs
-                SET status = %s,
-                    row_count = %s,
-                    date_count = %s,
-                    error = %s,
-                    finished_at = NOW()
-                WHERE run_id = %s
-                """,
-                (status, row_count, date_count, error, run_id),
-            )
+    cursor.execute(
+        """
+        UPDATE core.ranking_runs
+        SET status = %s,
+            row_count = %s,
+            date_count = %s,
+            error = %s,
+            finished_at = NOW()
+        WHERE run_id = %s
+        """,
+        (status, row_count, date_count, error, run_id),
+    )
+
+
+def _update_ranking_run_after_failure(
+    dsn: str,
+    *,
+    run_id: str,
+    error: str,
+) -> None:
+    try:
+        with connect(dsn) as conn:
+            with conn.cursor() as cur:
+                _update_ranking_run(
+                    cur,
+                    run_id=run_id,
+                    status="error",
+                    row_count=0,
+                    date_count=0,
+                    error=error,
+                )
+    except Exception:
+        logger.exception("Failed to record ranking run failure for run '%s'.", run_id)
 
 
 def _upsert_ranking_watermark(
-    dsn: str,
+    cursor: Any,
     *,
     strategy_name: str,
     ranking_schema_name: str,
@@ -632,32 +1008,30 @@ def _upsert_ranking_watermark(
     output_table_name: str,
     last_ranked_date: date,
 ) -> None:
-    with connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO core.ranking_watermarks (
-                    strategy_name,
-                    ranking_schema_name,
-                    ranking_schema_version,
-                    output_table_name,
-                    last_ranked_date,
-                    updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (strategy_name)
-                DO UPDATE SET
-                    ranking_schema_name = EXCLUDED.ranking_schema_name,
-                    ranking_schema_version = EXCLUDED.ranking_schema_version,
-                    output_table_name = EXCLUDED.output_table_name,
-                    last_ranked_date = EXCLUDED.last_ranked_date,
-                    updated_at = NOW()
-                """,
-                (
-                    strategy_name,
-                    ranking_schema_name,
-                    ranking_schema_version,
-                    output_table_name,
-                    last_ranked_date,
-                ),
-            )
+    cursor.execute(
+        """
+        INSERT INTO core.ranking_watermarks (
+            strategy_name,
+            ranking_schema_name,
+            ranking_schema_version,
+            output_table_name,
+            last_ranked_date,
+            updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (strategy_name)
+        DO UPDATE SET
+            ranking_schema_name = EXCLUDED.ranking_schema_name,
+            ranking_schema_version = EXCLUDED.ranking_schema_version,
+            output_table_name = EXCLUDED.output_table_name,
+            last_ranked_date = EXCLUDED.last_ranked_date,
+            updated_at = NOW()
+        """,
+        (
+            strategy_name,
+            ranking_schema_name,
+            ranking_schema_version,
+            output_table_name,
+            last_ranked_date,
+        ),
+    )
