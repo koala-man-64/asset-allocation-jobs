@@ -36,6 +36,28 @@ def _sync_result() -> bronze.symbol_availability.SyncResult:
 # --- Integration Tests ---
 
 
+def test_validate_environment_requires_common_container(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("NASDAQ_API_KEY", "test-key")
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_BRONZE", "bronze", raising=False)
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_COMMON", "", raising=False)
+    monkeypatch.setattr(bronze, "bronze_client", object())
+    monkeypatch.setattr(bronze, "common_client", object())
+
+    with pytest.raises(ValueError, match="AZURE_CONTAINER_COMMON"):
+        bronze._validate_environment()
+
+
+def test_validate_environment_requires_common_client(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("NASDAQ_API_KEY", "test-key")
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_BRONZE", "bronze", raising=False)
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_COMMON", "common", raising=False)
+    monkeypatch.setattr(bronze, "bronze_client", object())
+    monkeypatch.setattr(bronze, "common_client", None)
+
+    with pytest.raises(RuntimeError, match="Common storage client is unavailable"):
+        bronze._validate_environment()
+
+
 @patch('tasks.price_target_data.bronze_price_target_data.nasdaqdatalink')
 @patch('tasks.price_target_data.bronze_price_target_data.bronze_client')
 @patch('tasks.price_target_data.bronze_price_target_data.list_manager')
