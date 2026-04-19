@@ -45,6 +45,7 @@ Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAll
 - Use `integration.yml` to pin a released `asset-allocation-contracts` version into repo manifests.
 - Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for ad hoc operator-driven starts after deployment.
 - Treat `results-reconcile-job` as trigger-driven. Gold jobs invoke it automatically, and operators start it manually only for repair or replay workflows.
+- Treat `symbol-cleanup-job` as operator-driven. The control-plane owns enqueueing and work status; this repo only runs the worker.
 
 ## Backtesting Runtime V4
 
@@ -136,6 +137,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - If `deploy-prod.yml` verifies the wrong image, inspect `artifacts/previous-job-images.json` and the job image queries returned by Azure CLI.
 - If `scripts\ops\trigger_job.py` fails, verify the selected job name exists in `AssetAllocationRG`, `RESOURCE_GROUP` is set, and your Azure CLI session can run `az containerapp job start`.
 - If `results-reconcile-job` does not run after a gold-stage success, verify the upstream gold manifest still defines `TRIGGER_NEXT_JOB_NAME=results-reconcile-job` or start it manually with `python scripts\ops\trigger_job.py --job results-reconcile --resource-group AssetAllocationRG`.
+- If `symbol-cleanup-job` fails, check `ASSET_ALLOCATION_API_BASE_URL`, `ASSET_ALLOCATION_API_SCOPE`, `POSTGRES_DSN`, and the control-plane `SYMBOL_ENRICHMENT_ALLOWED_JOBS` allowlist before retrying with `python scripts\ops\trigger_job.py --job symbol-cleanup --resource-group AssetAllocationRG`.
 - If a backtest run fails before claim/start with an auth or reachability error, treat it as a preflight failure. Verify the readiness dependency, `ASSET_ALLOCATION_API_BASE_URL`, `ASSET_ALLOCATION_API_SCOPE`, and the control-plane identity path before retrying the job.
 - If summary metrics look daily-only on an intraday run, treat that as a cadence-metric issue, not a deployment issue. The remediation should publish cadence-aware metrics and rolling windows, so a job that still looks daily-only is not on the expected v4 path.
 - If gross and net return converge when commissions or slippage are non-zero, treat that as a cost-accounting issue. The expected v4 behavior is to publish net-of-cost summary returns plus additive gross-return and cost-drag fields.

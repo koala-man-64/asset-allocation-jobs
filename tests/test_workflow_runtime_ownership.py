@@ -41,6 +41,7 @@ API_BOOTSTRAP_JOB_MANIFESTS = (
     "job_backtests.yaml",
     "job_backtests_reconcile.yaml",
     "job_platinum_rankings.yaml",
+    "job_symbol_cleanup.yaml",
 )
 
 MARKET_PIPELINE_JOB_MANIFESTS = (
@@ -175,6 +176,13 @@ def test_results_reconcile_job_is_manual_and_not_dry_run() -> None:
     assert "manualTriggerConfig:" in text
     assert "triggerType: Schedule" not in text
     assert "RESULTS_RECONCILE_DRY_RUN" not in text
+
+
+def test_symbol_cleanup_job_is_manual_and_points_to_worker_module() -> None:
+    text = (repo_root() / "deploy" / "job_symbol_cleanup.yaml").read_text(encoding="utf-8")
+    assert "triggerType: Manual" in text
+    assert "manualTriggerConfig:" in text
+    assert 'command: ["python", "-m", "tasks.symbol_cleanup.worker"]' in text
 
 
 def test_backtests_reconcile_job_uses_lower_frequency_and_timeout() -> None:

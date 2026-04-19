@@ -546,6 +546,36 @@ def test_trigger_job_supports_results_reconcile_alias(monkeypatch: pytest.Monkey
     ]
 
 
+def test_trigger_job_supports_symbol_cleanup_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/ops/trigger_job.py", "trigger_job_symbol_cleanup")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, check: commands.append(list(command)) or subprocess.CompletedProcess(command, 0),
+    )
+
+    resolved = module.start_job(
+        job_key="symbol-cleanup",
+        resource_group="rg",
+        environment={"SYMBOL_CLEANUP_JOB": "custom-symbol-cleanup-job"},
+    )
+
+    assert resolved == "custom-symbol-cleanup-job"
+    assert commands == [
+        [
+            "az",
+            "containerapp",
+            "job",
+            "start",
+            "--name",
+            "custom-symbol-cleanup-job",
+            "--resource-group",
+            "rg",
+        ]
+    ]
+
+
 def test_check_fast_gate_runs_ruff_before_fast_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_module("scripts/run_quality_gate.py", "run_quality_gate")
     commands: list[tuple[list[str], Path]] = []

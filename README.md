@@ -2,6 +2,7 @@
 
 Runtime-owned jobs repository for:
 - `tasks/` batch jobs and backtesting worker runtime
+- symbol cleanup and AI enrichment worker runtime
 - provider adapters in `alpha_vantage/`, `massive_provider/`, and `alpaca/`
 - jobs-side `core/` runtime modules
 - medallion pipelines for market, finance, earnings, price targets, regime state, and multi-source economic catalysts
@@ -50,6 +51,14 @@ Canonical workflows live under `.github/workflows/`.
 - `DEPLOYMENT_SETUP.md` is the canonical deploy, operate, and rollback runbook.
 - `docs/ops/networking-audit-2026-04-18.md` captures the live Azure networking posture observed on April 18, 2026 and the prioritized hardening backlog.
 - `docs/ops/economic-catalyst-data.md` documents the economic catalyst Bronze/Silver/Gold pipeline, Postgres serving tables, source precedence, and replay expectations.
+
+## Symbol Cleanup
+
+Symbol enrichment lifecycle state is owned by the control-plane plus shared contracts. This repo only owns the worker runtime and the ACA job manifest.
+
+- `deploy/job_symbol_cleanup.yaml` is the manual worker job that claims queued symbol cleanup work from the control-plane.
+- `tasks.symbol_cleanup.worker` loads provider facts and current profile state from Postgres, applies deterministic normalization first, then asks the control-plane enrichment endpoint for the remaining AI-owned fields.
+- The worker never streams `/api/ai/chat/stream` directly and never auto-overrides locked fields.
 
 ## Backtesting
 
