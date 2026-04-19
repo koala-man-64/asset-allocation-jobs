@@ -15,8 +15,46 @@ def unique_ticker():
     return f"TEST_MKT_{uuid.uuid4().hex[:8].upper()}"
 
 
+@pytest.fixture(autouse=True)
+def _stub_symbol_policy_helpers(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(bronze, "clear_invalid_candidate_marker", lambda **kwargs: False)
+    monkeypatch.setattr(bronze, "list_promoted_invalid_candidate_markers", lambda **kwargs: [])
+
+
 def _market_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
+
+
+def _adjusted_daily_csv(rows: list[dict[str, object]]) -> str:
+    headers = [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "adjusted close",
+        "volume",
+        "dividend amount",
+        "split coefficient",
+    ]
+    lines = [",".join(headers)]
+    for row in rows:
+        lines.append(
+            ",".join(
+                str(
+                    row.get(
+                        column,
+                        {
+                            "adjusted close": row.get("close", ""),
+                            "dividend amount": 0.0,
+                            "split coefficient": 1.0,
+                        }.get(column, ""),
+                    )
+                )
+                for column in headers
+            )
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _sync_result() -> bronze.symbol_availability.SyncResult:
@@ -106,6 +144,82 @@ def test_download_and_stage_market_data_fetches_full_history_for_new_symbol(uniq
     assert float(staged["ShortVolume"].iloc[-1]) == pytest.approx(500.0)
 
 
+def test_download_enriches_market_data_with_alpha_vantage_corporate_actions(unique_ticker):
+    symbol = unique_ticker
+    mock_massive = MagicMock()
+    mock_massive.get_market_history.return_value = {
+        "symbol": symbol,
+        "status": "ok",
+        "rows": [
+            {
+                "date": "2024-01-02",
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10.5,
+                "volume": 100,
+                "short_interest": 1000,
+                "short_volume": 400,
+            },
+            {
+                "date": "2024-01-03",
+                "open": 10.5,
+                "high": 12,
+                "low": 10,
+                "close": 11,
+                "volume": 150,
+                "short_interest": 1200,
+                "short_volume": 500,
+            },
+        ],
+    }
+    mock_av = MagicMock()
+    mock_av.get_daily_time_series_csv.return_value = _adjusted_daily_csv(
+        [
+            {
+                "timestamp": "2024-01-02",
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10.5,
+                "volume": 100,
+                "dividend amount": 0.0,
+                "split coefficient": 1.0,
+            },
+            {
+                "timestamp": "2024-01-03",
+                "open": 10.5,
+                "high": 12,
+                "low": 10,
+                "close": 11,
+                "volume": 150,
+                "dividend amount": 0.25,
+                "split coefficient": 1.0,
+            },
+        ]
+    )
+    collected_frames: dict[str, pd.DataFrame] = {}
+
+    with patch("tasks.market_data.bronze_market_data.list_manager") as mock_list_manager:
+        mock_list_manager.is_blacklisted.return_value = False
+
+        bronze.download_and_save_raw(
+            symbol,
+            mock_massive,
+            collected_symbol_frames=collected_frames,
+            alpha_vantage_client=mock_av,
+        )
+
+    _, av_kwargs = mock_av.get_daily_time_series_csv.call_args
+    assert av_kwargs["symbol"] == symbol
+    assert av_kwargs["adjusted"] is True
+    assert av_kwargs["outputsize"] == "full"
+    staged = collected_frames[symbol]
+    assert float(staged.loc[staged["Date"] == "2024-01-02", "DividendAmount"].iloc[0]) == pytest.approx(0.0)
+    assert float(staged.loc[staged["Date"] == "2024-01-03", "DividendAmount"].iloc[0]) == pytest.approx(0.25)
+    assert float(staged.loc[staged["Date"] == "2024-01-03", "SplitCoefficient"].iloc[0]) == pytest.approx(1.0)
+
+
 def test_no_history_payload_marks_symbol_as_coverage_unavailable(unique_ticker):
     symbol = unique_ticker
     mock_massive = MagicMock()
@@ -162,6 +276,59 @@ def test_no_history_with_existing_data_stages_existing_frame_and_does_not_blackl
     pd.testing.assert_frame_equal(collected_frames[symbol], bronze._canonical_market_df(existing_df))
 
 
+def test_no_history_with_existing_data_backfills_corporate_actions_from_alpha_vantage(unique_ticker):
+    symbol = unique_ticker
+    mock_massive = MagicMock()
+    mock_massive.get_market_history.return_value = {"symbol": symbol, "status": "no_history", "rows": []}
+    mock_av = MagicMock()
+    mock_av.get_daily_time_series_csv.return_value = _adjusted_daily_csv(
+        [
+            {
+                "timestamp": "2024-01-03",
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.5,
+                "volume": 100.0,
+                "dividend amount": 0.0,
+                "split coefficient": 1.0,
+            }
+        ]
+    )
+    existing_df = _market_frame(
+        [
+            {
+                "Date": "2024-01-03",
+                "Open": 10.0,
+                "High": 11.0,
+                "Low": 9.0,
+                "Close": 10.5,
+                "Volume": 100.0,
+                "ShortInterest": 1000.0,
+                "ShortVolume": 500.0,
+            }
+        ]
+    )
+    collected_frames: dict[str, pd.DataFrame] = {}
+
+    with patch("tasks.market_data.bronze_market_data.list_manager") as mock_list_manager:
+        mock_list_manager.is_blacklisted.return_value = False
+        bronze.download_and_save_raw(
+            symbol,
+            mock_massive,
+            collected_symbol_frames=collected_frames,
+            existing_symbol_df=existing_df,
+            alpha_vantage_client=mock_av,
+        )
+
+        mock_list_manager.add_to_blacklist.assert_not_called()
+        mock_list_manager.add_to_whitelist.assert_called_once_with(symbol)
+
+    staged = collected_frames[symbol]
+    assert float(staged.loc[0, "DividendAmount"]) == pytest.approx(0.0)
+    assert float(staged.loc[0, "SplitCoefficient"]) == pytest.approx(1.0)
+
+
 def test_download_allows_regime_required_symbol_even_when_blacklisted():
     symbol = "^VIX"
     mock_massive = MagicMock()
@@ -198,6 +365,30 @@ def test_download_allows_regime_required_symbol_even_when_blacklisted():
         mock_massive.get_market_history.assert_called_once()
         mock_list_manager.add_to_whitelist.assert_called_once_with(symbol)
         assert symbol in collected_frames
+
+
+def test_validate_environment_requires_common_container(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "https://example.test")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://scope/.default")
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_BRONZE", "bronze", raising=False)
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_COMMON", "", raising=False)
+    monkeypatch.setattr(bronze, "bronze_client", object())
+    monkeypatch.setattr(bronze, "common_client", object())
+
+    with pytest.raises(ValueError, match="AZURE_CONTAINER_COMMON"):
+        bronze._validate_environment()
+
+
+def test_validate_environment_requires_common_client(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "https://example.test")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://scope/.default")
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_BRONZE", "bronze", raising=False)
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_COMMON", "common", raising=False)
+    monkeypatch.setattr(bronze, "bronze_client", object())
+    monkeypatch.setattr(bronze, "common_client", None)
+
+    with pytest.raises(RuntimeError, match="Common storage client is unavailable"):
+        bronze._validate_environment()
 
 
 def test_download_uses_existing_data_window_and_merges(unique_ticker):
@@ -274,6 +465,97 @@ def test_download_uses_existing_data_window_and_merges(unique_ticker):
     assert staged["Date"].tolist() == ["2024-01-02", "2024-01-03", "2024-01-04"]
     assert float(staged.loc[staged["Date"] == "2024-01-03", "Close"].iloc[0]) == pytest.approx(20.5)
     assert float(staged.loc[staged["Date"] == "2024-01-04", "ShortInterest"].iloc[0]) == pytest.approx(1500.0)
+
+
+def test_download_uses_compact_alpha_vantage_incremental_refresh_when_existing_actions_are_complete(unique_ticker):
+    symbol = unique_ticker
+    mock_massive = MagicMock()
+    mock_massive.get_market_history.return_value = {
+        "symbol": symbol,
+        "status": "ok",
+        "rows": [
+            {
+                "date": "2024-01-03",
+                "open": 20,
+                "high": 21,
+                "low": 19,
+                "close": 20.5,
+                "volume": 200,
+                "short_interest": 1000,
+                "short_volume": 500,
+            },
+            {
+                "date": "2024-01-04",
+                "open": 21,
+                "high": 22,
+                "low": 20,
+                "close": 21.5,
+                "volume": 250,
+                "short_interest": 1500,
+                "short_volume": 700,
+            },
+        ],
+    }
+    mock_av = MagicMock()
+    mock_av.get_daily_time_series_csv.return_value = _adjusted_daily_csv(
+        [
+            {
+                "timestamp": "2024-01-03",
+                "open": 20,
+                "high": 21,
+                "low": 19,
+                "close": 20.5,
+                "volume": 200,
+                "dividend amount": 0.0,
+                "split coefficient": 1.0,
+            },
+            {
+                "timestamp": "2024-01-04",
+                "open": 21,
+                "high": 22,
+                "low": 20,
+                "close": 21.5,
+                "volume": 250,
+                "dividend amount": 0.0,
+                "split coefficient": 2.0,
+            },
+        ]
+    )
+    existing_df = _market_frame(
+        [
+            {
+                "Date": "2024-01-03",
+                "Open": 11.0,
+                "High": 12.0,
+                "Low": 10.0,
+                "Close": 11.5,
+                "Volume": 120.0,
+                "ShortInterest": 1000.0,
+                "ShortVolume": 500.0,
+                "DividendAmount": 0.0,
+                "SplitCoefficient": 1.0,
+            },
+        ]
+    )
+    collected_frames: dict[str, pd.DataFrame] = {}
+
+    with patch("tasks.market_data.bronze_market_data.list_manager") as mock_list_manager, patch(
+        "tasks.market_data.bronze_market_data._utc_today",
+        return_value=date(2024, 1, 4),
+    ):
+        mock_list_manager.is_blacklisted.return_value = False
+        bronze.download_and_save_raw(
+            symbol,
+            mock_massive,
+            collected_symbol_frames=collected_frames,
+            existing_symbol_df=existing_df,
+            alpha_vantage_client=mock_av,
+        )
+
+    _, av_kwargs = mock_av.get_daily_time_series_csv.call_args
+    assert av_kwargs["outputsize"] == "compact"
+    staged = collected_frames[symbol]
+    assert float(staged.loc[staged["Date"] == "2024-01-04", "SplitCoefficient"].iloc[0]) == pytest.approx(2.0)
 
 
 def test_download_uses_2016_floor_when_existing_history_predates_floor(unique_ticker):
@@ -397,6 +679,55 @@ def test_download_normalizes_market_history_payload_errors(unique_ticker):
             )
 
     assert "/api/providers/massive/market-history" in str(exc_info.value.payload["path"])
+
+
+def test_download_logs_warning_and_preserves_market_stage_when_alpha_vantage_enrichment_fails(unique_ticker):
+    symbol = unique_ticker
+    mock_massive = MagicMock()
+    mock_massive.get_market_history.return_value = {
+        "symbol": symbol,
+        "status": "ok",
+        "rows": [
+            {
+                "date": "2024-01-03",
+                "open": 20,
+                "high": 21,
+                "low": 19,
+                "close": 20.5,
+                "volume": 200,
+                "short_interest": 1000,
+                "short_volume": 500,
+            }
+        ],
+    }
+    mock_av = MagicMock()
+    mock_av.get_daily_time_series_csv.side_effect = bronze.AlphaVantageGatewayError(
+        "gateway unavailable",
+        status_code=503,
+        detail="upstream unavailable",
+        payload={"path": "/api/providers/alpha-vantage/time-series/daily"},
+    )
+    warning_messages: list[str] = []
+    collected_frames: dict[str, pd.DataFrame] = {}
+
+    with patch("tasks.market_data.bronze_market_data.list_manager") as mock_list_manager, patch(
+        "tasks.market_data.bronze_market_data.mdc.write_warning",
+        lambda message: warning_messages.append(str(message)),
+    ):
+        mock_list_manager.is_blacklisted.return_value = False
+        bronze.download_and_save_raw(
+            symbol,
+            mock_massive,
+            collected_symbol_frames=collected_frames,
+            alpha_vantage_client=mock_av,
+        )
+
+    assert symbol in collected_frames
+    staged = collected_frames[symbol]
+    assert staged["Date"].tolist() == ["2024-01-03"]
+    assert pd.isna(staged.loc[0, "DividendAmount"])
+    assert pd.isna(staged.loc[0, "SplitCoefficient"])
+    assert any("corporate-action enrichment failed" in message for message in warning_messages)
 
 
 class _FakeClientManager:
@@ -878,6 +1209,8 @@ def test_main_async_schedules_regime_required_symbol_even_when_blacklisted():
         ), patch(
             "tasks.market_data.bronze_market_data._download_and_save_raw_with_recovery",
         ) as mock_download, patch(
+            "tasks.market_data.bronze_market_data.clear_invalid_candidate_marker"
+        ) as mock_clear, patch(
             "tasks.market_data.bronze_market_data.start_alpha26_bronze_publish",
             return_value=object(),
         ), patch(
@@ -900,7 +1233,180 @@ def test_main_async_schedules_regime_required_symbol_even_when_blacklisted():
         assert exit_code == 0
         mock_download.assert_called_once()
         assert mock_download.call_args.args[0] == symbol
+        assert "skip_blacklist_check" not in mock_download.call_args.kwargs
+        mock_clear.assert_called_once()
+        assert mock_clear.call_args.kwargs["symbol"] == symbol
         client_manager.close_all.assert_called_once()
+
+    asyncio.run(run_test())
+
+
+def test_main_async_reprobes_promoted_blacklisted_symbol_and_recovers(unique_ticker):
+    symbol = unique_ticker
+    client_manager = MagicMock()
+
+    def _fake_download(
+        symbol_arg,
+        _client_manager,
+        *,
+        collected_symbol_frames,
+        collected_lock=None,
+        existing_symbol_df=None,
+        skip_blacklist_check=False,
+        treat_no_history_as_unavailable=False,
+        snapshot_row=None,
+        max_attempts=0,
+        sleep_seconds=0.0,
+    ):
+        del _client_manager, existing_symbol_df, snapshot_row, max_attempts, sleep_seconds
+        assert symbol_arg == symbol
+        assert skip_blacklist_check is True
+        assert treat_no_history_as_unavailable is True
+        bronze._set_collected_market_frame(
+            symbol=symbol_arg,
+            frame=_market_frame(
+                [
+                    {
+                        "Date": "2024-01-03",
+                        "Open": 11.0,
+                        "High": 12.0,
+                        "Low": 10.0,
+                        "Close": 11.5,
+                        "Volume": 150.0,
+                        "ShortInterest": 1100.0,
+                        "ShortVolume": 550.0,
+                    }
+                ]
+            ),
+            collected_symbol_frames=collected_symbol_frames,
+            collected_lock=collected_lock,
+        )
+
+    async def run_test():
+        with patch("tasks.market_data.bronze_market_data._validate_environment"), patch(
+            "tasks.market_data.bronze_market_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_promoted_invalid_candidate_markers",
+            return_value=[{"symbol": symbol, "status": "promoted"}],
+        ), patch(
+            "tasks.market_data.bronze_market_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.market_data.bronze_market_data._load_alpha26_existing_market_bucket",
+            side_effect=_fake_empty_bucket_load,
+        ), patch(
+            "tasks.market_data.bronze_market_data._ThreadLocalMassiveClientManager",
+            return_value=client_manager,
+        ), patch(
+            "tasks.market_data.bronze_market_data._get_max_workers",
+            return_value=1,
+        ), patch(
+            "tasks.market_data.bronze_market_data._download_and_save_raw_with_recovery",
+            side_effect=_fake_download,
+        ) as mock_download, patch(
+            "tasks.market_data.bronze_market_data.clear_invalid_candidate_marker"
+        ) as mock_clear, patch(
+            "tasks.market_data.bronze_market_data.start_alpha26_bronze_publish",
+            return_value=object(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.write_alpha26_bronze_bucket",
+            return_value={"size": 1},
+        ), patch(
+            "tasks.market_data.bronze_market_data.finalize_alpha26_bronze_publish",
+            return_value=_fake_publish_result(written_symbols=1),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.market_data.bronze_market_data.mdc.write_line"
+        ), patch(
+            "tasks.market_data.bronze_market_data.mdc.write_warning"
+        ):
+            mock_list_manager.is_blacklisted.side_effect = lambda value: str(value).strip().upper() == symbol
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        mock_download.assert_called_once()
+        mock_clear.assert_called_once()
+        assert mock_clear.call_args.kwargs["symbol"] == symbol
+
+    asyncio.run(run_test())
+
+
+def test_main_async_promoted_reprobe_retains_blacklist_on_no_history(unique_ticker):
+    symbol = unique_ticker
+    client_manager = MagicMock()
+
+    async def run_test():
+        with patch("tasks.market_data.bronze_market_data._validate_environment"), patch(
+            "tasks.market_data.bronze_market_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_promoted_invalid_candidate_markers",
+            return_value=[{"symbol": symbol, "status": "promoted"}],
+        ), patch(
+            "tasks.market_data.bronze_market_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.market_data.bronze_market_data._load_alpha26_existing_market_bucket",
+            side_effect=_fake_empty_bucket_load,
+        ), patch(
+            "tasks.market_data.bronze_market_data._ThreadLocalMassiveClientManager",
+            return_value=client_manager,
+        ), patch(
+            "tasks.market_data.bronze_market_data._get_max_workers",
+            return_value=1,
+        ), patch(
+            "tasks.market_data.bronze_market_data._download_and_save_raw_with_recovery",
+            side_effect=bronze.BronzeCoverageUnavailableError(
+                bronze._NO_MARKET_HISTORY_REASON_CODE,
+                detail=f"Massive returned no market history for {symbol}.",
+            ),
+        ) as mock_download, patch(
+            "tasks.market_data.bronze_market_data.record_promoted_symbol_reprobe_attempt"
+        ) as mock_record_reprobe, patch(
+            "tasks.market_data.bronze_market_data.clear_invalid_candidate_marker"
+        ) as mock_clear, patch(
+            "tasks.market_data.bronze_market_data.resolve_job_run_status",
+            return_value=("succeeded", 0),
+        ), patch(
+            "tasks.market_data.bronze_market_data.start_alpha26_bronze_publish",
+            return_value=object(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.write_alpha26_bronze_bucket",
+            return_value={"size": 1},
+        ), patch(
+            "tasks.market_data.bronze_market_data.finalize_alpha26_bronze_publish",
+            return_value=_fake_publish_result(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.market_data.bronze_market_data.mdc.write_line"
+        ), patch(
+            "tasks.market_data.bronze_market_data.mdc.write_warning"
+        ):
+            mock_list_manager.is_blacklisted.side_effect = lambda value: str(value).strip().upper() == symbol
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        mock_download.assert_called_once()
+        assert mock_download.call_args.kwargs["skip_blacklist_check"] is True
+        assert mock_download.call_args.kwargs["treat_no_history_as_unavailable"] is True
+        mock_record_reprobe.assert_called_once()
+        assert mock_record_reprobe.call_args.kwargs["outcome"] == "still_no_history"
+        mock_clear.assert_not_called()
 
     asyncio.run(run_test())
 

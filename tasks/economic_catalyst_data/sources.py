@@ -163,7 +163,6 @@ def _bea_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> l
             payload=text,
             fetched_at=now,
             payload_format="html",
-            metadata={"api_key_configured": bool(config.bea_api_key)},
         )
     ]
 

@@ -43,6 +43,8 @@ bronze_client = mdc.get_storage_client(cfg.AZURE_CONTAINER_BRONZE)
 silver_client = mdc.get_storage_client(cfg.AZURE_CONTAINER_SILVER)
 
 _SUPPLEMENTAL_MARKET_COLUMNS = ("ShortInterest", "ShortVolume")
+_CORPORATE_ACTION_MARKET_COLUMNS = ("DividendAmount", "SplitCoefficient")
+_OPTIONAL_MARKET_COLUMNS = (*_SUPPLEMENTAL_MARKET_COLUMNS, *_CORPORATE_ACTION_MARKET_COLUMNS)
 _REMOVED_MARKET_COLUMNS = ("FloatShares", "float_shares", "shares_float", "free_float", "float")
 _INDEX_ARTIFACT_COLUMN_NAMES = {
     "index",
@@ -60,6 +62,8 @@ _ALPHA26_MARKET_MIN_COLUMNS = [
     "volume",
     "short_interest",
     "short_volume",
+    "dividend_amount",
+    "split_coefficient",
 ]
 _ALPHA26_MARKET_NUMERIC_COLUMNS = [
     "open",
@@ -69,6 +73,8 @@ _ALPHA26_MARKET_NUMERIC_COLUMNS = [
     "volume",
     "short_interest",
     "short_volume",
+    "dividend_amount",
+    "split_coefficient",
 ]
 _BRONZE_TO_SILVER_REQUIRED_COLUMNS = {
     "symbol",
@@ -93,6 +99,8 @@ def _empty_alpha26_market_frame() -> pd.DataFrame:
             "volume": pd.Series(dtype="float64"),
             "short_interest": pd.Series(dtype="float64"),
             "short_volume": pd.Series(dtype="float64"),
+            "dividend_amount": pd.Series(dtype="float64"),
+            "split_coefficient": pd.Series(dtype="float64"),
         }
     )
 
@@ -118,6 +126,42 @@ def _coerce_alpha26_market_bucket_frame(df: pd.DataFrame) -> pd.DataFrame:
 
     out = out.sort_values(["symbol", "date"]).drop_duplicates(subset=["symbol", "date"], keep="last")
     return out[_ALPHA26_MARKET_MIN_COLUMNS].reset_index(drop=True)
+
+
+def _debug_symbol_scope() -> set[str]:
+    return {
+        str(symbol or "").strip().upper()
+        for symbol in (getattr(cfg, "DEBUG_SYMBOLS", []) or [])
+        if str(symbol or "").strip()
+    }
+
+
+def _merge_preserved_alpha26_market_bucket_symbols(
+    *,
+    bucket: str,
+    df_bucket: pd.DataFrame,
+    scoped_symbols: set[str],
+) -> pd.DataFrame:
+    normalized_bucket = _coerce_alpha26_market_bucket_frame(df_bucket)
+    if not scoped_symbols:
+        return normalized_bucket
+
+    existing_bucket = _load_silver_market_bucket(DataPaths.get_silver_market_bucket_path(bucket))
+    if existing_bucket is None or existing_bucket.empty:
+        return normalized_bucket
+
+    existing_bucket = _coerce_alpha26_market_bucket_frame(existing_bucket)
+    if existing_bucket.empty:
+        return normalized_bucket
+
+    preserved = existing_bucket.loc[
+        ~existing_bucket["symbol"].astype("string").str.upper().isin(scoped_symbols)
+    ].copy()
+    if preserved.empty:
+        return normalized_bucket
+    if normalized_bucket.empty:
+        return preserved.reset_index(drop=True)
+    return _coerce_alpha26_market_bucket_frame(pd.concat([preserved, normalized_bucket], ignore_index=True))
 
 
 def _parse_alpha26_bucket_from_blob_name(blob_name: str) -> Optional[str]:
@@ -246,6 +290,8 @@ def _rename_market_columns(df: pd.DataFrame) -> pd.DataFrame:
         "shortvolume": "ShortVolume",
         "shortvolumeshares": "ShortVolume",
         "volumeshort": "ShortVolume",
+        "dividendamount": "DividendAmount",
+        "splitcoefficient": "SplitCoefficient",
     }
     normalized_cols = {_normalize_col_name(col): col for col in out.columns}
     alias_renames: dict[str, str] = {}
@@ -279,7 +325,7 @@ def _ensure_numeric_market_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["Volume"] = 0.0
     out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce")
 
-    for col in _SUPPLEMENTAL_MARKET_COLUMNS:
+    for col in _OPTIONAL_MARKET_COLUMNS:
         if col not in out.columns:
             out[col] = pd.NA
         out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -558,6 +604,7 @@ def _write_alpha26_market_buckets(
         )
 
     touched_symbol_to_bucket: dict[str, str] = {}
+    scoped_symbols = _debug_symbol_scope()
     for bucket in sorted(selected_buckets):
         silver_bucket_path = DataPaths.get_silver_market_bucket_path(bucket)
         parts = bucket_frames.get(bucket, [])
@@ -566,7 +613,11 @@ def _write_alpha26_market_buckets(
         else:
             df_bucket = _empty_alpha26_market_frame()
 
-        df_bucket = _coerce_alpha26_market_bucket_frame(df_bucket)
+        df_bucket = _merge_preserved_alpha26_market_bucket_symbols(
+            bucket=bucket,
+            df_bucket=df_bucket,
+            scoped_symbols=scoped_symbols,
+        )
         _validate_silver_market_bucket_output_contract(df_bucket, bucket=bucket)
         for symbol in df_bucket["symbol"].dropna().astype(str).tolist():
             if symbol:

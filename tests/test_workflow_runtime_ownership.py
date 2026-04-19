@@ -40,7 +40,10 @@ STALE_DOC_REFERENCES = (
 API_BOOTSTRAP_JOB_MANIFESTS = (
     "job_backtests.yaml",
     "job_backtests_reconcile.yaml",
+    "job_intraday_monitor.yaml",
+    "job_intraday_market_refresh.yaml",
     "job_platinum_rankings.yaml",
+    "job_symbol_cleanup.yaml",
 )
 
 MARKET_PIPELINE_JOB_MANIFESTS = (
@@ -110,6 +113,20 @@ def test_api_backed_manual_jobs_define_control_plane_env_vars() -> None:
         assert "value: ${ASSET_ALLOCATION_API_SCOPE}" in text, manifest_name
 
 
+def test_intraday_job_manifests_run_on_weekday_five_minute_cadence() -> None:
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name in ("job_intraday_monitor.yaml", "job_intraday_market_refresh.yaml"):
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        assert "triggerType: Schedule" in text, manifest_name
+        assert 'cronExpression: "*/5 * * * 1-5"' in text, manifest_name
+
+
+def test_intraday_refresh_manifest_keeps_market_refresh_in_process() -> None:
+    text = (repo_root() / "deploy" / "job_intraday_market_refresh.yaml").read_text(encoding="utf-8")
+    assert 'command: ["python", "-m", "tasks.intraday_monitor.refresh_worker"]' in text
+    assert "TRIGGER_NEXT_JOB_NAME" not in text
+
+
 def test_market_job_manifests_use_contract_storage_account_variable() -> None:
     deploy_dir = repo_root() / "deploy"
     for manifest_name in MARKET_PIPELINE_JOB_MANIFESTS:
@@ -175,6 +192,13 @@ def test_results_reconcile_job_is_manual_and_not_dry_run() -> None:
     assert "manualTriggerConfig:" in text
     assert "triggerType: Schedule" not in text
     assert "RESULTS_RECONCILE_DRY_RUN" not in text
+
+
+def test_symbol_cleanup_job_is_manual_and_points_to_worker_module() -> None:
+    text = (repo_root() / "deploy" / "job_symbol_cleanup.yaml").read_text(encoding="utf-8")
+    assert "triggerType: Manual" in text
+    assert "manualTriggerConfig:" in text
+    assert 'command: ["python", "-m", "tasks.symbol_cleanup.worker"]' in text
 
 
 def test_backtests_reconcile_job_uses_lower_frequency_and_timeout() -> None:

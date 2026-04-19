@@ -50,13 +50,10 @@ MASSIVE_MAX_WORKERS,deploy_var,var,deploy_config,true,Massive worker concurrency
 MASSIVE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Massive timeout.
 ECONOMIC_CATALYST_OFFICIAL_SOURCES,deploy_var,var,deploy_config,true,Comma-separated official-source fetchers for the economic catalyst bronze job.
 ECONOMIC_CATALYST_VENDOR_SOURCES,deploy_var,var,deploy_config,true,Comma-separated vendor-source fetchers for the economic catalyst bronze job.
-ECONOMIC_CATALYST_COUNTRY_SCOPE,deploy_var,var,deploy_config,true,Comma-separated country or region codes to keep in economic catalyst outputs.
-ECONOMIC_CATALYST_HIGH_IMPACT_GROUPS,deploy_var,var,deploy_config,true,Comma-separated canonical event groups treated as high-impact.
 ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS,deploy_var,var,deploy_config,true,Rolling structured-event replay window for economic catalyst ingestion.
 ECONOMIC_CATALYST_HEADLINE_CORRECTION_LOOKBACK_DAYS,deploy_var,var,deploy_config,true,Rolling headline replay window for economic catalyst ingestion.
 ECONOMIC_CATALYST_FUTURE_SCHEDULE_DAYS,deploy_var,var,deploy_config,true,Forward schedule horizon in days for economic catalyst event pulls.
 ECONOMIC_CATALYST_GENERAL_POLL_MINUTES,deploy_var,var,deploy_config,true,General full-source polling cadence in minutes for the bronze economic catalyst job.
-ECONOMIC_CATALYST_HOT_WINDOW_POLL_MINUTES,deploy_var,var,deploy_config,true,Hot-window polling cadence in minutes for headline and structured catalyst refreshes.
 ECONOMIC_CATALYST_ALPHA_VANTAGE_TOPICS,deploy_var,var,deploy_config,true,Alpha Vantage news topics used by the economic catalyst bronze job.
 ECONOMIC_CATALYST_FOMC_SCHEDULE_URLS,deploy_var,var,deploy_config,true,Comma-separated Federal Reserve schedule URLs used for FOMC calendar scraping.
 ECONOMIC_CATALYST_BLS_ICS_URL,deploy_var,var,deploy_config,true,BLS release calendar ICS URL.
@@ -71,7 +68,6 @@ ASSET_ALLOCATION_API_BASE_URL,secret,secret,secret_store,true,Control-plane base
 ASSET_ALLOCATION_API_SCOPE,secret,secret,secret_store,true,Managed-identity scope used for jobs to control-plane auth. Auto-discovered from the asset-allocation-api Entra app when available.
 AZURE_STORAGE_CONNECTION_STRING,secret,secret,secret_store,true,Storage connection string. Never auto-discovered.
 FRED_API_KEY,secret,secret,secret_store,true,FRED API key for release calendar ingestion. Never auto-discovered.
-BEA_API_KEY,secret,secret,secret_store,true,BEA API key for supplemental release metadata. Never auto-discovered.
 NASDAQ_API_KEY,secret,secret,secret_store,true,Nasdaq API key. Never auto-discovered.
 MASSIVE_API_KEY,secret,secret,secret_store,true,Massive API key for Benzinga news ingestion. Never auto-discovered.
 ALPHA_VANTAGE_API_KEY,secret,secret,secret_store,true,Alpha Vantage API key for news and economic backfill. Never auto-discovered.
