@@ -73,7 +73,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
         "\n".join(
             [
                 "[project]",
-                'dependencies = ["asset-allocation-contracts==2.1.0", "asset-allocation-runtime-common==2.0.5"]',
+                'dependencies = ["asset-allocation-contracts==2.1.0", "asset-allocation-runtime-common==2.0.8"]',
                 "",
             ]
         ),
@@ -89,7 +89,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
 
     versions = module.validate_repo_shared_dependency_compatibility(repo_root=tmp_path, python_exe="/python")
 
-    assert versions == ("2.1.0", "2.0.5")
+    assert versions == ("2.1.0", "2.0.8")
     assert commands == [
         [
             "/python",
@@ -99,7 +99,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
             "--dry-run",
             "--ignore-installed",
             "asset-allocation-contracts==2.1.0",
-            "asset-allocation-runtime-common==2.0.5",
+            "asset-allocation-runtime-common==2.0.8",
         ]
     ]
 
@@ -120,7 +120,7 @@ def test_validate_shared_dependency_compatibility_surfaces_resolver_failure() ->
             module.validate_shared_dependency_compatibility(
                 python_exe="/python",
                 contracts_version="2.0.0",
-                runtime_common_version="2.0.5",
+                runtime_common_version="2.0.8",
             )
     finally:
         monkeypatch.undo()
@@ -386,15 +386,37 @@ def test_render_and_apply_manifests_supplies_repo_tag_defaults(
     assert commands[0][3] == "create"
 
 
-def test_render_and_apply_manifests_fails_on_unresolved_placeholders(
+def test_render_and_apply_manifests_uses_env_template_defaults_when_env_is_blank(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    env_template = tmp_path / ".env.template"
+    env_template.write_text(
+        "\n".join(
+            [
+                "AZURE_FOLDER_ECONOMIC_CATALYST=economic-catalyst",
+                "SILVER_ECONOMIC_CATALYST_JOB=silver-economic-catalyst-job",
+                "JOB_IMAGE=template-image",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "DEFAULT_ENV_TEMPLATE_PATH", env_template)
+
     deploy_dir = tmp_path / "deploy"
     deploy_dir.mkdir()
     rendered_dir = tmp_path / "rendered"
-    (deploy_dir / "job_broken.yaml").write_text(
-        "name: broken-job\nsubscription: ${AZURE_SUBSCRIPTION_ID}\nimage: ${JOB_IMAGE}\n",
+    (deploy_dir / "job_defaults.yaml").write_text(
+        "\n".join(
+            [
+                "name: defaults-job",
+                "folder: ${AZURE_FOLDER_ECONOMIC_CATALYST}",
+                "nextJob: ${SILVER_ECONOMIC_CATALYST_JOB}",
+                "image: ${JOB_IMAGE}",
+                "",
+            ]
+        ),
         encoding="utf-8",
     )
 
@@ -402,7 +424,42 @@ def test_render_and_apply_manifests_fails_on_unresolved_placeholders(
     monkeypatch.setattr(module, "manifest_exists", lambda **_: False)
     monkeypatch.setattr(module.subprocess, "check_call", lambda command: commands.append(list(command)))
 
-    with pytest.raises(SystemExit, match="unresolved template variables: AZURE_SUBSCRIPTION_ID"):
+    module.render_and_apply_manifests(
+        deploy_dir=deploy_dir,
+        rendered_dir=rendered_dir,
+        resource_group="rg",
+        environment={
+            "AZURE_FOLDER_ECONOMIC_CATALYST": "",
+            "SILVER_ECONOMIC_CATALYST_JOB": "",
+            "JOB_IMAGE": "registry/image@sha256:1234",
+        },
+    )
+
+    rendered = (rendered_dir / "job_defaults.yaml").read_text(encoding="utf-8")
+    assert "folder: economic-catalyst" in rendered
+    assert "nextJob: silver-economic-catalyst-job" in rendered
+    assert "image: registry/image@sha256:1234" in rendered
+    assert commands[0][3] == "create"
+
+
+def test_render_and_apply_manifests_fails_on_unresolved_placeholders(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    monkeypatch.setattr(module, "DEFAULT_ENV_TEMPLATE_PATH", tmp_path / "missing.env.template")
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir()
+    rendered_dir = tmp_path / "rendered"
+    (deploy_dir / "job_broken.yaml").write_text(
+        "name: broken-job\nsubscription: ${TOTALLY_UNKNOWN_PLACEHOLDER}\nimage: ${JOB_IMAGE}\n",
+        encoding="utf-8",
+    )
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "manifest_exists", lambda **_: False)
+    monkeypatch.setattr(module.subprocess, "check_call", lambda command: commands.append(list(command)))
+
+    with pytest.raises(SystemExit, match="unresolved template variables: TOTALLY_UNKNOWN_PLACEHOLDER"):
         module.render_and_apply_manifests(
             deploy_dir=deploy_dir,
             rendered_dir=rendered_dir,

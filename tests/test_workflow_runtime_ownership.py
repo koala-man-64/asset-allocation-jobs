@@ -40,6 +40,8 @@ STALE_DOC_REFERENCES = (
 API_BOOTSTRAP_JOB_MANIFESTS = (
     "job_backtests.yaml",
     "job_backtests_reconcile.yaml",
+    "job_intraday_monitor.yaml",
+    "job_intraday_market_refresh.yaml",
     "job_platinum_rankings.yaml",
     "job_symbol_cleanup.yaml",
 )
@@ -109,6 +111,20 @@ def test_api_backed_manual_jobs_define_control_plane_env_vars() -> None:
         assert "value: ${ASSET_ALLOCATION_API_BASE_URL}" in text, manifest_name
         assert "name: ASSET_ALLOCATION_API_SCOPE" in text, manifest_name
         assert "value: ${ASSET_ALLOCATION_API_SCOPE}" in text, manifest_name
+
+
+def test_intraday_job_manifests_run_on_weekday_five_minute_cadence() -> None:
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name in ("job_intraday_monitor.yaml", "job_intraday_market_refresh.yaml"):
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        assert "triggerType: Schedule" in text, manifest_name
+        assert 'cronExpression: "*/5 * * * 1-5"' in text, manifest_name
+
+
+def test_intraday_refresh_manifest_keeps_market_refresh_in_process() -> None:
+    text = (repo_root() / "deploy" / "job_intraday_market_refresh.yaml").read_text(encoding="utf-8")
+    assert 'command: ["python", "-m", "tasks.intraday_monitor.refresh_worker"]' in text
+    assert "TRIGGER_NEXT_JOB_NAME" not in text
 
 
 def test_market_job_manifests_use_contract_storage_account_variable() -> None:

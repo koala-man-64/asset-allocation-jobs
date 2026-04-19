@@ -24,6 +24,10 @@ GOLD_MARKET_OUTPUT_COLUMNS: tuple[str, ...] = (
     "low",
     "close",
     "volume",
+    "dividend_amount",
+    "split_coefficient",
+    "is_dividend_day",
+    "is_split_day",
     "return_1d",
     "return_5d",
     "return_20d",
@@ -227,6 +231,8 @@ _MARKET_INTEGER_BASE_COLUMNS: tuple[str, ...] = (
     "fib_in_value_zone",
     "is_bull",
     "is_bear",
+    "is_dividend_day",
+    "is_split_day",
 )
 
 GOLD_MARKET_INTEGER_COLUMNS: tuple[str, ...] = _MARKET_INTEGER_BASE_COLUMNS + tuple(

@@ -297,6 +297,10 @@ foreach ($row in $contractRows) {
             $results.Add([pscustomobject]@{ Name = $name; Value = $discovered.Value; Source = $discovered.Source; IsSecret = $false; PromptRequired = $false })
             continue
         }
+        if (-not [string]::IsNullOrWhiteSpace($defaultValue)) {
+            $results.Add([pscustomobject]@{ Name = $name; Value = $defaultValue; Source = "default"; IsSecret = $false; PromptRequired = $false })
+            continue
+        }
         if ($DryRun) {
             $results.Add([pscustomobject]@{ Name = $name; Value = $defaultValue; Source = "default"; IsSecret = $false; PromptRequired = $true })
             continue
@@ -304,6 +308,11 @@ foreach ($row in $contractRows) {
         $value = Prompt-PlainValue -Name $name -Suggestion $defaultValue -Description $description
         $source = if ([string]::IsNullOrWhiteSpace($value) -or $value -eq $defaultValue) { "default" } else { "prompted" }
         $results.Add([pscustomobject]@{ Name = $name; Value = (Normalize-EnvValue -Value $value); Source = $source; IsSecret = $false; PromptRequired = $false })
+        continue
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($defaultValue)) {
+        $results.Add([pscustomobject]@{ Name = $name; Value = $defaultValue; Source = "default"; IsSecret = $true; PromptRequired = $false })
         continue
     }
 
