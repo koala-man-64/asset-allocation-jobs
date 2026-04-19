@@ -73,7 +73,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
         "\n".join(
             [
                 "[project]",
-                'dependencies = ["asset-allocation-contracts==2.1.0", "asset-allocation-runtime-common==2.0.5"]',
+                'dependencies = ["asset-allocation-contracts==2.1.0", "asset-allocation-runtime-common==2.0.8"]',
                 "",
             ]
         ),
@@ -89,7 +89,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
 
     versions = module.validate_repo_shared_dependency_compatibility(repo_root=tmp_path, python_exe="/python")
 
-    assert versions == ("2.1.0", "2.0.5")
+    assert versions == ("2.1.0", "2.0.8")
     assert commands == [
         [
             "/python",
@@ -99,7 +99,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
             "--dry-run",
             "--ignore-installed",
             "asset-allocation-contracts==2.1.0",
-            "asset-allocation-runtime-common==2.0.5",
+            "asset-allocation-runtime-common==2.0.8",
         ]
     ]
 
@@ -120,7 +120,7 @@ def test_validate_shared_dependency_compatibility_surfaces_resolver_failure() ->
             module.validate_shared_dependency_compatibility(
                 python_exe="/python",
                 contracts_version="2.0.0",
-                runtime_common_version="2.0.5",
+                runtime_common_version="2.0.8",
             )
     finally:
         monkeypatch.undo()
@@ -597,6 +597,36 @@ def test_trigger_job_supports_results_reconcile_alias(monkeypatch: pytest.Monkey
             "start",
             "--name",
             "custom-results-reconcile-job",
+            "--resource-group",
+            "rg",
+        ]
+    ]
+
+
+def test_trigger_job_supports_symbol_cleanup_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/ops/trigger_job.py", "trigger_job_symbol_cleanup")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, check: commands.append(list(command)) or subprocess.CompletedProcess(command, 0),
+    )
+
+    resolved = module.start_job(
+        job_key="symbol-cleanup",
+        resource_group="rg",
+        environment={"SYMBOL_CLEANUP_JOB": "custom-symbol-cleanup-job"},
+    )
+
+    assert resolved == "custom-symbol-cleanup-job"
+    assert commands == [
+        [
+            "az",
+            "containerapp",
+            "job",
+            "start",
+            "--name",
+            "custom-symbol-cleanup-job",
             "--resource-group",
             "rg",
         ]
