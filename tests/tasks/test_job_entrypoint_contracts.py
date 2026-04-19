@@ -11,6 +11,10 @@ _ENTRYPOINT_LOCK_CASES: list[tuple[str, list[str]]] = [
     ("tasks/market_data/bronze_market_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
     ("tasks/earnings_data/bronze_earnings_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
     (
+        "tasks/economic_catalyst_data/bronze_economic_catalyst_data.py",
+        ['with mdc.JobLock(job_name, conflict_policy="fail")'],
+    ),
+    (
         "tasks/finance_data/bronze_finance_data.py",
         [
             "job_lock_factory = mdc.JobLock",
@@ -21,6 +25,10 @@ _ENTRYPOINT_LOCK_CASES: list[tuple[str, list[str]]] = [
     ("tasks/price_target_data/bronze_price_target_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
     ("tasks/market_data/silver_market_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
     ("tasks/earnings_data/silver_earnings_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
+    (
+        "tasks/economic_catalyst_data/silver_economic_catalyst_data.py",
+        ['with mdc.JobLock(job_name, conflict_policy="fail")'],
+    ),
     (
         "tasks/finance_data/silver_finance_data.py",
         [
@@ -35,6 +43,10 @@ _ENTRYPOINT_LOCK_CASES: list[tuple[str, list[str]]] = [
     ),
     ("tasks/earnings_data/gold_earnings_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
     ("tasks/finance_data/gold_finance_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
+    (
+        "tasks/economic_catalyst_data/gold_economic_catalyst_data.py",
+        ['with mdc.JobLock(job_name, conflict_policy="fail")'],
+    ),
     ("tasks/price_target_data/gold_price_target_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
     ("tasks/regime_data/gold_regime_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
 ]

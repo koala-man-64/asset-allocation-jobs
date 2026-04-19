@@ -275,3 +275,30 @@ def test_results_freshness_migration_creates_refresh_tables_and_canonical_run_co
     assert "ADD COLUMN IF NOT EXISTS canonical_target_id TEXT" in text
     assert "ADD COLUMN IF NOT EXISTS canonical_fingerprint TEXT" in text
     assert "fk_core_runs_canonical_target" in text
+
+
+def test_economic_catalyst_migration_creates_serving_tables_and_views() -> None:
+    repo_root = _repo_root()
+    migration = (
+        repo_root
+        / "deploy"
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0038_economic_catalyst_data.sql"
+    )
+    text = migration.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS core.economic_catalyst_source_state" in text
+    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_events" in text
+    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_event_versions" in text
+    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_headlines" in text
+    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_headline_versions" in text
+    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_mentions" in text
+    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_entity_daily" in text
+    assert "CREATE OR REPLACE VIEW gold.economic_catalyst_calendar_by_date AS" in text
+    assert "CREATE OR REPLACE VIEW gold.economic_catalyst_releases_by_date AS" in text
+    assert "CREATE OR REPLACE VIEW gold.economic_catalyst_headlines_by_date AS" in text
+    assert "CREATE OR REPLACE VIEW gold.economic_catalyst_entity_daily_by_date AS" in text
+    assert "GRANT SELECT ON TABLE gold.economic_catalyst_events TO backtest_service;" in text
+    assert "GRANT SELECT ON TABLE gold.economic_catalyst_entity_daily_by_date TO backtest_service;" in text

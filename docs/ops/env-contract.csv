@@ -16,6 +16,7 @@ AZURE_FOLDER_MARKET,deploy_var,var,deploy_config,true,Canonical market folder na
 AZURE_FOLDER_FINANCE,deploy_var,var,deploy_config,true,Canonical finance folder name.
 AZURE_FOLDER_EARNINGS,deploy_var,var,deploy_config,true,Canonical earnings folder name.
 AZURE_FOLDER_TARGETS,deploy_var,var,deploy_config,true,Canonical price-target folder name.
+AZURE_FOLDER_ECONOMIC_CATALYST,deploy_var,var,deploy_config,true,Canonical economic catalyst folder name.
 CONTRACTS_REPOSITORY,deploy_var,var,deploy_config,true,Sibling contracts repo slug used by workflows.
 CONTRACTS_REF,deploy_var,var,deploy_config,true,Contracts ref to validate against by default.
 CONTROL_PLANE_REPOSITORY,deploy_var,var,deploy_config,true,Sibling control-plane repo slug used by repository_dispatch.
@@ -25,15 +26,18 @@ BRONZE_MARKET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for b
 BRONZE_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze finance sync.
 BRONZE_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze price-target sync.
 BRONZE_EARNINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze earnings sync.
+BRONZE_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze economic catalyst sync.
 SILVER_MARKET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver market sync.
 SILVER_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver finance sync.
 SILVER_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver price-target sync.
 SILVER_EARNINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver earnings sync.
+SILVER_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver economic catalyst sync.
 GOLD_MARKET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold market sync.
 GOLD_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold finance sync.
 GOLD_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold price-target sync.
 GOLD_EARNINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold earnings sync.
 GOLD_REGIME_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for regime recompute.
+GOLD_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold economic catalyst sync.
 PLATINUM_RANKINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for platinum rankings.
 BACKTEST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for backtests.
 JOB_STARTUP_API_CONTAINER_APPS,deploy_var,var,deploy_config,true,Container Apps that jobs may wake before running. Default this to the internal control-plane app name.
@@ -44,10 +48,35 @@ ALPHA_VANTAGE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Alpha Vantage ti
 MASSIVE_FINANCE_FRESH_DAYS,deploy_var,var,deploy_config,true,Massive finance freshness window.
 MASSIVE_MAX_WORKERS,deploy_var,var,deploy_config,true,Massive worker concurrency.
 MASSIVE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Massive timeout.
+ECONOMIC_CATALYST_OFFICIAL_SOURCES,deploy_var,var,deploy_config,true,Comma-separated official-source fetchers for the economic catalyst bronze job.
+ECONOMIC_CATALYST_VENDOR_SOURCES,deploy_var,var,deploy_config,true,Comma-separated vendor-source fetchers for the economic catalyst bronze job.
+ECONOMIC_CATALYST_COUNTRY_SCOPE,deploy_var,var,deploy_config,true,Comma-separated country or region codes to keep in economic catalyst outputs.
+ECONOMIC_CATALYST_HIGH_IMPACT_GROUPS,deploy_var,var,deploy_config,true,Comma-separated canonical event groups treated as high-impact.
+ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS,deploy_var,var,deploy_config,true,Rolling structured-event replay window for economic catalyst ingestion.
+ECONOMIC_CATALYST_HEADLINE_CORRECTION_LOOKBACK_DAYS,deploy_var,var,deploy_config,true,Rolling headline replay window for economic catalyst ingestion.
+ECONOMIC_CATALYST_FUTURE_SCHEDULE_DAYS,deploy_var,var,deploy_config,true,Forward schedule horizon in days for economic catalyst event pulls.
+ECONOMIC_CATALYST_GENERAL_POLL_MINUTES,deploy_var,var,deploy_config,true,General full-source polling cadence in minutes for the bronze economic catalyst job.
+ECONOMIC_CATALYST_HOT_WINDOW_POLL_MINUTES,deploy_var,var,deploy_config,true,Hot-window polling cadence in minutes for headline and structured catalyst refreshes.
+ECONOMIC_CATALYST_ALPHA_VANTAGE_TOPICS,deploy_var,var,deploy_config,true,Alpha Vantage news topics used by the economic catalyst bronze job.
+ECONOMIC_CATALYST_FOMC_SCHEDULE_URLS,deploy_var,var,deploy_config,true,Comma-separated Federal Reserve schedule URLs used for FOMC calendar scraping.
+ECONOMIC_CATALYST_BLS_ICS_URL,deploy_var,var,deploy_config,true,BLS release calendar ICS URL.
+ECONOMIC_CATALYST_BEA_SCHEDULE_URL,deploy_var,var,deploy_config,true,BEA release schedule URL.
+ECONOMIC_CATALYST_ECB_CALENDAR_URL,deploy_var,var,deploy_config,true,ECB policy calendar URL.
+ECONOMIC_CATALYST_BOE_CALENDAR_URL,deploy_var,var,deploy_config,true,Bank of England MPC calendar URL.
+ECONOMIC_CATALYST_BOJ_SCHEDULE_URL,deploy_var,var,deploy_config,true,Bank of Japan release schedule URL.
+ECONOMIC_CATALYST_TREASURY_AUCTIONS_URL,deploy_var,var,deploy_config,true,Treasury auction calendar URL.
+ECONOMIC_CATALYST_NASDAQ_TABLES,deploy_var,var,deploy_config,true,JSON table mapping configuration for Nasdaq economic event tables.
+ECONOMIC_CATALYST_HTTP_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,HTTP timeout for economic catalyst source fetches.
 ASSET_ALLOCATION_API_BASE_URL,secret,secret,secret_store,true,Control-plane base URL used by jobs HTTP clients. Default to the internal ACA service URL http://asset-allocation-api-vnet; do not use a public ACA ingress FQDN in prod.
 ASSET_ALLOCATION_API_SCOPE,secret,secret,secret_store,true,Managed-identity scope used for jobs to control-plane auth. Auto-discovered from the asset-allocation-api Entra app when available.
 AZURE_STORAGE_CONNECTION_STRING,secret,secret,secret_store,true,Storage connection string. Never auto-discovered.
+FRED_API_KEY,secret,secret,secret_store,true,FRED API key for release calendar ingestion. Never auto-discovered.
+BEA_API_KEY,secret,secret,secret_store,true,BEA API key for supplemental release metadata. Never auto-discovered.
 NASDAQ_API_KEY,secret,secret,secret_store,true,Nasdaq API key. Never auto-discovered.
+MASSIVE_API_KEY,secret,secret,secret_store,true,Massive API key for Benzinga news ingestion. Never auto-discovered.
+ALPHA_VANTAGE_API_KEY,secret,secret,secret_store,true,Alpha Vantage API key for news and economic backfill. Never auto-discovered.
+ALPACA_KEY_ID,secret,secret,secret_store,true,Alpaca key id for news reconciliation. Never auto-discovered.
+ALPACA_SECRET_KEY,secret,secret,secret_store,true,Alpaca secret key for news reconciliation. Never auto-discovered.
 POSTGRES_DSN,secret,secret,secret_store,true,Jobs Postgres connection string. Never auto-discovered.
 PYTHON_PACKAGE_INDEX_URL,secret,secret,secret_store,false,Optional primary Python package index for CI and release workflows.
 PYTHON_PACKAGE_EXTRA_INDEX_URL,secret,secret,secret_store,false,Optional extra Python package index for CI and release workflows.

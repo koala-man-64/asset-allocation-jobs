@@ -4,6 +4,7 @@ Runtime-owned jobs repository for:
 - `tasks/` batch jobs and backtesting worker runtime
 - provider adapters in `alpha_vantage/`, `massive_provider/`, and `alpaca/`
 - jobs-side `core/` runtime modules
+- medallion pipelines for market, finance, earnings, price targets, regime state, and multi-source economic catalysts
 
 Local development installs versioned shared packages rather than sibling repos:
 
@@ -42,6 +43,7 @@ Canonical workflows live under `.github/workflows/`.
 - `scripts/sync-all-to-github.ps1` syncs the `.env.web` surface into repo vars and secrets.
 - `DEPLOYMENT_SETUP.md` is the canonical deploy, operate, and rollback runbook.
 - `docs/ops/networking-audit-2026-04-18.md` captures the live Azure networking posture observed on April 18, 2026 and the prioritized hardening backlog.
+- `docs/ops/economic-catalyst-data.md` documents the economic catalyst Bronze/Silver/Gold pipeline, Postgres serving tables, source precedence, and replay expectations.
 
 ## Backtesting
 

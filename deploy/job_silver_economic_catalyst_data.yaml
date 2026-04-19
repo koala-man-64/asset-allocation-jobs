@@ -1,0 +1,73 @@
+location: East US
+name: silver-economic-catalyst-job
+type: Microsoft.App/jobs
+tags:
+  owner: ${RESOURCE_TAG_OWNER}
+  cost-center: ${RESOURCE_TAG_COST_CENTER}
+  workload: ${RESOURCE_TAG_WORKLOAD}
+  environment: ${RESOURCE_TAG_ENVIRONMENT}
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    "${ACR_PULL_IDENTITY_RESOURCE_ID}": {}
+properties:
+  configuration:
+    triggerType: Manual
+    manualTriggerConfig:
+      parallelism: 1
+      replicaCompletionCount: 1
+    replicaRetryLimit: 2
+    replicaTimeout: 1800
+    registries:
+    - server: assetallocationacr.azurecr.io
+      identity: "${ACR_PULL_IDENTITY_RESOURCE_ID}"
+    secrets:
+    - name: azure-storage-connection-string
+      value: ${AZURE_STORAGE_CONNECTION_STRING}
+  environmentId: ${CONTAINER_APPS_ENVIRONMENT_ID}
+  template:
+    serviceAccountName: ${SERVICE_ACCOUNT_NAME}
+    containers:
+    - env:
+      - name: LOG_FORMAT
+        value: JSON
+      - name: LOG_LEVEL
+        value: INFO
+      - name: DISABLE_DOTENV
+        value: "true"
+      - name: SYSTEM_HEALTH_ARM_SUBSCRIPTION_ID
+        value: ${AZURE_SUBSCRIPTION_ID}
+      - name: SYSTEM_HEALTH_ARM_RESOURCE_GROUP
+        value: ${RESOURCE_GROUP}
+      - name: ASSET_ALLOCATION_API_BASE_URL
+        value: ${ASSET_ALLOCATION_API_BASE_URL}
+      - name: ASSET_ALLOCATION_API_SCOPE
+        value: ${ASSET_ALLOCATION_API_SCOPE}
+      - name: JOB_STARTUP_API_CONTAINER_APPS
+        value: ${JOB_STARTUP_API_CONTAINER_APPS}
+      - name: TRIGGER_NEXT_JOB_NAME
+        value: ${GOLD_ECONOMIC_CATALYST_JOB}
+      - name: AZURE_CLIENT_ID
+        value: ${ACR_PULL_IDENTITY_CLIENT_ID}
+      - name: AZURE_STORAGE_ACCOUNT_NAME
+        value: ${AZURE_STORAGE_ACCOUNT_NAME}
+      - name: AZURE_STORAGE_CONNECTION_STRING
+        secretRef: azure-storage-connection-string
+      - name: AZURE_CONTAINER_BRONZE
+        value: ${AZURE_CONTAINER_BRONZE}
+      - name: AZURE_CONTAINER_SILVER
+        value: ${AZURE_CONTAINER_SILVER}
+      - name: AZURE_CONTAINER_GOLD
+        value: ${AZURE_CONTAINER_GOLD}
+      - name: AZURE_CONTAINER_COMMON
+        value: ${AZURE_CONTAINER_COMMON}
+      - name: AZURE_FOLDER_ECONOMIC_CATALYST
+        value: ${AZURE_FOLDER_ECONOMIC_CATALYST}
+      image: ${JOB_IMAGE}
+      imageType: ContainerImage
+      name: silver-economic-catalyst-job
+      command: ["python", "-m", "tasks.economic_catalyst_data.silver_economic_catalyst_data"]
+      resources:
+        cpu: 2.0
+        memory: 4Gi
+  workloadProfileName: Consumption
