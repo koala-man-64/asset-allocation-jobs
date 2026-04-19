@@ -9,7 +9,7 @@ from asset_allocation_runtime_common.universe_repository import UniverseReposito
 def _build_transport(handler) -> ControlPlaneTransport:
     client = httpx.Client(transport=httpx.MockTransport(handler))
     return ControlPlaneTransport(
-        ControlPlaneTransportConfig(base_url="https://control-plane.example", api_scope="api://asset-allocation"),
+        ControlPlaneTransportConfig(base_url="http://asset-allocation-api-vnet", api_scope="api://asset-allocation"),
         http_client=client,
         access_token_provider=lambda: "test-token",
     )

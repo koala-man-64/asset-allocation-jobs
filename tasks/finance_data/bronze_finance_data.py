@@ -367,13 +367,28 @@ def _build_finance_bucket_row(
 
 
 def _load_alpha26_finance_row_map(*, symbols: set[str]) -> dict[tuple[str, str], dict[str, Any]]:
+    normalized_symbols = {str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()}
+    if not normalized_symbols:
+        return {}
+
     out: dict[tuple[str, str], dict[str, Any]] = {}
-    for bucket in bronze_bucketing.ALPHABET_BUCKETS:
+    bucket_columns = [
+        "symbol",
+        "report_type",
+        "payload_json",
+        "source_min_date",
+        "source_max_date",
+        "ingested_at",
+        "payload_hash",
+    ]
+    touched_buckets = sorted({bronze_bucketing.bucket_letter(symbol) for symbol in normalized_symbols})
+    for bucket in touched_buckets:
         try:
             df = bronze_bucketing.read_bucket_parquet(
                 client=bronze_client,
                 prefix="finance-data",
                 bucket=bucket,
+                columns=bucket_columns,
             )
         except Exception:
             continue
@@ -381,14 +396,29 @@ def _load_alpha26_finance_row_map(*, symbols: set[str]) -> dict[tuple[str, str],
             continue
         if "symbol" not in df.columns or "report_type" not in df.columns:
             continue
-        for _, row in df.iterrows():
+        filtered = df.copy()
+        filtered["symbol"] = filtered["symbol"].astype("string").str.strip().str.upper()
+        filtered["report_type"] = filtered["report_type"].astype("string").str.strip().str.lower()
+        filtered = filtered[
+            filtered["symbol"].isin(normalized_symbols)
+            & filtered["symbol"].notna()
+            & filtered["report_type"].notna()
+            & filtered["symbol"].ne("")
+            & filtered["report_type"].ne("")
+        ].copy()
+        if filtered.empty:
+            continue
+        filtered["ingested_at_sort"] = pd.to_datetime(filtered.get("ingested_at"), errors="coerce", utc=True)
+        filtered = filtered.sort_values(
+            ["symbol", "report_type", "ingested_at_sort"],
+            kind="stable",
+            na_position="first",
+        )
+        filtered = filtered.drop_duplicates(subset=["symbol", "report_type"], keep="last")
+        for row in filtered.to_dict("records"):
             symbol = str(row.get("symbol") or "").strip().upper()
             report_type = str(row.get("report_type") or "").strip().lower()
-            if not symbol or not report_type:
-                continue
-            if symbols and symbol not in symbols:
-                continue
-            candidate = {
+            out[(symbol, report_type)] = {
                 "symbol": symbol,
                 "report_type": report_type,
                 "payload_json": row.get("payload_json"),
@@ -397,18 +427,6 @@ def _load_alpha26_finance_row_map(*, symbols: set[str]) -> dict[tuple[str, str],
                 "ingested_at": row.get("ingested_at"),
                 "payload_hash": row.get("payload_hash"),
             }
-            key = (symbol, report_type)
-            existing = out.get(key)
-            if existing is None:
-                out[key] = candidate
-                continue
-            existing_ts = _parse_ingested_at(existing.get("ingested_at"))
-            candidate_ts = _parse_ingested_at(candidate.get("ingested_at"))
-            if existing_ts is None and candidate_ts is not None:
-                out[key] = candidate
-                continue
-            if existing_ts is not None and candidate_ts is not None and candidate_ts >= existing_ts:
-                out[key] = candidate
     return out
 
 

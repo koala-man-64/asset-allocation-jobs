@@ -60,7 +60,7 @@ def test_gateway_build_headers_include_bearer_token_and_caller_context(
 
     client = client_cls(
         config_cls(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=10.0,
         ),
@@ -87,7 +87,7 @@ def test_gateway_build_headers_build_provider_from_scope_when_needed(
 
     client = client_cls(
         config_cls(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=10.0,
         ),
@@ -104,7 +104,7 @@ def test_gateway_build_headers_build_provider_from_scope_when_needed(
 def test_gateway_from_env_enforces_timeout_floor(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     client_cls = case["client_cls"]
 
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet")
     monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://asset-allocation/.default")
     monkeypatch.setenv("ASSET_ALLOCATION_API_TIMEOUT_SECONDS", case["timeout_env"])
 
@@ -119,7 +119,7 @@ def test_massive_gateway_timeout_floor_warning_emits_once(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet")
     monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://asset-allocation/.default")
     monkeypatch.setenv("ASSET_ALLOCATION_API_TIMEOUT_SECONDS", "5")
     monkeypatch.setattr(massive_gateway_client_module, "_TIMEOUT_FLOOR_WARNING_EMITTED", False)
@@ -144,7 +144,7 @@ def test_massive_gateway_timeout_floor_warning_emits_once(
 def test_gateway_from_env_reads_api_scope(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     client_cls = case["client_cls"]
 
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet")
     monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://asset-allocation/.default")
 
     client = client_cls.from_env()
@@ -158,7 +158,7 @@ def test_gateway_from_env_reads_api_scope(case: dict[str, Any], monkeypatch: pyt
 def test_gateway_from_env_requires_api_scope(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     client_cls = case["client_cls"]
 
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet")
     monkeypatch.delenv("ASSET_ALLOCATION_API_SCOPE", raising=False)
 
     with pytest.raises(ValueError, match="ASSET_ALLOCATION_API_SCOPE is required"):
@@ -166,7 +166,7 @@ def test_gateway_from_env_requires_api_scope(case: dict[str, Any], monkeypatch: 
 
 
 @pytest.mark.parametrize("case", GATEWAY_CASES, ids=[c["id"] for c in GATEWAY_CASES])
-def test_gateway_public_warmup_reports_failure(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gateway_warmup_reports_failure(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     module = case["module"]
     client_cls = case["client_cls"]
     config_cls = case["config_cls"]
@@ -182,7 +182,7 @@ def test_gateway_public_warmup_reports_failure(case: dict[str, Any], monkeypatch
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
     client = client_cls(
         config_cls(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=case["timeout_floor"],
             warmup_enabled=True,
@@ -227,7 +227,7 @@ def test_gateway_request_fails_fast_when_readiness_never_recovers(
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
     client = client_cls(
         config_cls(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=case["timeout_floor"],
             warmup_enabled=True,

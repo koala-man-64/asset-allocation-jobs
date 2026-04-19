@@ -237,6 +237,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 
 - Jobs require `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE`.
 - Jobs call the control plane over authenticated HTTP via runtime-common transport and clients.
+- Prod jobs target the internal control-plane service URL `http://asset-allocation-api-vnet`; public ACA ingress FQDNs are out of contract for jobs runtime configuration.
 - Jobs must not import control-plane Python modules directly for normal runtime behavior.
 - Backtesting worker preflight depends on a dedicated authenticated readiness endpoint in the control plane before claim/start flow is allowed to proceed.
 - Universe selection payloads now use stable public field ids at the contract edge. Jobs resolves those ids to warehouse columns locally inside `core/strategy_engine/universe.py` and `core/ranking_engine/service.py`; the warehouse mapping is not part of the external contract.
@@ -251,7 +252,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
   - `AZURE_STORAGE_CONNECTION_STRING`
   - `NASDAQ_API_KEY`
   - `POSTGRES_DSN`
-- Secrets are never auto-discovered by the repo-local env bootstrap flow; existing values are reused or securely prompted.
+- The repo-local bootstrap seeds the control-plane bootstrap pair without public ingress discovery: `ASSET_ALLOCATION_API_BASE_URL` defaults to the internal service URL and `ASSET_ALLOCATION_API_SCOPE` is auto-discovered from Azure when possible. Other secrets are reused from `.env.web` or securely prompted.
 
 ### Workflow- and runbook-gated mutating operations
 

@@ -253,6 +253,57 @@ def test_process_batch_bronze_uses_watermark_and_appends_existing(
     asyncio.run(run_test())
 
 
+@patch("tasks.price_target_data.bronze_price_target_data.nasdaqdatalink")
+@patch("tasks.price_target_data.bronze_price_target_data.bronze_client")
+@patch("tasks.price_target_data.bronze_price_target_data.list_manager")
+def test_process_batch_bronze_alpha26_uses_existing_watermark_and_preserves_history(
+    mock_list_manager,
+    mock_client,
+    mock_nasdaq,
+):
+    del mock_client
+    symbol = "AAA"
+    existing_df = pd.DataFrame(
+        {
+            "ticker": [symbol],
+            "obs_date": [pd.Timestamp("2024-03-01")],
+            "tp_mean_est": [50.0],
+        }
+    )
+    collected_frames: dict[str, pd.DataFrame] = {}
+    mock_nasdaq.get_table.return_value = pd.DataFrame(
+        {
+            "ticker": [symbol],
+            "obs_date": [pd.Timestamp("2024-03-02")],
+            "tp_mean_est": [55.0],
+        }
+    )
+    semaphore = asyncio.Semaphore(1)
+
+    async def run_test():
+        summary = await bronze.process_batch_bronze(
+            [symbol],
+            semaphore,
+            write_symbol_files=False,
+            collected_symbol_frames=collected_frames,
+            alpha26_mode=True,
+            alpha26_existing_frames={symbol: existing_df},
+        )
+
+        assert summary["saved"] == 1
+        _, call_kwargs = mock_nasdaq.get_table.call_args
+        assert call_kwargs["obs_date"]["gte"] == "2024-03-02"
+        assert symbol in collected_frames
+        assert collected_frames[symbol]["ticker"].tolist() == [symbol, symbol]
+        assert pd.to_datetime(collected_frames[symbol]["obs_date"]).dt.strftime("%Y-%m-%d").tolist() == [
+            "2024-03-01",
+            "2024-03-02",
+        ]
+        mock_list_manager.add_to_whitelist.assert_called_with(symbol)
+
+    asyncio.run(run_test())
+
+
 @patch('tasks.price_target_data.bronze_price_target_data.nasdaqdatalink')
 @patch('tasks.price_target_data.bronze_price_target_data.bronze_client')
 @patch('tasks.price_target_data.bronze_price_target_data.list_manager')
@@ -287,7 +338,7 @@ def test_process_batch_bronze_missing_after_watermark_keeps_existing(
         ) as mock_store:
             summary = await bronze.process_batch_bronze([symbol], semaphore)
             assert summary["saved"] == 0
-            assert summary["filtered_missing"] == 1
+            assert summary["filtered_missing"] == 0
             mock_store.assert_not_called()
             mock_client.delete_file.assert_not_called()
             mock_list_manager.add_to_whitelist.assert_called_with(symbol)
@@ -464,6 +515,9 @@ def test_main_async_returns_success_when_only_filtered_missing_symbols_are_detec
         ), patch(
             "tasks.price_target_data.bronze_price_target_data.bronze_bucketing.is_alpha26_mode",
             return_value=False,
+        ), patch(
+            "tasks.price_target_data.bronze_price_target_data._list_flat_price_target_blob_infos",
+            return_value={},
         ), patch(
             "tasks.price_target_data.bronze_price_target_data.process_batch_bronze",
             new=AsyncMock(return_value={"filtered_missing": 1}),

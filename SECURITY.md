@@ -8,7 +8,7 @@ If GitHub Security Advisories are not available for this repo, report the issue 
 
 ## Authentication and Authorization
 
-- Jobs call the control-plane over HTTP using `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE`.
+- Jobs call the control-plane over HTTP using `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE`. Prod jobs are expected to use the internal service URL `http://asset-allocation-api-vnet`, not a public ingress endpoint.
 - `core/api_gateway_auth.py` acquires bearer tokens with Azure credentials and should fail closed when required auth inputs are missing.
 - GitHub Actions release and deploy workflows authenticate to Azure with OIDC variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`.
 

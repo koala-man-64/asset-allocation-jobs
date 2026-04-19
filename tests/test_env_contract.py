@@ -109,6 +109,8 @@ def test_env_bootstrap_scripts_handle_control_plane_bootstrap_secrets() -> None:
     assert "Test-CanAutoDiscoverSecretValue" in setup_text
     assert '"ASSET_ALLOCATION_API_BASE_URL"' in setup_text
     assert '"ASSET_ALLOCATION_API_SCOPE"' in setup_text
+    assert "asset-allocation-api-vnet" in setup_text
+    assert "Get-ContainerAppFqdn" not in setup_text
     assert "ASSET_ALLOCATION_API_BASE_URL" in sync_text
     assert "ASSET_ALLOCATION_API_SCOPE" in sync_text
 

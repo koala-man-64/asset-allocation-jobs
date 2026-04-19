@@ -25,7 +25,7 @@ def test_warmup_probe_retries_before_first_request(monkeypatch):
     monkeypatch.setattr(massive_gateway_client_module.time, "sleep", lambda _seconds: None)
     client = MassiveGatewayClient(
         MassiveGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=60.0,
             warmup_enabled=True,
@@ -65,7 +65,7 @@ def test_warmup_can_be_disabled(monkeypatch):
     monkeypatch.setattr(massive_gateway_client_module.time, "sleep", lambda _seconds: None)
     client = MassiveGatewayClient(
         MassiveGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=60.0,
             warmup_enabled=False,
@@ -95,7 +95,7 @@ def test_unified_snapshot_uses_batch_api_route() -> None:
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
     client = MassiveGatewayClient(
         MassiveGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=60.0,
             warmup_enabled=False,
@@ -127,7 +127,7 @@ def test_market_history_uses_aggregated_route() -> None:
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
     client = MassiveGatewayClient(
         MassiveGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=60.0,
             warmup_enabled=False,
@@ -160,7 +160,7 @@ def test_get_tickers_uses_reference_ticker_route() -> None:
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
     client = MassiveGatewayClient(
         MassiveGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=60.0,
             warmup_enabled=False,
@@ -193,7 +193,7 @@ def test_short_interest_uses_underscore_date_filters() -> None:
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
     client = MassiveGatewayClient(
         MassiveGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=60.0,
             warmup_enabled=False,
@@ -231,7 +231,7 @@ def test_short_volume_uses_underscore_date_filters() -> None:
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
     client = MassiveGatewayClient(
         MassiveGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=60.0,
             warmup_enabled=False,
@@ -269,7 +269,7 @@ def test_finance_valuation_uses_ratios_route() -> None:
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
     client = MassiveGatewayClient(
         MassiveGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=60.0,
             warmup_enabled=False,

@@ -623,6 +623,95 @@ def test_main_async_returns_success_when_symbol_is_only_invalid_candidate(unique
     asyncio.run(run_test())
 
 
+def test_main_async_skips_alpha26_preload_for_empty_buckets():
+    symbol = "AAPL"
+    client_manager = MagicMock()
+    load_calls: list[str] = []
+
+    def _fake_load_bucket(*, bucket: str) -> pd.DataFrame:
+        load_calls.append(bucket)
+        return _empty_existing_bucket_frame()
+
+    def _fake_download(
+        symbol: str,
+        _client_manager,
+        *,
+        collected_symbol_frames,
+        collected_lock=None,
+        existing_symbol_df=None,
+        **_,
+    ) -> None:
+        del _client_manager, collected_lock, existing_symbol_df
+        collected_symbol_frames[symbol] = pd.DataFrame(
+            [
+                {
+                    "Date": "2024-01-03",
+                    "Open": 10.0,
+                    "High": 11.0,
+                    "Low": 9.5,
+                    "Close": 10.5,
+                    "Volume": 100.0,
+                    "ShortInterest": None,
+                    "ShortVolume": None,
+                }
+            ]
+        )
+
+    async def run_test():
+        with patch("tasks.market_data.bronze_market_data._validate_environment"), patch(
+            "tasks.market_data.bronze_market_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.market_data.bronze_market_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.market_data.bronze_market_data._load_alpha26_existing_market_bucket",
+            side_effect=_fake_load_bucket,
+        ), patch(
+            "tasks.market_data.bronze_market_data._fetch_snapshot_daily_rows",
+            return_value={},
+        ), patch(
+            "tasks.market_data.bronze_market_data._ThreadLocalMassiveClientManager",
+            return_value=client_manager,
+        ), patch(
+            "tasks.market_data.bronze_market_data._get_max_workers",
+            return_value=1,
+        ), patch(
+            "tasks.market_data.bronze_market_data._download_and_save_raw_with_recovery",
+            side_effect=_fake_download,
+        ), patch(
+            "tasks.market_data.bronze_market_data.clear_invalid_candidate_marker"
+        ), patch(
+            "tasks.market_data.bronze_market_data.start_alpha26_bronze_publish",
+            return_value=object(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.write_alpha26_bronze_bucket",
+            return_value={"size": 1},
+        ), patch(
+            "tasks.market_data.bronze_market_data.finalize_alpha26_bronze_publish",
+            return_value=_fake_publish_result(written_symbols=1),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.market_data.bronze_market_data.mdc.write_line"
+        ), patch(
+            "tasks.market_data.bronze_market_data.mdc.write_warning"
+        ):
+            mock_list_manager.is_blacklisted.return_value = False
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        client_manager.close_all.assert_called_once()
+        assert load_calls == [bronze.bronze_bucketing.bucket_letter(symbol)]
+
+    asyncio.run(run_test())
+
+
 def test_main_async_records_no_history_candidate_for_market_history_gap(unique_ticker):
     symbol = unique_ticker
     client_manager = MagicMock()
@@ -861,7 +950,7 @@ def test_main_async_fails_closed_when_alpha26_preload_errors(unique_ticker):
 
         assert exit_code == 1
         mock_download.assert_not_called()
-        mock_write.assert_not_called()
+        assert mock_write.call_count > 0
         mock_finalize.assert_not_called()
         client_manager.close_all.assert_called_once()
 

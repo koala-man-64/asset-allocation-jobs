@@ -10,7 +10,10 @@ from core.backtest_runtime import (
     ResolvedBacktestDefinition,
     _apply_rebalance_target,
     _apply_trade_to_position,
+    _build_intraday_frames_by_timestamp,
     _build_snapshot_symbol_index,
+    _prepare_slow_snapshot_frames,
+    _snapshot_for_timestamp,
     execute_backtest_run,
     _market_row,
     _maybe_update_heartbeat,
@@ -287,6 +290,46 @@ def test_snapshot_symbol_index_reuses_preindexed_rows() -> None:
     assert sorted(index) == ["AAPL", "MSFT"]
     assert _market_row(index, "AAPL")["market_data__close"] == 20.0
     assert _market_row(index, "NVDA") is None
+
+
+def test_snapshot_for_timestamp_matches_preindexed_session_cache() -> None:
+    ts = datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc)
+    intraday_frames = {
+        "market_data": pd.DataFrame(
+            {
+                "as_of": [ts, ts, datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc)],
+                "symbol": ["AAPL", "MSFT", "AAPL"],
+                "market_data__close": [100.0, 200.0, 101.0],
+            }
+        ),
+        "signals": pd.DataFrame(
+            {
+                "as_of": [ts],
+                "symbol": ["AAPL"],
+                "signals__momentum": [1.5],
+            }
+        ),
+    }
+    slow_frames = {
+        "fundamentals": pd.DataFrame(
+            {
+                "as_of": [datetime(2026, 3, 2, tzinfo=timezone.utc), datetime(2026, 3, 2, tzinfo=timezone.utc)],
+                "symbol": ["AAPL", "MSFT"],
+                "fundamentals__pe": [20.0, 25.0],
+            }
+        )
+    }
+
+    baseline = _snapshot_for_timestamp(ts, intraday_frames=intraday_frames, slow_frames=slow_frames)
+    optimized = _snapshot_for_timestamp(
+        ts,
+        intraday_frames_by_ts=_build_intraday_frames_by_timestamp(intraday_frames),
+        prepared_slow_frames=_prepare_slow_snapshot_frames(slow_frames),
+    )
+
+    baseline = baseline.sort_values("symbol").reset_index(drop=True)
+    optimized = optimized.sort_values("symbol").reset_index(drop=True)
+    pd.testing.assert_frame_equal(optimized, baseline)
 
 
 def test_maybe_update_heartbeat_throttles_until_interval_elapses(monkeypatch: pytest.MonkeyPatch) -> None:

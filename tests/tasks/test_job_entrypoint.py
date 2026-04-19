@@ -11,7 +11,7 @@ def test_run_logged_job_logs_runtime_context_and_callback_lifecycle(
     messages: list[str] = []
     callback_calls: list[str] = []
 
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet")
     monkeypatch.setenv("TRIGGER_NEXT_JOB_NAME", "silver-market-job,gold-market-job")
     monkeypatch.setenv("CONTAINER_APP_JOB_EXECUTION_NAME", "exec-123")
     monkeypatch.setattr(job_entrypoint.mdc, "write_line", messages.append)

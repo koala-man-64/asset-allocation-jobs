@@ -264,32 +264,82 @@ def _load_slow_frames(
 def _snapshot_for_timestamp(
     ts: datetime,
     *,
-    intraday_frames: dict[str, pd.DataFrame],
-    slow_frames: dict[str, pd.DataFrame],
+    intraday_frames: dict[str, pd.DataFrame] | None = None,
+    slow_frames: dict[str, pd.DataFrame] | None = None,
+    intraday_frames_by_ts: dict[pd.Timestamp, list[pd.DataFrame]] | None = None,
+    prepared_slow_frames: list[pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
+    ts_key = pd.Timestamp(ts)
     frames: list[pd.DataFrame] = []
+    if intraday_frames_by_ts is not None:
+        frames.extend(frame.copy() for frame in intraday_frames_by_ts.get(ts_key, []))
+    else:
+        for frame in (intraday_frames or {}).values():
+            if frame.empty:
+                continue
+            exact = frame[frame["as_of"] == ts_key]
+            if exact.empty:
+                continue
+            frames.append(_prepare_snapshot_frame(exact))
+    if prepared_slow_frames is not None:
+        frames.extend(frame.copy() for frame in prepared_slow_frames)
+    else:
+        for frame in (slow_frames or {}).values():
+            if frame.empty:
+                continue
+            frames.append(_prepare_snapshot_frame(frame))
+    return _merge_snapshot_frames(ts_key, frames)
+
+
+def _prepare_snapshot_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=[column for column in frame.columns if column != "as_of"])
+    prepared = frame.drop(columns=["as_of"], errors="ignore")
+    if "symbol" not in prepared.columns:
+        return prepared.reset_index(drop=True)
+    return prepared.drop_duplicates(subset=["symbol"]).reset_index(drop=True)
+
+
+def _build_intraday_frames_by_timestamp(
+    intraday_frames: dict[str, pd.DataFrame],
+) -> dict[pd.Timestamp, list[pd.DataFrame]]:
+    frames_by_ts: dict[pd.Timestamp, list[pd.DataFrame]] = defaultdict(list)
     for frame in intraday_frames.values():
-        if frame.empty:
+        if frame.empty or "as_of" not in frame.columns:
             continue
-        exact = frame[frame["as_of"] == pd.Timestamp(ts)]
-        if exact.empty:
+        working = frame.copy()
+        working["as_of"] = pd.to_datetime(working["as_of"], utc=True, errors="coerce")
+        working = working.dropna(subset=["as_of"])
+        if working.empty:
             continue
-        frames.append(exact.drop(columns=["as_of"], errors="ignore"))
+        for as_of, exact in working.groupby("as_of", sort=False):
+            prepared = _prepare_snapshot_frame(exact)
+            if not prepared.empty:
+                frames_by_ts[pd.Timestamp(as_of)].append(prepared)
+    return frames_by_ts
+
+
+def _prepare_slow_snapshot_frames(slow_frames: dict[str, pd.DataFrame]) -> list[pd.DataFrame]:
+    prepared_frames: list[pd.DataFrame] = []
     for frame in slow_frames.values():
         if frame.empty:
             continue
-        frames.append(frame.drop(columns=["as_of"], errors="ignore"))
+        prepared = _prepare_snapshot_frame(frame)
+        if not prepared.empty:
+            prepared_frames.append(prepared)
+    return prepared_frames
 
+
+def _merge_snapshot_frames(ts: pd.Timestamp, frames: list[pd.DataFrame]) -> pd.DataFrame:
     merged: pd.DataFrame | None = None
     for frame in frames:
-        frame = frame.drop_duplicates(subset=["symbol"]).reset_index(drop=True)
         if merged is None:
             merged = frame.copy()
         else:
             merged = merged.merge(frame, on="symbol", how="outer")
     if merged is None:
         return pd.DataFrame(columns=["date", "symbol"])
-    merged["date"] = pd.Timestamp(ts)
+    merged["date"] = ts
     merged = merged.drop_duplicates(subset=["symbol"]).reset_index(drop=True)
     return merged
 
@@ -1355,6 +1405,9 @@ def execute_backtest_run(
             as_of_ts=session_schedule[-1],
             bar_size=bar_size,
         )
+        intraday_frames_by_ts = _build_intraday_frames_by_timestamp(intraday_frames)
+        prepared_slow_frames = _prepare_slow_snapshot_frames(slow_frames)
+        snapshot_cache: dict[pd.Timestamp, tuple[pd.DataFrame, dict[str, pd.Series]]] = {}
         _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="session_frames_loaded")
         intraday_row_count = sum(len(frame) for frame in intraday_frames.values())
         slow_row_count = sum(len(frame) for frame in slow_frames.values())
@@ -1367,9 +1420,25 @@ def execute_backtest_run(
             intraday_rows=intraday_row_count,
             slow_rows=slow_row_count,
         )
+
+        def _session_snapshot_context(ts: datetime) -> tuple[pd.DataFrame, dict[str, pd.Series]]:
+            cache_key = pd.Timestamp(ts)
+            cached = snapshot_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            snapshot = _snapshot_for_timestamp(
+                ts,
+                intraday_frames=intraday_frames,
+                slow_frames=slow_frames,
+                intraday_frames_by_ts=intraday_frames_by_ts,
+                prepared_slow_frames=prepared_slow_frames,
+            )
+            cached = (snapshot, _build_snapshot_symbol_index(snapshot))
+            snapshot_cache[cache_key] = cached
+            return cached
+
         for index, current_ts in enumerate(session_schedule):
-            snapshot = _snapshot_for_timestamp(current_ts, intraday_frames=intraday_frames, slow_frames=slow_frames)
-            snapshot_index = _build_snapshot_symbol_index(snapshot)
+            snapshot, snapshot_index = _session_snapshot_context(current_ts)
             price_bar_cache: dict[str, PriceBar] = {}
             _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="bar_loop")
             regime_row = regime_schedule_map.get(session_date)

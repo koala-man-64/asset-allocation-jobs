@@ -27,7 +27,7 @@ def test_warmup_probe_retries_before_first_request(monkeypatch):
     monkeypatch.setattr(alpha_vantage_gateway_client_module.time, "sleep", lambda _seconds: None)
     client = AlphaVantageGatewayClient(
         AlphaVantageGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=600.0,
             warmup_enabled=True,
@@ -67,7 +67,7 @@ def test_warmup_can_be_disabled(monkeypatch):
     monkeypatch.setattr(alpha_vantage_gateway_client_module.time, "sleep", lambda _seconds: None)
     client = AlphaVantageGatewayClient(
         AlphaVantageGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=600.0,
             warmup_enabled=False,
@@ -99,7 +99,7 @@ def test_get_earnings_calendar_csv_calls_calendar_route(monkeypatch):
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
     client = AlphaVantageGatewayClient(
         AlphaVantageGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=600.0,
             warmup_enabled=False,
@@ -148,7 +148,7 @@ def test_request_retries_after_retryable_gateway_status_with_extended_backoff(
     monkeypatch.setattr(alpha_vantage_gateway_client_module.time, "sleep", sleep_calls.append)
     client = AlphaVantageGatewayClient(
         AlphaVantageGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=600.0,
             warmup_enabled=True,
@@ -202,7 +202,7 @@ def test_request_raises_after_exhausting_retryable_gateway_status_budget(
     monkeypatch.setattr(alpha_vantage_gateway_client_module.time, "sleep", sleep_calls.append)
     client = AlphaVantageGatewayClient(
         AlphaVantageGatewayClientConfig(
-            base_url="http://asset-allocation-api",
+            base_url="http://asset-allocation-api-vnet",
             api_scope="api://asset-allocation/.default",
             timeout_seconds=600.0,
             warmup_enabled=True,

@@ -50,7 +50,7 @@ jobs:
       AZURE_STORAGE_ACCOUNT_NAME: localdev
       AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key;EndpointSuffix=core.windows.net
       AZURE_CONTAINER_COMMON: common
-      ASSET_ALLOCATION_API_BASE_URL: https://control-plane.example
+      ASSET_ALLOCATION_API_BASE_URL: http://asset-allocation-api-vnet
       ASSET_ALLOCATION_API_SCOPE: api://asset-allocation
       POSTGRES_DSN: postgresql://user:pass@localhost:5432/asset_allocation?sslmode=disable
     steps:

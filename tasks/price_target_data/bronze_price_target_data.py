@@ -6,7 +6,7 @@ import nasdaqdatalink
 import hashlib
 from datetime import datetime, date, timedelta, timezone
 from io import BytesIO
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.market_data import symbol_availability
@@ -148,6 +148,92 @@ def _load_existing_price_target_df(symbol: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _normalize_price_target_symbol(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
+def _coerce_blob_last_modified(value: object) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _list_flat_price_target_blob_infos() -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for blob in bronze_client.list_blob_infos(name_starts_with="price-target-data/"):
+        name = str(blob.get("name") or "").strip()
+        if not name.endswith(".parquet") or "/buckets/" in name:
+            continue
+        symbol = _normalize_price_target_symbol(name.rsplit("/", 1)[-1].removesuffix(".parquet"))
+        if not symbol:
+            continue
+        out[symbol] = {
+            "name": name,
+            "last_modified": _coerce_blob_last_modified(blob.get("last_modified")),
+        }
+    return out
+
+
+def _normalize_alpha26_existing_price_target_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    out = frame.copy()
+    if "symbol" not in out.columns or "obs_date" not in out.columns:
+        return pd.DataFrame()
+    out["symbol"] = out["symbol"].astype(str).str.strip().str.upper()
+    out["obs_date"] = pd.to_datetime(out["obs_date"], errors="coerce", utc=True).dt.tz_localize(None)
+    out = out.dropna(subset=["symbol", "obs_date"]).copy()
+    if out.empty:
+        return pd.DataFrame()
+    rename_map = {"symbol": "ticker"}
+    out = out.rename(columns=rename_map)
+    drop_columns = [column for column in ("ingested_at", "source_hash") if column in out.columns]
+    if drop_columns:
+        out = out.drop(columns=drop_columns)
+    return out.reset_index(drop=True)
+
+
+def _load_alpha26_existing_price_target_frames(*, symbols: set[str]) -> dict[str, pd.DataFrame]:
+    if not symbols:
+        return {}
+    out: dict[str, pd.DataFrame] = {}
+    touched_buckets = sorted({bronze_bucketing.bucket_letter(symbol) for symbol in symbols if symbol})
+    for bucket in touched_buckets:
+        try:
+            bucket_df = bronze_bucketing.read_bucket_parquet(
+                client=bronze_client,
+                prefix="price-target-data",
+                bucket=bucket,
+            )
+        except Exception:
+            continue
+        normalized = _normalize_alpha26_existing_price_target_frame(bucket_df)
+        if normalized.empty or "ticker" not in normalized.columns:
+            continue
+        filtered = normalized[normalized["ticker"].isin(symbols)].copy()
+        if filtered.empty:
+            continue
+        for symbol, group in filtered.groupby("ticker", sort=False):
+            clean_symbol = _normalize_price_target_symbol(symbol)
+            if not clean_symbol:
+                continue
+            out[clean_symbol] = group.reset_index(drop=True)
+    return out
+
+
 def _extract_max_obs_date(df: pd.DataFrame) -> Optional[date]:
     if df.empty or "obs_date" not in df.columns:
         return None
@@ -278,6 +364,8 @@ async def process_batch_bronze(
     collected_symbol_frames: Optional[Dict[str, pd.DataFrame]] = None,
     alpha26_mode: bool = False,
     success_progress: Optional[Dict[str, int]] = None,
+    flat_blob_infos: Optional[Dict[str, Dict[str, Any]]] = None,
+    alpha26_existing_frames: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> dict:
     batch_summary = {
         "requested": len(symbols),
@@ -337,29 +425,27 @@ async def process_batch_bronze(
         default_start_date = backfill_start or PRICE_TARGET_FULL_HISTORY_START_DATE
 
         for sym in symbols:
-            if alpha26_mode:
-                symbol_force_backfill[sym] = False
-                symbol_start_dates[sym] = default_start_date
-                stale_symbols.append(sym)
+            normalized_symbol = _normalize_price_target_symbol(sym)
+            if not normalized_symbol:
                 continue
-            blob_path = f"price-target-data/{sym}.parquet"
-            force_backfill = False
-            try:
-                blob = bronze_client.get_blob_client(blob_path)
-                exists = bool(blob.exists())
-                symbol_has_existing_blob[sym] = exists
-                if exists:
-                    props = blob.get_blob_properties()
-                    existing_df = _load_existing_price_target_df(sym)
-                    existing_frames[sym] = existing_df
+            if alpha26_mode:
+                force_backfill = False
+                existing_df = (
+                    alpha26_existing_frames.get(normalized_symbol, pd.DataFrame()).copy()
+                    if alpha26_existing_frames is not None
+                    else pd.DataFrame()
+                )
+                if not existing_df.empty:
+                    symbol_has_existing_blob[normalized_symbol] = True
+                    existing_frames[normalized_symbol] = existing_df
                     if backfill_start is not None:
                         batch_summary["coverage_checked"] += 1
                         existing_min = _extract_min_obs_date(existing_df)
-                        symbol_existing_min[sym] = existing_min
+                        symbol_existing_min[normalized_symbol] = existing_min
                         marker = load_coverage_marker(
                             common_client=common_client,
                             domain=_COVERAGE_DOMAIN,
-                            symbol=sym,
+                            symbol=normalized_symbol,
                         )
                         force_backfill, skipped_limited_marker = should_force_backfill(
                             existing_min_date=existing_min,
@@ -372,27 +458,83 @@ async def process_batch_bronze(
                             batch_summary["coverage_forced_refetch"] += 1
                         elif existing_min is not None and existing_min <= backfill_start:
                             _mark_coverage(
-                                symbol=sym,
+                                symbol=normalized_symbol,
                                 backfill_start=backfill_start,
                                 status="covered",
                                 earliest_available=existing_min,
                                 summary=batch_summary,
                             )
-                    age = datetime.now(timezone.utc) - props.last_modified
-                    if age.total_seconds() < 24 * 3600 and not force_backfill:
+                    existing_max = _extract_max_obs_date(existing_df)
+                    if existing_max is not None and not force_backfill:
+                        symbol_start_dates[normalized_symbol] = existing_max + timedelta(days=1)
+                symbol_force_backfill[normalized_symbol] = force_backfill
+                if force_backfill and backfill_start is not None:
+                    symbol_start_dates[normalized_symbol] = backfill_start
+                elif normalized_symbol not in symbol_start_dates:
+                    symbol_start_dates[normalized_symbol] = default_start_date
+                stale_symbols.append(normalized_symbol)
+                continue
+            blob_path = f"price-target-data/{normalized_symbol}.parquet"
+            force_backfill = False
+            try:
+                blob_info = (flat_blob_infos or {}).get(normalized_symbol)
+                exists = blob_info is not None
+                last_modified = _coerce_blob_last_modified((blob_info or {}).get("last_modified"))
+                if not exists:
+                    blob = bronze_client.get_blob_client(blob_path)
+                    exists = bool(blob.exists())
+                    if exists:
+                        props = blob.get_blob_properties()
+                        last_modified = _coerce_blob_last_modified(getattr(props, "last_modified", None))
+                symbol_has_existing_blob[normalized_symbol] = exists
+                if exists:
+                    is_recent = (
+                        last_modified is not None
+                        and (datetime.now(timezone.utc) - last_modified).total_seconds() < 24 * 3600
+                    )
+                    if not is_recent or backfill_start is not None:
+                        existing_df = _load_existing_price_target_df(normalized_symbol)
+                        existing_frames[normalized_symbol] = existing_df
+                    if backfill_start is not None:
+                        batch_summary["coverage_checked"] += 1
+                        existing_min = _extract_min_obs_date(existing_df)
+                        symbol_existing_min[normalized_symbol] = existing_min
+                        marker = load_coverage_marker(
+                            common_client=common_client,
+                            domain=_COVERAGE_DOMAIN,
+                            symbol=normalized_symbol,
+                        )
+                        force_backfill, skipped_limited_marker = should_force_backfill(
+                            existing_min_date=existing_min,
+                            backfill_start=backfill_start,
+                            marker=marker,
+                        )
+                        if skipped_limited_marker:
+                            batch_summary["coverage_skipped_limited_marker"] += 1
+                        if force_backfill:
+                            batch_summary["coverage_forced_refetch"] += 1
+                        elif existing_min is not None and existing_min <= backfill_start:
+                            _mark_coverage(
+                                symbol=normalized_symbol,
+                                backfill_start=backfill_start,
+                                status="covered",
+                                earliest_available=existing_min,
+                                summary=batch_summary,
+                            )
+                    if is_recent and not force_backfill:
                         continue
                     existing_max = _extract_max_obs_date(existing_df)
                     if existing_max is not None and not force_backfill:
-                        symbol_start_dates[sym] = existing_max + timedelta(days=1)
+                        symbol_start_dates[normalized_symbol] = existing_max + timedelta(days=1)
             except Exception:
                 pass
 
-            symbol_force_backfill[sym] = force_backfill
+            symbol_force_backfill[normalized_symbol] = force_backfill
             if force_backfill and backfill_start is not None:
-                symbol_start_dates[sym] = backfill_start
-            elif sym not in symbol_start_dates:
-                symbol_start_dates[sym] = default_start_date
-            stale_symbols.append(sym)
+                symbol_start_dates[normalized_symbol] = backfill_start
+            elif normalized_symbol not in symbol_start_dates:
+                symbol_start_dates[normalized_symbol] = default_start_date
+            stale_symbols.append(normalized_symbol)
 
         batch_summary["stale"] = len(stale_symbols)
         if not stale_symbols:
@@ -450,12 +592,16 @@ async def process_batch_bronze(
             symbol_min = symbol_start_dates.get(sym, default_start_date)
             force_backfill = bool(symbol_force_backfill.get(sym))
             symbol_df = grouped.get(sym, pd.DataFrame()).copy()
+            existing_df = existing_frames.get(sym)
+            has_existing_rows = existing_df is not None and not existing_df.empty
             coverage_status: Optional[str] = None
             if not symbol_df.empty and "obs_date" in symbol_df.columns:
                 symbol_df = symbol_df.loc[symbol_df["obs_date"] >= pd.Timestamp(symbol_min)].copy()
 
             if symbol_df.empty:
                 if backfill_start is not None and force_backfill:
+                    if alpha26_mode and has_existing_rows and collected_symbol_frames is not None:
+                        collected_symbol_frames[sym] = existing_df.copy()
                     _mark_coverage(
                         symbol=sym,
                         backfill_start=backfill_start,
@@ -470,6 +616,12 @@ async def process_batch_bronze(
                         disposition="limited_no_rows",
                         coverage_status="limited",
                     )
+                    continue
+                if has_existing_rows:
+                    if alpha26_mode and collected_symbol_frames is not None:
+                        collected_symbol_frames[sym] = existing_df.copy()
+                    list_manager.add_to_whitelist(sym)
+                    _log_symbol_processed_success(sym, disposition="skipped_no_new_rows")
                     continue
                 if backfill_start is not None:
                     failures_before_delete = int(batch_summary.get("save_failed", 0) or 0)
@@ -490,7 +642,6 @@ async def process_batch_bronze(
                 continue
 
             try:
-                existing_df = existing_frames.get(sym)
                 if existing_df is None and bool(symbol_has_existing_blob.get(sym)):
                     existing_df = _load_existing_price_target_df(sym)
                 if existing_df is not None and not existing_df.empty:
@@ -602,6 +753,11 @@ async def main_async() -> int:
     chunked_symbols = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
     semaphore = asyncio.Semaphore(3)
     success_progress = {"count": 0}
+    normalized_scheduled_symbols = {_normalize_price_target_symbol(symbol) for symbol in symbols if _normalize_price_target_symbol(symbol)}
+    flat_blob_infos = None if alpha26_mode else _list_flat_price_target_blob_infos()
+    alpha26_existing_frames = (
+        _load_alpha26_existing_price_target_frames(symbols=normalized_scheduled_symbols) if alpha26_mode else None
+    )
 
     bucket_symbol_frames: Dict[str, pd.DataFrame] = {}
     mdc.write_line(f"Starting Bronze Price Target Ingestion for {len(symbols)} symbols...")
@@ -614,6 +770,8 @@ async def main_async() -> int:
             collected_symbol_frames=bucket_symbol_frames if alpha26_mode else None,
             alpha26_mode=alpha26_mode,
             success_progress=success_progress,
+            flat_blob_infos=flat_blob_infos,
+            alpha26_existing_frames=alpha26_existing_frames,
         )
         for chunk in chunked_symbols
     ]

@@ -1345,7 +1345,10 @@ async def main_async() -> int:
                     for symbol in scheduled_bucket_symbols
                     if str(symbol or "").strip()
                 }
-                existing_bucket_frame = _load_alpha26_existing_market_bucket(bucket=bucket)
+                if scheduled_bucket_symbols:
+                    existing_bucket_frame = _load_alpha26_existing_market_bucket(bucket=bucket)
+                else:
+                    existing_bucket_frame = _empty_existing_market_bucket_frame()
                 loaded_existing_rows = int(existing_bucket_frame.shape[0])
                 scheduled_existing_frames, preserved_unscheduled_frames = _split_alpha26_existing_market_bucket_frames(
                     existing_bucket_frame,

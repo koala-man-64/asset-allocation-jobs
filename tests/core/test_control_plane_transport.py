@@ -11,13 +11,13 @@ from asset_allocation_runtime_common.control_plane_transport import (
 
 
 def test_transport_normalizes_base_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "https://control-plane.example/api/")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet/api/")
     monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://asset-allocation")
 
     transport = ControlPlaneTransport.from_env()
 
     try:
-        assert transport.config.base_url == "https://control-plane.example"
+        assert transport.config.base_url == "http://asset-allocation-api-vnet"
         assert transport.config.api_scope == "api://asset-allocation"
     finally:
         transport.close()
@@ -36,7 +36,7 @@ def test_transport_adds_auth_and_caller_headers(monkeypatch: pytest.MonkeyPatch)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     transport = ControlPlaneTransport(
-        ControlPlaneTransportConfig(base_url="https://control-plane.example", api_scope="api://asset-allocation"),
+        ControlPlaneTransportConfig(base_url="http://asset-allocation-api-vnet", api_scope="api://asset-allocation"),
         http_client=client,
         access_token_provider=lambda: "test-token",
     )
@@ -59,7 +59,7 @@ def test_transport_probe_uses_authenticated_get_request() -> None:
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     transport = ControlPlaneTransport(
-        ControlPlaneTransportConfig(base_url="https://control-plane.example", api_scope="api://asset-allocation"),
+        ControlPlaneTransportConfig(base_url="http://asset-allocation-api-vnet", api_scope="api://asset-allocation"),
         http_client=client,
         access_token_provider=lambda: "test-token",
     )
@@ -77,7 +77,7 @@ def test_transport_raises_control_plane_request_error_with_detail() -> None:
         transport=httpx.MockTransport(lambda request: httpx.Response(503, json={"detail": "Upstream unavailable"}))
     )
     transport = ControlPlaneTransport(
-        ControlPlaneTransportConfig(base_url="https://control-plane.example", api_scope="api://asset-allocation"),
+        ControlPlaneTransportConfig(base_url="http://asset-allocation-api-vnet", api_scope="api://asset-allocation"),
         http_client=client,
         access_token_provider=lambda: "test-token",
     )
@@ -95,7 +95,7 @@ def test_transport_raises_control_plane_request_error_with_detail() -> None:
 def test_transport_returns_none_for_empty_response_body() -> None:
     client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(204, content=b"")))
     transport = ControlPlaneTransport(
-        ControlPlaneTransportConfig(base_url="https://control-plane.example", api_scope="api://asset-allocation"),
+        ControlPlaneTransportConfig(base_url="http://asset-allocation-api-vnet", api_scope="api://asset-allocation"),
         http_client=client,
         access_token_provider=lambda: "test-token",
     )

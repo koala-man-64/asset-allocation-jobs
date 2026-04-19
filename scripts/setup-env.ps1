@@ -14,6 +14,8 @@ if ([string]::IsNullOrWhiteSpace($EnvFilePath)) {
 
 $contractPath = Join-Path $repoRoot "docs\ops\env-contract.csv"
 $templatePath = Join-Path $repoRoot ".env.template"
+$controlPlaneInternalAppName = "asset-allocation-api-vnet"
+$controlPlaneInternalBaseUrl = "http://$controlPlaneInternalAppName"
 
 function Test-CommandAvailable {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -169,13 +171,6 @@ function Select-PreferredName {
     return $Preferred
 }
 
-function Get-ContainerAppFqdn {
-    param([Parameter(Mandatory = $true)][string]$AppName)
-    $app = Invoke-JsonCommand -FilePath "az" -ArgumentList @("containerapp", "show", "--name", $AppName, "--resource-group", (Get-ResourceGroupName), "-o", "json")
-    if ($app -and $app.properties.configuration.ingress.fqdn) { return "https://$($app.properties.configuration.ingress.fqdn)" }
-    return ""
-}
-
 function Get-EntraAppClientId {
     param([Parameter(Mandatory = $true)][string]$DisplayName)
     $apps = Invoke-JsonCommand -FilePath "az" -ArgumentList @("ad", "app", "list", "--display-name", $DisplayName, "-o", "json")
@@ -232,14 +227,13 @@ function Resolve-DiscoveredValue {
             if ($slug) { return (New-Resolution -Value $slug -Source "git") }
         }
         "ASSET_ALLOCATION_API_BASE_URL" {
-            $fqdn = Get-ContainerAppFqdn -AppName "asset-allocation-api"
-            if ($fqdn) { return (New-Resolution -Value $fqdn -Source "azure") }
+            return (New-Resolution -Value $controlPlaneInternalBaseUrl -Source "default")
         }
         "ASSET_ALLOCATION_API_SCOPE" {
             $appId = Get-EntraAppClientId -DisplayName "asset-allocation-api"
             if ($appId) { return (New-Resolution -Value "api://$appId/.default" -Source "azure") }
         }
-        "JOB_STARTUP_API_CONTAINER_APPS" { return (New-Resolution -Value "asset-allocation-api" -Source "default") }
+        "JOB_STARTUP_API_CONTAINER_APPS" { return (New-Resolution -Value $controlPlaneInternalAppName -Source "default") }
         "AZURE_CLIENT_ID" {
             $identities = @(Get-UserAssignedIdentities)
             $candidate = @(

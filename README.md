@@ -27,6 +27,8 @@ Cross-repo control data is read from the control-plane over HTTP. Configure:
 - `ASSET_ALLOCATION_API_BASE_URL`
 - `ASSET_ALLOCATION_API_SCOPE`
 
+In prod, set `ASSET_ALLOCATION_API_BASE_URL` to the internal control-plane service URL `http://asset-allocation-api-vnet`. Do not point jobs at a public ACA ingress FQDN.
+
 ## Operations
 
 Canonical workflows live under `.github/workflows/`.

@@ -233,6 +233,99 @@ def test_fetch_and_save_raw_preserves_raw_payload_when_backfill_cutoff_is_set(un
     assert stored["source_max_date"] == "2024-03-31"
 
 
+def test_load_alpha26_finance_row_map_reads_only_touched_buckets_and_keeps_latest(monkeypatch: pytest.MonkeyPatch):
+    read_calls: list[tuple[str, tuple[str, ...] | None]] = []
+    expected_columns = (
+        "symbol",
+        "report_type",
+        "payload_json",
+        "source_min_date",
+        "source_max_date",
+        "ingested_at",
+        "payload_hash",
+    )
+
+    bucket_frames = {
+        bronze.bronze_bucketing.bucket_letter("AAPL"): pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "report_type": "balance_sheet",
+                    "payload_json": "{\"version\":\"old\"}",
+                    "source_min_date": "2024-03-31",
+                    "source_max_date": "2024-03-31",
+                    "ingested_at": "2026-01-01T00:00:00+00:00",
+                    "payload_hash": "old-hash",
+                },
+                {
+                    "symbol": "AAPL",
+                    "report_type": "balance_sheet",
+                    "payload_json": "{\"version\":\"new\"}",
+                    "source_min_date": "2024-03-31",
+                    "source_max_date": "2024-06-30",
+                    "ingested_at": "2026-02-01T00:00:00+00:00",
+                    "payload_hash": "new-hash",
+                },
+                {
+                    "symbol": "AMZN",
+                    "report_type": "cash_flow",
+                    "payload_json": "{\"ignore\":true}",
+                    "source_min_date": "2024-03-31",
+                    "source_max_date": "2024-03-31",
+                    "ingested_at": "2026-02-01T00:00:00+00:00",
+                    "payload_hash": "ignore-hash",
+                },
+            ]
+        ),
+        bronze.bronze_bucketing.bucket_letter("MSFT"): pd.DataFrame(
+            [
+                {
+                    "symbol": "MSFT",
+                    "report_type": "cash_flow",
+                    "payload_json": "{\"version\":\"older\"}",
+                    "source_min_date": "2024-03-31",
+                    "source_max_date": "2024-03-31",
+                    "ingested_at": "2026-01-15T00:00:00+00:00",
+                    "payload_hash": "msft-old",
+                },
+                {
+                    "symbol": "MSFT",
+                    "report_type": "cash_flow",
+                    "payload_json": "{\"version\":\"latest\"}",
+                    "source_min_date": "2024-03-31",
+                    "source_max_date": "2024-09-30",
+                    "ingested_at": "2026-03-15T00:00:00+00:00",
+                    "payload_hash": "msft-new",
+                },
+            ]
+        ),
+    }
+
+    def _fake_read_bucket_parquet(*, client, prefix: str, bucket: str, columns=None):
+        del client
+        assert prefix == "finance-data"
+        read_calls.append((bucket, tuple(columns) if columns is not None else None))
+        return bucket_frames.get(bucket, pd.DataFrame(columns=columns or []))
+
+    monkeypatch.setattr(bronze.bronze_bucketing, "read_bucket_parquet", _fake_read_bucket_parquet)
+
+    rows = bronze._load_alpha26_finance_row_map(symbols={"AAPL", "MSFT"})
+
+    expected_buckets = sorted(
+        {
+            bronze.bronze_bucketing.bucket_letter("AAPL"),
+            bronze.bronze_bucketing.bucket_letter("MSFT"),
+        }
+    )
+    assert [bucket for bucket, _ in read_calls] == expected_buckets
+    assert all(columns == expected_columns for _, columns in read_calls)
+    assert set(rows) == {("AAPL", "balance_sheet"), ("MSFT", "cash_flow")}
+    assert rows[("AAPL", "balance_sheet")]["payload_hash"] == "new-hash"
+    assert rows[("AAPL", "balance_sheet")]["source_max_date"] == "2024-06-30"
+    assert rows[("MSFT", "cash_flow")]["payload_hash"] == "msft-new"
+    assert rows[("MSFT", "cash_flow")]["source_max_date"] == "2024-09-30"
+
+
 def test_fetch_and_save_raw_coverage_gap_overrides_fresh_current_payload(unique_ticker):
     symbol = unique_ticker
     existing_payload = {

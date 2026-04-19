@@ -69,6 +69,21 @@ def test_jobs_deployment_docs_point_to_control_plane_for_shared_bootstrap() -> N
     text = (repo_root() / "DEPLOYMENT_SETUP.md").read_text(encoding="utf-8")
     assert "asset-allocation-control-plane" in text
     assert "scripts\\ops\\provision\\provision_azure.ps1" in text
+    assert "http://asset-allocation-api-vnet" in text
+
+
+def test_jobs_bootstrap_defaults_internal_control_plane_target() -> None:
+    env_template = (repo_root() / ".env.template").read_text(encoding="utf-8")
+    assert "JOB_STARTUP_API_CONTAINER_APPS=asset-allocation-api-vnet" in env_template
+    assert "ASSET_ALLOCATION_API_BASE_URL=http://asset-allocation-api-vnet" in env_template
+
+    readme_text = (repo_root() / "README.md").read_text(encoding="utf-8")
+    assert "http://asset-allocation-api-vnet" in readme_text
+
+    for workflow_name in ("quality.yml", "integration.yml"):
+        workflow_text = (repo_root() / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+        assert "ASSET_ALLOCATION_API_BASE_URL: http://asset-allocation-api-vnet" in workflow_text, workflow_name
+        assert "https://control-plane.example" not in workflow_text, workflow_name
 
 
 def test_jobs_repo_does_not_ship_control_plane_or_ui_assets() -> None:
