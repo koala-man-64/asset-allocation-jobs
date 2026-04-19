@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from tasks.economic_catalyst_data import constants
 from tasks.economic_catalyst_data.bronze_economic_catalyst_data import _selected_sources
 from tasks.economic_catalyst_data.config import EconomicCatalystConfig, NasdaqTableConfig
 
@@ -12,18 +11,13 @@ def _config() -> EconomicCatalystConfig:
         bronze_container="bronze",
         silver_container="silver",
         gold_container="gold",
-        common_container="common",
         official_sources=("fred_releases", "bls_release_calendar", "bea_release_schedule"),
         vendor_sources=("nasdaq_tables", "massive_news", "alpaca_news", "alpha_vantage_news"),
-        country_scope=("US", "EA", "GB", "JP"),
-        high_impact_groups=constants.HIGH_IMPACT_DEFAULT_GROUPS,
         structured_lookback_days=90,
         headline_lookback_days=14,
         future_schedule_days=180,
         general_poll_minutes=15,
-        hot_window_poll_minutes=5,
         fred_api_key="fred",
-        bea_api_key="bea",
         alpha_vantage_api_key="av",
         massive_api_key="massive",
         alpaca_key_id="alpaca-key",
