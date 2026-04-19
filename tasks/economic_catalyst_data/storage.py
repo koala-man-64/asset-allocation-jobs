@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import pandas as pd
 
@@ -103,4 +103,3 @@ def write_domain_artifact(
         payload["metadata"] = dict(extra_metadata)
     mdc.save_json_content(payload, constants.DOMAIN_ARTIFACT_PATH, client=client)
     return payload
-

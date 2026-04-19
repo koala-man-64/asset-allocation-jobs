@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import httpx
 import nasdaqdatalink
@@ -13,7 +12,7 @@ from alpha_vantage import AlphaVantageClient
 from alpha_vantage.config import AlphaVantageConfig
 from asset_allocation_runtime_common.market_data import core as mdc
 
-from tasks.economic_catalyst_data.config import EconomicCatalystConfig, NasdaqTableConfig
+from tasks.economic_catalyst_data.config import EconomicCatalystConfig
 
 
 @dataclass(frozen=True)

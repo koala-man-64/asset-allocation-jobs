@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
-import pandas as pd
-
 from asset_allocation_runtime_common.market_data import core as mdc
 
 from tasks.common.job_status import resolve_job_run_status
@@ -182,4 +180,3 @@ if __name__ == "__main__":
                 ),
             )
         )
-

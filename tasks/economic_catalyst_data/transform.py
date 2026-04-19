@@ -6,7 +6,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import UTC, date, datetime
 from io import BytesIO
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 from zoneinfo import ZoneInfo
 
 import pandas as pd
