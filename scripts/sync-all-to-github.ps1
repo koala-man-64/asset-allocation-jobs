@@ -37,7 +37,9 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "GitHub CLI (gh
 $envMap = Parse-EnvFile -Path $envPath
 $contractMap = Load-EnvContract -Path $contractPath
 $undocumented = @($envMap.Keys | Where-Object { -not $contractMap.ContainsKey($_) } | Sort-Object -Unique)
-if ($undocumented.Count -gt 0) { throw ".env.web contains undocumented keys: $($undocumented -join ', ')" }
+if ($undocumented.Count -gt 0) {
+    Write-Host "Ignoring undocumented .env.web keys: $($undocumented -join ', ')" -ForegroundColor Yellow
+}
 
 $requiredControlPlaneSecrets = @(
     "ASSET_ALLOCATION_API_BASE_URL",
