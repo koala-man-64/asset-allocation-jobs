@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+CommandSpec = tuple[list[str], pathlib.Path]
 
 FAST_TESTS = [
     "tests/test_env_contract.py",
@@ -59,17 +60,21 @@ def run(argv: list[str], cwd: pathlib.Path) -> int:
     return completed.returncode
 
 
-def build_command(gate: str) -> tuple[list[str], pathlib.Path]:
+def build_commands(gate: str) -> list[CommandSpec]:
     python = resolve_python()
-    gates: dict[str, tuple[list[str], pathlib.Path]] = {
-        "lint-python": ([python, "-m", "ruff", "check", "."], REPO_ROOT),
-        "format-python": ([python, "-m", "ruff", "format", "."], REPO_ROOT),
-        "lint-fix-python": ([python, "-m", "ruff", "check", "--fix", "."], REPO_ROOT),
-        "test-fast": ([python, "-m", "pytest", "-q", *FAST_TESTS], REPO_ROOT),
-        "test-backtesting-runtime": ([python, "-m", "pytest", "-q", *BACKTESTING_RUNTIME_TESTS], REPO_ROOT),
-        "test-control-plane-compat": ([python, "-m", "pytest", "-q", *CONTROL_PLANE_COMPAT_TESTS], REPO_ROOT),
-        "test-runtime-common-compat": ([python, "-m", "pytest", "-q", *RUNTIME_COMMON_COMPAT_TESTS], REPO_ROOT),
-        "test-full": ([python, "-m", "pytest", "-q"], REPO_ROOT),
+    gates: dict[str, list[CommandSpec]] = {
+        "check-fast": [
+            ([python, "-m", "ruff", "check", "."], REPO_ROOT),
+            ([python, "-m", "pytest", "-q", *FAST_TESTS], REPO_ROOT),
+        ],
+        "lint-python": [([python, "-m", "ruff", "check", "."], REPO_ROOT)],
+        "format-python": [([python, "-m", "ruff", "format", "."], REPO_ROOT)],
+        "lint-fix-python": [([python, "-m", "ruff", "check", "--fix", "."], REPO_ROOT)],
+        "test-fast": [([python, "-m", "pytest", "-q", *FAST_TESTS], REPO_ROOT)],
+        "test-backtesting-runtime": [([python, "-m", "pytest", "-q", *BACKTESTING_RUNTIME_TESTS], REPO_ROOT)],
+        "test-control-plane-compat": [([python, "-m", "pytest", "-q", *CONTROL_PLANE_COMPAT_TESTS], REPO_ROOT)],
+        "test-runtime-common-compat": [([python, "-m", "pytest", "-q", *RUNTIME_COMMON_COMPAT_TESTS], REPO_ROOT)],
+        "test-full": [([python, "-m", "pytest", "-q"], REPO_ROOT)],
     }
     if gate not in gates:
         available = ", ".join(sorted(gates))
@@ -80,8 +85,11 @@ def build_command(gate: str) -> tuple[list[str], pathlib.Path]:
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         raise SystemExit("Usage: python3 scripts/run_quality_gate.py <gate>")
-    command, cwd = build_command(argv[1])
-    return run(command, cwd)
+    for command, cwd in build_commands(argv[1]):
+        exit_code = run(command, cwd)
+        if exit_code != 0:
+            return exit_code
+    return 0
 
 
 if __name__ == "__main__":

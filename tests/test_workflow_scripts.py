@@ -544,3 +544,39 @@ def test_trigger_job_supports_results_reconcile_alias(monkeypatch: pytest.Monkey
             "rg",
         ]
     ]
+
+
+def test_check_fast_gate_runs_ruff_before_fast_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/run_quality_gate.py", "run_quality_gate")
+    commands: list[tuple[list[str], Path]] = []
+
+    monkeypatch.setattr(module, "resolve_python", lambda: "/python")
+    monkeypatch.setattr(module, "run", lambda command, cwd: commands.append((list(command), cwd)) or 0)
+
+    exit_code = module.main(["scripts/run_quality_gate.py", "check-fast"])
+
+    assert exit_code == 0
+    assert commands == [
+        (["/python", "-m", "ruff", "check", "."], module.REPO_ROOT),
+        (["/python", "-m", "pytest", "-q", *module.FAST_TESTS], module.REPO_ROOT),
+    ]
+
+
+def test_check_fast_gate_stops_after_first_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/run_quality_gate.py", "run_quality_gate_failure")
+    commands: list[tuple[list[str], Path]] = []
+
+    monkeypatch.setattr(module, "resolve_python", lambda: "/python")
+
+    def fake_run(command: list[str], cwd: Path) -> int:
+        commands.append((list(command), cwd))
+        return 1 if command[:4] == ["/python", "-m", "ruff", "check"] else 0
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    exit_code = module.main(["scripts/run_quality_gate.py", "check-fast"])
+
+    assert exit_code == 1
+    assert commands == [
+        (["/python", "-m", "ruff", "check", "."], module.REPO_ROOT),
+    ]

@@ -67,6 +67,10 @@ extend-exclude = [
     "tmp",
     "dist",
     "build",
+    "artifacts",
+    ".codex-pytest-tmp",
+    ".tmp_pytest",
+    ".tmp_pytest_*",
 ]
 
 [tool.ruff.lint]

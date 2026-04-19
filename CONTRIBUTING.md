@@ -15,6 +15,12 @@ Use Python 3.14 for local jobs-runtime work so local installs match CI and conta
 ## Day-to-Day Checks
 
 ```bash
+python3 scripts/run_quality_gate.py check-fast
+```
+
+Run the pieces separately while iterating:
+
+```bash
 python3 scripts/run_quality_gate.py lint-python
 python3 scripts/run_quality_gate.py test-fast
 python3 scripts/run_quality_gate.py test-full
