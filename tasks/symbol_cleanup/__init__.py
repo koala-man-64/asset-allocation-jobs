@@ -1,0 +1,1 @@
+"""Symbol cleanup worker package."""

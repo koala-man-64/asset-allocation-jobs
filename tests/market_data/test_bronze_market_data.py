@@ -25,6 +25,38 @@ def _market_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _adjusted_daily_csv(rows: list[dict[str, object]]) -> str:
+    headers = [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "adjusted close",
+        "volume",
+        "dividend amount",
+        "split coefficient",
+    ]
+    lines = [",".join(headers)]
+    for row in rows:
+        lines.append(
+            ",".join(
+                str(
+                    row.get(
+                        column,
+                        {
+                            "adjusted close": row.get("close", ""),
+                            "dividend amount": 0.0,
+                            "split coefficient": 1.0,
+                        }.get(column, ""),
+                    )
+                )
+                for column in headers
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _sync_result() -> bronze.symbol_availability.SyncResult:
     return bronze.symbol_availability.SyncResult(
         provider="massive",
@@ -112,6 +144,82 @@ def test_download_and_stage_market_data_fetches_full_history_for_new_symbol(uniq
     assert float(staged["ShortVolume"].iloc[-1]) == pytest.approx(500.0)
 
 
+def test_download_enriches_market_data_with_alpha_vantage_corporate_actions(unique_ticker):
+    symbol = unique_ticker
+    mock_massive = MagicMock()
+    mock_massive.get_market_history.return_value = {
+        "symbol": symbol,
+        "status": "ok",
+        "rows": [
+            {
+                "date": "2024-01-02",
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10.5,
+                "volume": 100,
+                "short_interest": 1000,
+                "short_volume": 400,
+            },
+            {
+                "date": "2024-01-03",
+                "open": 10.5,
+                "high": 12,
+                "low": 10,
+                "close": 11,
+                "volume": 150,
+                "short_interest": 1200,
+                "short_volume": 500,
+            },
+        ],
+    }
+    mock_av = MagicMock()
+    mock_av.get_daily_time_series_csv.return_value = _adjusted_daily_csv(
+        [
+            {
+                "timestamp": "2024-01-02",
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10.5,
+                "volume": 100,
+                "dividend amount": 0.0,
+                "split coefficient": 1.0,
+            },
+            {
+                "timestamp": "2024-01-03",
+                "open": 10.5,
+                "high": 12,
+                "low": 10,
+                "close": 11,
+                "volume": 150,
+                "dividend amount": 0.25,
+                "split coefficient": 1.0,
+            },
+        ]
+    )
+    collected_frames: dict[str, pd.DataFrame] = {}
+
+    with patch("tasks.market_data.bronze_market_data.list_manager") as mock_list_manager:
+        mock_list_manager.is_blacklisted.return_value = False
+
+        bronze.download_and_save_raw(
+            symbol,
+            mock_massive,
+            collected_symbol_frames=collected_frames,
+            alpha_vantage_client=mock_av,
+        )
+
+    _, av_kwargs = mock_av.get_daily_time_series_csv.call_args
+    assert av_kwargs["symbol"] == symbol
+    assert av_kwargs["adjusted"] is True
+    assert av_kwargs["outputsize"] == "full"
+    staged = collected_frames[symbol]
+    assert float(staged.loc[staged["Date"] == "2024-01-02", "DividendAmount"].iloc[0]) == pytest.approx(0.0)
+    assert float(staged.loc[staged["Date"] == "2024-01-03", "DividendAmount"].iloc[0]) == pytest.approx(0.25)
+    assert float(staged.loc[staged["Date"] == "2024-01-03", "SplitCoefficient"].iloc[0]) == pytest.approx(1.0)
+
+
 def test_no_history_payload_marks_symbol_as_coverage_unavailable(unique_ticker):
     symbol = unique_ticker
     mock_massive = MagicMock()
@@ -166,6 +274,59 @@ def test_no_history_with_existing_data_stages_existing_frame_and_does_not_blackl
         mock_list_manager.add_to_whitelist.assert_called_once_with(symbol)
 
     pd.testing.assert_frame_equal(collected_frames[symbol], bronze._canonical_market_df(existing_df))
+
+
+def test_no_history_with_existing_data_backfills_corporate_actions_from_alpha_vantage(unique_ticker):
+    symbol = unique_ticker
+    mock_massive = MagicMock()
+    mock_massive.get_market_history.return_value = {"symbol": symbol, "status": "no_history", "rows": []}
+    mock_av = MagicMock()
+    mock_av.get_daily_time_series_csv.return_value = _adjusted_daily_csv(
+        [
+            {
+                "timestamp": "2024-01-03",
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.0,
+                "close": 10.5,
+                "volume": 100.0,
+                "dividend amount": 0.0,
+                "split coefficient": 1.0,
+            }
+        ]
+    )
+    existing_df = _market_frame(
+        [
+            {
+                "Date": "2024-01-03",
+                "Open": 10.0,
+                "High": 11.0,
+                "Low": 9.0,
+                "Close": 10.5,
+                "Volume": 100.0,
+                "ShortInterest": 1000.0,
+                "ShortVolume": 500.0,
+            }
+        ]
+    )
+    collected_frames: dict[str, pd.DataFrame] = {}
+
+    with patch("tasks.market_data.bronze_market_data.list_manager") as mock_list_manager:
+        mock_list_manager.is_blacklisted.return_value = False
+        bronze.download_and_save_raw(
+            symbol,
+            mock_massive,
+            collected_symbol_frames=collected_frames,
+            existing_symbol_df=existing_df,
+            alpha_vantage_client=mock_av,
+        )
+
+        mock_list_manager.add_to_blacklist.assert_not_called()
+        mock_list_manager.add_to_whitelist.assert_called_once_with(symbol)
+
+    staged = collected_frames[symbol]
+    assert float(staged.loc[0, "DividendAmount"]) == pytest.approx(0.0)
+    assert float(staged.loc[0, "SplitCoefficient"]) == pytest.approx(1.0)
 
 
 def test_download_allows_regime_required_symbol_even_when_blacklisted():
@@ -306,6 +467,97 @@ def test_download_uses_existing_data_window_and_merges(unique_ticker):
     assert float(staged.loc[staged["Date"] == "2024-01-04", "ShortInterest"].iloc[0]) == pytest.approx(1500.0)
 
 
+def test_download_uses_compact_alpha_vantage_incremental_refresh_when_existing_actions_are_complete(unique_ticker):
+    symbol = unique_ticker
+    mock_massive = MagicMock()
+    mock_massive.get_market_history.return_value = {
+        "symbol": symbol,
+        "status": "ok",
+        "rows": [
+            {
+                "date": "2024-01-03",
+                "open": 20,
+                "high": 21,
+                "low": 19,
+                "close": 20.5,
+                "volume": 200,
+                "short_interest": 1000,
+                "short_volume": 500,
+            },
+            {
+                "date": "2024-01-04",
+                "open": 21,
+                "high": 22,
+                "low": 20,
+                "close": 21.5,
+                "volume": 250,
+                "short_interest": 1500,
+                "short_volume": 700,
+            },
+        ],
+    }
+    mock_av = MagicMock()
+    mock_av.get_daily_time_series_csv.return_value = _adjusted_daily_csv(
+        [
+            {
+                "timestamp": "2024-01-03",
+                "open": 20,
+                "high": 21,
+                "low": 19,
+                "close": 20.5,
+                "volume": 200,
+                "dividend amount": 0.0,
+                "split coefficient": 1.0,
+            },
+            {
+                "timestamp": "2024-01-04",
+                "open": 21,
+                "high": 22,
+                "low": 20,
+                "close": 21.5,
+                "volume": 250,
+                "dividend amount": 0.0,
+                "split coefficient": 2.0,
+            },
+        ]
+    )
+    existing_df = _market_frame(
+        [
+            {
+                "Date": "2024-01-03",
+                "Open": 11.0,
+                "High": 12.0,
+                "Low": 10.0,
+                "Close": 11.5,
+                "Volume": 120.0,
+                "ShortInterest": 1000.0,
+                "ShortVolume": 500.0,
+                "DividendAmount": 0.0,
+                "SplitCoefficient": 1.0,
+            },
+        ]
+    )
+    collected_frames: dict[str, pd.DataFrame] = {}
+
+    with patch("tasks.market_data.bronze_market_data.list_manager") as mock_list_manager, patch(
+        "tasks.market_data.bronze_market_data._utc_today",
+        return_value=date(2024, 1, 4),
+    ):
+        mock_list_manager.is_blacklisted.return_value = False
+        bronze.download_and_save_raw(
+            symbol,
+            mock_massive,
+            collected_symbol_frames=collected_frames,
+            existing_symbol_df=existing_df,
+            alpha_vantage_client=mock_av,
+        )
+
+    _, av_kwargs = mock_av.get_daily_time_series_csv.call_args
+    assert av_kwargs["outputsize"] == "compact"
+    staged = collected_frames[symbol]
+    assert float(staged.loc[staged["Date"] == "2024-01-04", "SplitCoefficient"].iloc[0]) == pytest.approx(2.0)
+
+
 def test_download_uses_2016_floor_when_existing_history_predates_floor(unique_ticker):
     symbol = unique_ticker
     mock_massive = MagicMock()
@@ -427,6 +679,55 @@ def test_download_normalizes_market_history_payload_errors(unique_ticker):
             )
 
     assert "/api/providers/massive/market-history" in str(exc_info.value.payload["path"])
+
+
+def test_download_logs_warning_and_preserves_market_stage_when_alpha_vantage_enrichment_fails(unique_ticker):
+    symbol = unique_ticker
+    mock_massive = MagicMock()
+    mock_massive.get_market_history.return_value = {
+        "symbol": symbol,
+        "status": "ok",
+        "rows": [
+            {
+                "date": "2024-01-03",
+                "open": 20,
+                "high": 21,
+                "low": 19,
+                "close": 20.5,
+                "volume": 200,
+                "short_interest": 1000,
+                "short_volume": 500,
+            }
+        ],
+    }
+    mock_av = MagicMock()
+    mock_av.get_daily_time_series_csv.side_effect = bronze.AlphaVantageGatewayError(
+        "gateway unavailable",
+        status_code=503,
+        detail="upstream unavailable",
+        payload={"path": "/api/providers/alpha-vantage/time-series/daily"},
+    )
+    warning_messages: list[str] = []
+    collected_frames: dict[str, pd.DataFrame] = {}
+
+    with patch("tasks.market_data.bronze_market_data.list_manager") as mock_list_manager, patch(
+        "tasks.market_data.bronze_market_data.mdc.write_warning",
+        lambda message: warning_messages.append(str(message)),
+    ):
+        mock_list_manager.is_blacklisted.return_value = False
+        bronze.download_and_save_raw(
+            symbol,
+            mock_massive,
+            collected_symbol_frames=collected_frames,
+            alpha_vantage_client=mock_av,
+        )
+
+    assert symbol in collected_frames
+    staged = collected_frames[symbol]
+    assert staged["Date"].tolist() == ["2024-01-03"]
+    assert pd.isna(staged.loc[0, "DividendAmount"])
+    assert pd.isna(staged.loc[0, "SplitCoefficient"])
+    assert any("corporate-action enrichment failed" in message for message in warning_messages)
 
 
 class _FakeClientManager:

@@ -1,0 +1,53 @@
+location: East US
+name: symbol-cleanup-job
+type: Microsoft.App/jobs
+tags:
+  owner: ${RESOURCE_TAG_OWNER}
+  cost-center: ${RESOURCE_TAG_COST_CENTER}
+  workload: ${RESOURCE_TAG_WORKLOAD}
+  environment: ${RESOURCE_TAG_ENVIRONMENT}
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    "${ACR_PULL_IDENTITY_RESOURCE_ID}": {}
+properties:
+  configuration:
+    triggerType: Manual
+    manualTriggerConfig:
+      parallelism: 1
+      replicaCompletionCount: 1
+    replicaRetryLimit: 1
+    replicaTimeout: 1800
+    registries:
+    - server: assetallocationacr.azurecr.io
+      identity: "${ACR_PULL_IDENTITY_RESOURCE_ID}"
+    secrets:
+    - name: pg-dsn
+      value: ${POSTGRES_DSN}
+  environmentId: ${CONTAINER_APPS_ENVIRONMENT_ID}
+  template:
+    serviceAccountName: ${SERVICE_ACCOUNT_NAME}
+    containers:
+    - env:
+      - name: LOG_FORMAT
+        value: JSON
+      - name: LOG_LEVEL
+        value: INFO
+      - name: DISABLE_DOTENV
+        value: "true"
+      - name: AZURE_CLIENT_ID
+        value: ${ACR_PULL_IDENTITY_CLIENT_ID}
+      - name: ASSET_ALLOCATION_API_BASE_URL
+        value: ${ASSET_ALLOCATION_API_BASE_URL}
+      - name: ASSET_ALLOCATION_API_SCOPE
+        value: ${ASSET_ALLOCATION_API_SCOPE}
+      - name: POSTGRES_DSN
+        secretRef: pg-dsn
+      image: ${JOB_IMAGE}
+      imageType: ContainerImage
+      name: symbol-cleanup-job
+      command: ["python", "-m", "tasks.symbol_cleanup.worker"]
+      resources:
+        cpu: 0.5
+        memory: 1Gi
+  workloadProfileName: Consumption

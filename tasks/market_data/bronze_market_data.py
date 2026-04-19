@@ -19,6 +19,10 @@ from asset_allocation_runtime_common.providers.massive_gateway_client import (
     MassiveGatewayNotFoundError,
     MassiveGatewayRateLimitError,
 )
+from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client import (
+    AlphaVantageGatewayClient,
+    AlphaVantageGatewayError,
+)
 from asset_allocation_contracts.market_history import MARKET_HISTORY_START_DATE, MARKET_HISTORY_STATUS_NO_HISTORY
 from asset_allocation_runtime_common.market_data import symbol_availability
 from asset_allocation_runtime_common.market_data import core as mdc
@@ -49,6 +53,8 @@ common_client = mdc.get_storage_client(cfg.AZURE_CONTAINER_COMMON)
 list_manager = ListManager(bronze_client, "market-data", auto_flush=False, allow_blacklist_updates=False)
 
 _SUPPLEMENTAL_MARKET_COLUMNS = ("ShortInterest", "ShortVolume")
+_CORPORATE_ACTION_MARKET_COLUMNS = ("DividendAmount", "SplitCoefficient")
+_OPTIONAL_MARKET_COLUMNS = (*_SUPPLEMENTAL_MARKET_COLUMNS, *_CORPORATE_ACTION_MARKET_COLUMNS)
 _RECOVERY_MAX_ATTEMPTS = 3
 _RECOVERY_SLEEP_SECONDS = 5.0
 _FULL_HISTORY_START_DATE = MARKET_HISTORY_START_DATE
@@ -65,6 +71,8 @@ _BUCKET_COLUMNS = [
     "volume",
     "short_interest",
     "short_volume",
+    "dividend_amount",
+    "split_coefficient",
     "ingested_at",
     "source_hash",
 ]
@@ -76,7 +84,7 @@ _EXISTING_MARKET_BUCKET_COLUMNS = [
     "Low",
     "Close",
     "Volume",
-    *_SUPPLEMENTAL_MARKET_COLUMNS,
+    *_OPTIONAL_MARKET_COLUMNS,
 ]
 _MARKET_OUTCOME_LOG_SAMPLE_LIMIT = 20
 _MARKET_OUTCOME_LOG_INTERVAL = 250
@@ -84,6 +92,9 @@ _PROMOTED_REPROBE_LIMIT = 25
 _DOMAIN = "market"
 _PROVIDER = "massive"
 _NO_MARKET_HISTORY_REASON_CODE = "provider_no_market_history"
+_DEFAULT_DIVIDEND_AMOUNT = 0.0
+_DEFAULT_SPLIT_COEFFICIENT = 1.0
+_active_alpha_vantage_client_manager: "_ThreadLocalAlphaVantageClientManager | None" = None
 
 
 def _is_truthy(raw: str | None) -> bool:
@@ -169,6 +180,11 @@ def _format_failure_reason(exc: BaseException) -> str:
         if path:
             reason_parts.append(f"path={_truncate_trace_text(path, limit=96)}")
     return " ".join(reason_parts)
+
+
+def _format_payload_preview(value: object, *, limit: int = 160) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    return _truncate_trace_text(text, limit=limit) if text else "n/a"
 
 
 def _failure_bucket_key(exc: BaseException) -> str:
@@ -573,9 +589,28 @@ def _existing_has_complete_supplementals(existing_df: pd.DataFrame, *, as_of_dat
     return True
 
 
+def _existing_has_complete_corporate_actions(existing_df: pd.DataFrame) -> bool:
+    if existing_df.empty or "Date" not in existing_df.columns:
+        return False
+
+    out = existing_df.copy()
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out = out.dropna(subset=["Date"]).copy()
+    if out.empty:
+        return False
+
+    for col in _CORPORATE_ACTION_MARKET_COLUMNS:
+        if col not in out.columns:
+            return False
+        values = pd.to_numeric(out[col], errors="coerce")
+        if values.isna().any():
+            return False
+    return True
+
+
 def _canonical_market_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    ordered = ["Date", "Open", "High", "Low", "Close", "Volume", *_SUPPLEMENTAL_MARKET_COLUMNS]
+    ordered = ["Date", "Open", "High", "Low", "Close", "Volume", *_OPTIONAL_MARKET_COLUMNS]
     if "Date" not in out.columns:
         out["Date"] = pd.NaT
     out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
@@ -585,7 +620,7 @@ def _canonical_market_df(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = pd.NA
     out = out[ordered].sort_values("Date").drop_duplicates(subset=["Date"], keep="last").reset_index(drop=True)
     out["Date"] = out["Date"].dt.strftime("%Y-%m-%d")
-    numeric_columns = ("Open", "High", "Low", "Close", "Volume", *_SUPPLEMENTAL_MARKET_COLUMNS)
+    numeric_columns = ("Open", "High", "Low", "Close", "Volume", *_OPTIONAL_MARKET_COLUMNS)
     for col in numeric_columns:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     return out
@@ -627,6 +662,8 @@ def _normalize_market_history_payload(payload: Any) -> tuple[str, pd.DataFrame]:
         "volume": "Volume",
         "short_interest": "ShortInterest",
         "short_volume": "ShortVolume",
+        "dividend_amount": "DividendAmount",
+        "split_coefficient": "SplitCoefficient",
     }
     out = df.rename(columns={key: value for key, value in rename_map.items() if key in df.columns})
     if "Date" not in out.columns:
@@ -699,6 +736,131 @@ def _merge_market_fundamentals(
         out[column_name] = pd.to_numeric(out[column_name], errors="coerce")
 
     return out
+
+
+def _resolve_alpha_vantage_adjusted_outputsize(
+    *,
+    existing_latest_date: date | None,
+    force_full_backfill: bool,
+) -> str:
+    if force_full_backfill or existing_latest_date is None:
+        return "full"
+    if _can_use_snapshot_for_incremental(existing_latest_date=existing_latest_date):
+        return "compact"
+    return "full"
+
+
+def _empty_market_corporate_actions_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["Date", *_CORPORATE_ACTION_MARKET_COLUMNS])
+
+
+def _normalize_alpha_vantage_adjusted_daily_df(csv_text: str) -> pd.DataFrame:
+    text = str(csv_text or "").strip()
+    if not text:
+        raise ValueError("Alpha Vantage adjusted daily CSV response was empty.")
+
+    try:
+        raw = pd.read_csv(StringIO(text))
+    except Exception as exc:
+        raise ValueError(
+            "Unable to parse Alpha Vantage adjusted daily CSV. "
+            f"payload_preview={_format_payload_preview(text)}"
+        ) from exc
+
+    if raw.empty:
+        return _empty_market_corporate_actions_frame()
+
+    normalized_cols = {_normalize_key(col): col for col in raw.columns}
+    date_col = normalized_cols.get("timestamp") or normalized_cols.get("date")
+    dividend_col = normalized_cols.get("dividendamount")
+    split_col = normalized_cols.get("splitcoefficient")
+    missing = [
+        name
+        for name, column_name in (
+            ("timestamp", date_col),
+            ("dividend amount", dividend_col),
+            ("split coefficient", split_col),
+        )
+        if column_name is None
+    ]
+    if missing:
+        raise ValueError(
+            "Alpha Vantage adjusted daily CSV missing required columns "
+            f"{missing}. payload_preview={_format_payload_preview(text)}"
+        )
+
+    out = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(raw[date_col], errors="coerce"),
+            "DividendAmount": pd.to_numeric(raw[dividend_col], errors="coerce"),
+            "SplitCoefficient": pd.to_numeric(raw[split_col], errors="coerce"),
+        }
+    )
+    out = out.dropna(subset=["Date"]).copy()
+    if out.empty:
+        return _empty_market_corporate_actions_frame()
+
+    out["DividendAmount"] = out["DividendAmount"].fillna(_DEFAULT_DIVIDEND_AMOUNT)
+    out["SplitCoefficient"] = out["SplitCoefficient"].fillna(_DEFAULT_SPLIT_COEFFICIENT)
+    out = out.sort_values("Date").drop_duplicates(subset=["Date"], keep="last").reset_index(drop=True)
+    out["Date"] = out["Date"].dt.strftime("%Y-%m-%d")
+    return out[["Date", *_CORPORATE_ACTION_MARKET_COLUMNS]]
+
+
+def _merge_market_corporate_actions(
+    df_daily: pd.DataFrame,
+    *,
+    corporate_actions_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    out = _canonical_market_df(df_daily)
+    for column_name in _CORPORATE_ACTION_MARKET_COLUMNS:
+        if column_name not in out.columns:
+            out[column_name] = pd.NA
+
+    if corporate_actions_df is None or corporate_actions_df.empty:
+        return _canonical_market_df(out)
+
+    corporate = corporate_actions_df.copy()
+    corporate["Date"] = pd.to_datetime(corporate["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    corporate = corporate.dropna(subset=["Date"]).copy()
+    if corporate.empty:
+        return _canonical_market_df(out)
+
+    merged = out.merge(corporate, on="Date", how="left", suffixes=("", "_av"))
+    for column_name in _CORPORATE_ACTION_MARKET_COLUMNS:
+        source_column = f"{column_name}_av"
+        existing_values = pd.to_numeric(merged.get(column_name), errors="coerce")
+        incoming_values = pd.to_numeric(merged.get(source_column), errors="coerce")
+        merged[column_name] = incoming_values.combine_first(existing_values)
+        merged = merged.drop(columns=[source_column], errors="ignore")
+    return _canonical_market_df(merged)
+
+
+def _enrich_market_with_corporate_actions(
+    *,
+    symbol: str,
+    df_daily: pd.DataFrame,
+    existing_df: pd.DataFrame,
+    existing_latest_date: date | None,
+    alpha_vantage_client: AlphaVantageGatewayClient | None,
+) -> pd.DataFrame:
+    if alpha_vantage_client is None:
+        return _canonical_market_df(df_daily)
+
+    force_full_backfill = not _existing_has_complete_corporate_actions(existing_df)
+    outputsize = _resolve_alpha_vantage_adjusted_outputsize(
+        existing_latest_date=existing_latest_date,
+        force_full_backfill=force_full_backfill,
+    )
+    csv_text = alpha_vantage_client.get_daily_time_series_csv(
+        symbol=symbol,
+        outputsize=outputsize,
+        adjusted=True,
+    )
+    corporate_actions_df = _normalize_alpha_vantage_adjusted_daily_df(csv_text)
+    return _merge_market_corporate_actions(df_daily, corporate_actions_df=corporate_actions_df)
+
+
 def _normalize_market_bucket_df(symbol: str, df_daily: pd.DataFrame) -> pd.DataFrame:
     out = df_daily.copy()
     out["symbol"] = str(symbol).upper()
@@ -710,6 +872,8 @@ def _normalize_market_bucket_df(symbol: str, df_daily: pd.DataFrame) -> pd.DataF
     out["volume"] = pd.to_numeric(out.get("Volume"), errors="coerce")
     out["short_interest"] = pd.to_numeric(out.get("ShortInterest"), errors="coerce")
     out["short_volume"] = pd.to_numeric(out.get("ShortVolume"), errors="coerce")
+    out["dividend_amount"] = pd.to_numeric(out.get("DividendAmount"), errors="coerce")
+    out["split_coefficient"] = pd.to_numeric(out.get("SplitCoefficient"), errors="coerce")
     out = out.dropna(subset=["date"]).copy()
     payload = out[
         [
@@ -722,6 +886,8 @@ def _normalize_market_bucket_df(symbol: str, df_daily: pd.DataFrame) -> pd.DataF
             "volume",
             "short_interest",
             "short_volume",
+            "dividend_amount",
+            "split_coefficient",
         ]
     ].to_json(orient="records", date_format="iso")
     out["source_hash"] = hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -757,6 +923,8 @@ def _load_alpha26_existing_market_bucket(*, bucket: str) -> pd.DataFrame:
         "volume": "Volume",
         "short_interest": "ShortInterest",
         "short_volume": "ShortVolume",
+        "dividend_amount": "DividendAmount",
+        "split_coefficient": "SplitCoefficient",
     }
     out = out.rename(columns={key: value for key, value in rename_map.items() if key in out.columns})
     if "Symbol" not in out.columns or "Date" not in out.columns:
@@ -939,7 +1107,7 @@ def _merge_existing_and_new_market_data(existing_df: pd.DataFrame, incoming_df: 
     if merged.empty:
         return incoming_df
 
-    numeric_columns = ("Open", "High", "Low", "Close", "Volume", *_SUPPLEMENTAL_MARKET_COLUMNS)
+    numeric_columns = ("Open", "High", "Low", "Close", "Volume", *_OPTIONAL_MARKET_COLUMNS)
     for column_name in numeric_columns:
         if column_name not in merged.columns:
             merged[column_name] = pd.NA
@@ -951,6 +1119,15 @@ def _merge_existing_and_new_market_data(existing_df: pd.DataFrame, incoming_df: 
 
 
 def _safe_close_massive_client(client: MassiveGatewayClient | None) -> None:
+    if client is None:
+        return
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
+def _safe_close_alpha_vantage_client(client: AlphaVantageGatewayClient | None) -> None:
     if client is None:
         return
     try:
@@ -997,6 +1174,36 @@ class _ThreadLocalMassiveClientManager:
             for _, client in list(self._clients.values()):
                 _safe_close_massive_client(client)
             self._clients.clear()
+
+
+class _ThreadLocalAlphaVantageClientManager:
+    def __init__(self, factory: Callable[[], AlphaVantageGatewayClient] | None = None) -> None:
+        self._factory = factory or AlphaVantageGatewayClient.from_env
+        self._lock = threading.Lock()
+        self._clients: dict[int, AlphaVantageGatewayClient] = {}
+
+    def get_client(self) -> AlphaVantageGatewayClient:
+        thread_id = threading.get_ident()
+        with self._lock:
+            current = self._clients.get(thread_id)
+            if current is not None:
+                return current
+            fresh_client = self._factory()
+            self._clients[thread_id] = fresh_client
+            return fresh_client
+
+    def close_all(self) -> None:
+        with self._lock:
+            for client in list(self._clients.values()):
+                _safe_close_alpha_vantage_client(client)
+            self._clients.clear()
+
+
+def _get_active_alpha_vantage_client() -> AlphaVantageGatewayClient | None:
+    manager = _active_alpha_vantage_client_manager
+    if manager is None:
+        return None
+    return manager.get_client()
 
 
 def _is_recoverable_massive_error(exc: Exception) -> bool:
@@ -1056,6 +1263,15 @@ def _download_and_save_raw_with_recovery(
         if treat_no_history_as_unavailable:
             download_kwargs["treat_no_history_as_unavailable"] = True
         try:
+            download_kwargs: dict[str, Any] = {
+                "snapshot_row": snapshot_row,
+                "collected_symbol_frames": collected_symbol_frames,
+                "collected_lock": collected_lock,
+                "existing_symbol_df": existing_symbol_df,
+            }
+            alpha_vantage_client = _get_active_alpha_vantage_client()
+            if alpha_vantage_client is not None:
+                download_kwargs["alpha_vantage_client"] = alpha_vantage_client
             download_and_save_raw(
                 symbol,
                 client,
@@ -1088,6 +1304,7 @@ def download_and_save_raw(
     existing_symbol_df: Optional[pd.DataFrame] = None,
     skip_blacklist_check: bool = False,
     treat_no_history_as_unavailable: bool = False,
+    alpha_vantage_client: AlphaVantageGatewayClient | None = None,
 ) -> None:
     if not skip_blacklist_check and _should_skip_blacklisted_market_symbol(symbol):
         return
@@ -1103,40 +1320,45 @@ def download_and_save_raw(
         from_date=from_date,
         to_date=to_date,
     )
+    market_unchanged = False
     try:
         status, incoming_df = _normalize_market_history_payload(payload)
         if status == MARKET_HISTORY_STATUS_NO_HISTORY or incoming_df.empty:
             if not existing_df.empty:
+                warning_action = (
+                    "treating promoted symbol as unavailable."
+                    if treat_no_history_as_unavailable
+                    else "keeping existing bronze data."
+                )
                 mdc.write_warning(
                     f"Massive returned no market history for {symbol} in range {from_date}..{to_date}; "
-                    "keeping existing bronze data."
+                    f"{warning_action}"
                 )
-                if not treat_no_history_as_unavailable:
-                    _set_collected_market_frame(
-                        symbol=symbol,
-                        frame=existing_df,
-                        collected_symbol_frames=collected_symbol_frames,
-                        collected_lock=collected_lock,
+                if treat_no_history_as_unavailable:
+                    raise BronzeCoverageUnavailableError(
+                        _NO_MARKET_HISTORY_REASON_CODE,
+                        detail=f"Massive returned no market history for {symbol} in range {from_date}..{to_date}.",
+                        payload={"symbol": symbol, "from_date": from_date, "to_date": to_date},
                     )
-            if not treat_no_history_as_unavailable:
-                list_manager.add_to_whitelist(symbol)
-            if not existing_df.empty and not treat_no_history_as_unavailable:
-                return
-            raise BronzeCoverageUnavailableError(
-                _NO_MARKET_HISTORY_REASON_CODE,
-                detail=f"Massive returned no market history for {symbol} in range {from_date}..{to_date}.",
-                payload={"symbol": symbol, "from_date": from_date, "to_date": to_date},
-            )
-
-        merged_df = _merge_existing_and_new_market_data(existing_df, incoming_df)
-        if not existing_df.empty and _market_frames_equal(existing_df, merged_df):
-            if not existing_df.empty:
-                _set_collected_market_frame(
-                    symbol=symbol,
-                    frame=existing_df,
-                    collected_symbol_frames=collected_symbol_frames,
-                    collected_lock=collected_lock,
+                merged_df = existing_df
+            else:
+                if not treat_no_history_as_unavailable:
+                    list_manager.add_to_whitelist(symbol)
+                raise BronzeCoverageUnavailableError(
+                    _NO_MARKET_HISTORY_REASON_CODE,
+                    detail=f"Massive returned no market history for {symbol} in range {from_date}..{to_date}.",
+                    payload={"symbol": symbol, "from_date": from_date, "to_date": to_date},
                 )
+        else:
+            merged_df = _merge_existing_and_new_market_data(existing_df, incoming_df)
+        market_unchanged = not existing_df.empty and _market_frames_equal(existing_df, merged_df)
+        if market_unchanged and _existing_has_complete_corporate_actions(existing_df):
+            _set_collected_market_frame(
+                symbol=symbol,
+                frame=existing_df,
+                collected_symbol_frames=collected_symbol_frames,
+                collected_lock=collected_lock,
+            )
             list_manager.add_to_whitelist(symbol)
             return
     except (BronzeCoverageUnavailableError, MassiveGatewayRateLimitError, MassiveGatewayError):
@@ -1146,6 +1368,39 @@ def download_and_save_raw(
             f"Failed to normalize Massive market history payload for {symbol}: {type(exc).__name__}: {exc}",
             payload={"path": "/api/providers/massive/market-history"},
         ) from exc
+
+    try:
+        merged_df = _enrich_market_with_corporate_actions(
+            symbol=symbol,
+            df_daily=merged_df,
+            existing_df=existing_df,
+            existing_latest_date=existing_latest_date,
+            alpha_vantage_client=alpha_vantage_client,
+        )
+    except AlphaVantageGatewayError as exc:
+        mdc.write_warning(
+            "Alpha Vantage market corporate-action enrichment failed for {symbol}: {detail}".format(
+                symbol=symbol,
+                detail=_truncate_trace_text(_format_failure_reason(exc), limit=260),
+            )
+        )
+    except Exception as exc:
+        mdc.write_warning(
+            "Alpha Vantage market corporate-action enrichment failed for {symbol}: {detail}".format(
+                symbol=symbol,
+                detail=_truncate_trace_text(f"{type(exc).__name__}: {exc}", limit=260),
+            )
+        )
+
+    if not existing_df.empty and _market_frames_equal(existing_df, merged_df):
+        _set_collected_market_frame(
+            symbol=symbol,
+            frame=existing_df,
+            collected_symbol_frames=collected_symbol_frames,
+            collected_lock=collected_lock,
+        )
+        list_manager.add_to_whitelist(symbol)
+        return
 
     _set_collected_market_frame(
         symbol=symbol,
@@ -1213,7 +1468,6 @@ async def main_async() -> int:
     )
     if debug_mode:
         reprobe_symbols = [symbol for symbol in reprobe_symbols if symbol in debug_symbol_set]
-    reprobe_symbol_set = set(reprobe_symbols)
 
     mdc.write_line(
         "Bronze market symbol selection: "
@@ -1250,6 +1504,7 @@ async def main_async() -> int:
     )
 
     client_manager = _ThreadLocalMassiveClientManager()
+    alpha_vantage_client_manager = _ThreadLocalAlphaVantageClientManager()
     publish_session = start_alpha26_bronze_publish(
         domain="market",
         root_prefix="market-data",
@@ -1474,6 +1729,8 @@ async def main_async() -> int:
                             "reprobe_retained={reprobe_retained} failed={failed}".format(**progress)
                         )
 
+    global _active_alpha_vantage_client_manager
+    _active_alpha_vantage_client_manager = alpha_vantage_client_manager
     bucket_publish_error: Optional[BaseException] = None
     try:
         try:
@@ -1579,12 +1836,17 @@ async def main_async() -> int:
             progress["failed"] += 1
             mdc.write_error(f"Bronze market alpha26 bucket publish failed: {exc}")
     finally:
+        _active_alpha_vantage_client_manager = None
         try:
             executor.shutdown(wait=True, cancel_futures=False)
         except Exception:
             pass
         try:
             client_manager.close_all()
+        except Exception:
+            pass
+        try:
+            alpha_vantage_client_manager.close_all()
         except Exception:
             pass
 
