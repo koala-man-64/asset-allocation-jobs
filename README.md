@@ -57,6 +57,8 @@ Backtest lifecycle state is owned by `asset-allocation-contracts` plus the contr
 
 - `deploy/job_backtests.yaml` remains the manual single-run worker job.
 - `deploy/job_backtests_reconcile.yaml` is the scheduled recovery job that asks the control plane to redispatch stranded queued runs and fail stale running runs.
+- `deploy/job_intraday_monitor.yaml` is the scheduled intraday watchlist poller. It claims due runs from the control plane and posts symbol observations plus refresh candidates back to the internal intraday APIs.
+- `deploy/job_intraday_market_refresh.yaml` is the scheduled targeted refresh worker. It drains queued intraday market batches and runs the existing selected-symbol Bronze/Silver/Gold market path in-process without chaining the full downstream job fan-out.
 - `tasks/backtesting/worker.py` now performs fail-fast dependency preflight before looking up a targeted run or claiming queued work.
 - `core/backtest_runtime.py` sends wall-clock heartbeats during long sections, writes Postgres-backed v4 results, and now publishes net and gross return metrics, cost drag, corrected `net_exposure`, trade lifecycle fields, and flat-to-flat closed-position analytics. There is no cross-run persistent cache.
 - `scripts/profile_backtest_runtime.py` is the profiling harness for the multiprocessing gate. `BACKTEST_RANKING_MAX_WORKERS` remains a benchmark-only knob and defaults to `1`.
