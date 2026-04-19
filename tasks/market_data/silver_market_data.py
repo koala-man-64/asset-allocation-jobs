@@ -43,6 +43,8 @@ bronze_client = mdc.get_storage_client(cfg.AZURE_CONTAINER_BRONZE)
 silver_client = mdc.get_storage_client(cfg.AZURE_CONTAINER_SILVER)
 
 _SUPPLEMENTAL_MARKET_COLUMNS = ("ShortInterest", "ShortVolume")
+_CORPORATE_ACTION_MARKET_COLUMNS = ("DividendAmount", "SplitCoefficient")
+_OPTIONAL_MARKET_COLUMNS = (*_SUPPLEMENTAL_MARKET_COLUMNS, *_CORPORATE_ACTION_MARKET_COLUMNS)
 _REMOVED_MARKET_COLUMNS = ("FloatShares", "float_shares", "shares_float", "free_float", "float")
 _INDEX_ARTIFACT_COLUMN_NAMES = {
     "index",
@@ -60,6 +62,8 @@ _ALPHA26_MARKET_MIN_COLUMNS = [
     "volume",
     "short_interest",
     "short_volume",
+    "dividend_amount",
+    "split_coefficient",
 ]
 _ALPHA26_MARKET_NUMERIC_COLUMNS = [
     "open",
@@ -69,6 +73,8 @@ _ALPHA26_MARKET_NUMERIC_COLUMNS = [
     "volume",
     "short_interest",
     "short_volume",
+    "dividend_amount",
+    "split_coefficient",
 ]
 _BRONZE_TO_SILVER_REQUIRED_COLUMNS = {
     "symbol",
@@ -93,6 +99,8 @@ def _empty_alpha26_market_frame() -> pd.DataFrame:
             "volume": pd.Series(dtype="float64"),
             "short_interest": pd.Series(dtype="float64"),
             "short_volume": pd.Series(dtype="float64"),
+            "dividend_amount": pd.Series(dtype="float64"),
+            "split_coefficient": pd.Series(dtype="float64"),
         }
     )
 
@@ -246,6 +254,8 @@ def _rename_market_columns(df: pd.DataFrame) -> pd.DataFrame:
         "shortvolume": "ShortVolume",
         "shortvolumeshares": "ShortVolume",
         "volumeshort": "ShortVolume",
+        "dividendamount": "DividendAmount",
+        "splitcoefficient": "SplitCoefficient",
     }
     normalized_cols = {_normalize_col_name(col): col for col in out.columns}
     alias_renames: dict[str, str] = {}
@@ -279,7 +289,7 @@ def _ensure_numeric_market_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["Volume"] = 0.0
     out["Volume"] = pd.to_numeric(out["Volume"], errors="coerce")
 
-    for col in _SUPPLEMENTAL_MARKET_COLUMNS:
+    for col in _OPTIONAL_MARKET_COLUMNS:
         if col not in out.columns:
             out[col] = pd.NA
         out[col] = pd.to_numeric(out[col], errors="coerce")

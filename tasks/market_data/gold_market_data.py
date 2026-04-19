@@ -144,6 +144,8 @@ _GOLD_MARKET_SILVER_SOURCE_COLUMNS: tuple[str, ...] = (
     "low",
     "close",
     "volume",
+    "dividend_amount",
+    "split_coefficient",
 )
 _BUCKET_PROGRESS_LOG_INTERVAL = 100
 _REGIME_REQUIRED_MARKET_SYMBOL_SET = frozenset(REGIME_REQUIRED_MARKET_SYMBOLS)
@@ -234,6 +236,15 @@ def _safe_div(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return numerator.where(denominator != 0).divide(denominator.where(denominator != 0))
 
 
+def _event_flag_from_numeric(series: pd.Series, *, neutral_value: float) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    out = pd.Series(pd.NA, index=numeric.index, dtype="Int64")
+    known = numeric.notna()
+    if known.any():
+        out.loc[known] = (numeric.loc[known] != neutral_value).astype("int64")
+    return out
+
+
 _SNAKE_CASE_CAMEL_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _SNAKE_CASE_CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")
 
@@ -310,6 +321,10 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in ["open", "high", "low", "close", "volume"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    for col in ["dividend_amount", "split_coefficient"]:
+        if col not in out.columns:
+            out[col] = pd.NA
+        out[col] = pd.to_numeric(out[col], errors="coerce")
 
     # Keep series math deterministic by sorting and removing duplicate bars.
     out = out.dropna(subset=["date"]).sort_values(["symbol", "date"]).reset_index(drop=True)
@@ -319,6 +334,8 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     high = out["high"]
     low = out["low"]
     volume = out["volume"]
+    out["is_dividend_day"] = _event_flag_from_numeric(out["dividend_amount"], neutral_value=0.0)
+    out["is_split_day"] = _event_flag_from_numeric(out["split_coefficient"], neutral_value=1.0)
 
     # Returns over multiple lookback windows.
     for window in (1, 5, 20, 60):

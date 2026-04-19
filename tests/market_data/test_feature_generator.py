@@ -21,6 +21,8 @@ def _make_market_df(rows: int = 300) -> pd.DataFrame:
             "Low": low,
             "Close": close,
             "Volume": volume,
+            "DividendAmount": np.zeros(rows, dtype=float),
+            "SplitCoefficient": np.ones(rows, dtype=float),
             "Symbol": ["AAPL"] * rows,
         }
     )
@@ -35,6 +37,10 @@ def test_compute_features_adds_expected_columns():
         "return_5d",
         "return_20d",
         "return_60d",
+        "dividend_amount",
+        "split_coefficient",
+        "is_dividend_day",
+        "is_split_day",
         "vol_20d",
         "vol_60d",
         "rolling_max_252d",
@@ -91,6 +97,22 @@ def test_compute_features_basic_sanity_on_monotonic_series():
 
     assert 0.0 <= float(last["volume_pct_rank_252d"]) <= 1.0
     assert float(last["volume_pct_rank_252d"]) > 0.99
+
+
+def test_compute_features_marks_dividend_and_split_event_days():
+    df = _make_market_df(5)
+    df.loc[2, "DividendAmount"] = 0.5
+    df.loc[3, "SplitCoefficient"] = 2.0
+    df.loc[4, ["DividendAmount", "SplitCoefficient"]] = [0.0, 1.0]
+
+    out = compute_features(df)
+
+    assert out.loc[2, "is_dividend_day"] == 1
+    assert out.loc[2, "is_split_day"] == 0
+    assert out.loc[3, "is_dividend_day"] == 0
+    assert out.loc[3, "is_split_day"] == 1
+    assert out.loc[4, "is_dividend_day"] == 0
+    assert out.loc[4, "is_split_day"] == 0
 
 
 def test_compute_features_does_not_emit_internal_helper_columns():
