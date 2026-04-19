@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -102,6 +103,50 @@ def test_sync_script_reads_repo_local_contract() -> None:
     assert 'Join-Path $repoRoot ".env.web"' in text
 
 
+def test_sync_script_dry_run_ignores_undocumented_env_keys(tmp_path: Path) -> None:
+    root = repo_root()
+    temp_repo = tmp_path / "repo"
+    scripts_dir = temp_repo / "scripts"
+    docs_ops_dir = temp_repo / "docs" / "ops"
+    bin_dir = tmp_path / "bin"
+    scripts_dir.mkdir(parents=True)
+    docs_ops_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+
+    (scripts_dir / "sync-all-to-github.ps1").write_text(
+        (root / "scripts" / "sync-all-to-github.ps1").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (docs_ops_dir / "env-contract.csv").write_text(
+        (root / "docs" / "ops" / "env-contract.csv").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (temp_repo / ".env.web").write_text(
+        "\n".join(
+            [
+                "AZURE_CLIENT_ID=test-client-id",
+                "ASSET_ALLOCATION_API_BASE_URL=http://asset-allocation-api-vnet",
+                "ASSET_ALLOCATION_API_SCOPE=api://example/.default",
+                "BEA_API_KEY=stale-key",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (bin_dir / "gh.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [powershell_exe(), "-NoProfile", "-File", str(scripts_dir / "sync-all-to-github.ps1"), "-DryRun"],
+        cwd=temp_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": str(bin_dir) + ";" + os.environ.get("PATH", "")},
+    )
+
+    assert "Ignoring undocumented .env.web keys: BEA_API_KEY" in completed.stdout
+
+
 def test_env_bootstrap_scripts_handle_control_plane_bootstrap_secrets() -> None:
     setup_text = (repo_root() / "scripts" / "setup-env.ps1").read_text(encoding="utf-8")
     sync_text = (repo_root() / "scripts" / "sync-all-to-github.ps1").read_text(encoding="utf-8")
@@ -127,3 +172,36 @@ def test_setup_env_dry_run_reports_sources_without_prompting() -> None:
     stdout = completed.stdout
     assert "source=azure" in stdout or "source=default" in stdout or "source=git" in stdout
     assert "prompt_required=" in stdout
+
+
+def test_setup_env_dry_run_uses_template_defaults_without_marking_them_prompt_required(tmp_path: Path) -> None:
+    script = repo_root() / "scripts" / "setup-env.ps1"
+    env_file = tmp_path / ".env.web"
+    completed = subprocess.run(
+        [powershell_exe(), "-NoProfile", "-File", str(script), "-DryRun", "-EnvFilePath", str(env_file)],
+        cwd=repo_root(),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    stdout = completed.stdout
+    assert "CONTRACTS_REF=main [source=default; prompt_required=false]" in stdout
+    assert (
+        "ECONOMIC_CATALYST_HTTP_TIMEOUT_SECONDS=30 [source=default; prompt_required=false]" in stdout
+    )
+
+
+def test_setup_env_dry_run_still_marks_blank_default_values_prompt_required(tmp_path: Path) -> None:
+    script = repo_root() / "scripts" / "setup-env.ps1"
+    env_file = tmp_path / ".env.web"
+    completed = subprocess.run(
+        [powershell_exe(), "-NoProfile", "-File", str(script), "-DryRun", "-EnvFilePath", str(env_file)],
+        cwd=repo_root(),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    stdout = completed.stdout
+    assert "DEBUG_SYMBOLS= [source=default; prompt_required=true]" in stdout
