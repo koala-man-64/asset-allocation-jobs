@@ -335,6 +335,17 @@ Base columns:
 | `close` | number | Input close price carried from Silver. |
 | `volume` | number | Input volume carried from Silver. |
 
+Corporate-action columns:
+
+Alpha Vantage adjusted-daily data is overlaid onto the canonical market bars only for corporate-action enrichment. OHLCV remains sourced from the existing market pipeline.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `dividend_amount` | number | Cash dividend paid on the row date, defaulting to `0.0` on non-event days. |
+| `split_coefficient` | number | Split multiplier carried from Alpha Vantage adjusted-daily data, defaulting to `1.0` on non-event days. |
+| `is_dividend_day` | binary flag | `1` when `dividend_amount > 0`. |
+| `is_split_day` | binary flag | `1` when `split_coefficient != 1`. |
+
 Return, volatility, range, and volume-context columns:
 
 | Column | Type | Description |

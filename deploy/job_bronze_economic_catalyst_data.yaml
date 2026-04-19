@@ -29,8 +29,6 @@ properties:
       value: ${POSTGRES_DSN}
     - name: fred-api-key
       value: ${FRED_API_KEY}
-    - name: bea-api-key
-      value: ${BEA_API_KEY}
     - name: nasdaq-api-key
       value: ${NASDAQ_API_KEY}
     - name: massive-api-key
@@ -76,18 +74,12 @@ properties:
         value: ${AZURE_CONTAINER_SILVER}
       - name: AZURE_CONTAINER_GOLD
         value: ${AZURE_CONTAINER_GOLD}
-      - name: AZURE_CONTAINER_COMMON
-        value: ${AZURE_CONTAINER_COMMON}
       - name: AZURE_FOLDER_ECONOMIC_CATALYST
         value: ${AZURE_FOLDER_ECONOMIC_CATALYST}
       - name: ECONOMIC_CATALYST_OFFICIAL_SOURCES
         value: ${ECONOMIC_CATALYST_OFFICIAL_SOURCES}
       - name: ECONOMIC_CATALYST_VENDOR_SOURCES
         value: ${ECONOMIC_CATALYST_VENDOR_SOURCES}
-      - name: ECONOMIC_CATALYST_COUNTRY_SCOPE
-        value: ${ECONOMIC_CATALYST_COUNTRY_SCOPE}
-      - name: ECONOMIC_CATALYST_HIGH_IMPACT_GROUPS
-        value: ${ECONOMIC_CATALYST_HIGH_IMPACT_GROUPS}
       - name: ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS
         value: ${ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS}
       - name: ECONOMIC_CATALYST_HEADLINE_CORRECTION_LOOKBACK_DAYS
@@ -96,8 +88,6 @@ properties:
         value: ${ECONOMIC_CATALYST_FUTURE_SCHEDULE_DAYS}
       - name: ECONOMIC_CATALYST_GENERAL_POLL_MINUTES
         value: ${ECONOMIC_CATALYST_GENERAL_POLL_MINUTES}
-      - name: ECONOMIC_CATALYST_HOT_WINDOW_POLL_MINUTES
-        value: ${ECONOMIC_CATALYST_HOT_WINDOW_POLL_MINUTES}
       - name: ECONOMIC_CATALYST_ALPHA_VANTAGE_TOPICS
         value: ${ECONOMIC_CATALYST_ALPHA_VANTAGE_TOPICS}
       - name: ECONOMIC_CATALYST_FOMC_SCHEDULE_URLS
@@ -120,8 +110,6 @@ properties:
         value: ${ECONOMIC_CATALYST_HTTP_TIMEOUT_SECONDS}
       - name: FRED_API_KEY
         secretRef: fred-api-key
-      - name: BEA_API_KEY
-        secretRef: bea-api-key
       - name: NASDAQ_API_KEY
         secretRef: nasdaq-api-key
       - name: MASSIVE_API_KEY

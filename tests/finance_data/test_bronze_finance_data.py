@@ -15,6 +15,12 @@ def unique_ticker():
     return f"TEST_FIN_{uuid.uuid4().hex[:8].upper()}"
 
 
+@pytest.fixture(autouse=True)
+def _stub_symbol_policy_helpers(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(bronze, "clear_invalid_candidate_marker", lambda **kwargs: False)
+    monkeypatch.setattr(bronze, "list_promoted_invalid_candidate_markers", lambda **kwargs: [])
+
+
 def _sync_result() -> bronze.symbol_availability.SyncResult:
     return bronze.symbol_availability.SyncResult(
         provider="massive",
@@ -187,6 +193,30 @@ def test_fetch_and_save_raw_tracks_empty_statement_payload_diagnostics(unique_ti
     assert coverage_summary["provider_statement_nonempty_raw_payloads"] == 0
     assert coverage_summary["provider_statement_canonical_rows"] == 0
     assert coverage_summary["provider_statement_canonical_empty_payloads"] == 1
+
+
+def test_validate_environment_requires_common_container(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "https://example.test")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://scope/.default")
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_BRONZE", "bronze", raising=False)
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_COMMON", "", raising=False)
+    monkeypatch.setattr(bronze, "bronze_client", object())
+    monkeypatch.setattr(bronze, "common_client", object())
+
+    with pytest.raises(ValueError, match="AZURE_CONTAINER_COMMON"):
+        bronze._validate_environment()
+
+
+def test_validate_environment_requires_common_client(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "https://example.test")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://scope/.default")
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_BRONZE", "bronze", raising=False)
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_COMMON", "common", raising=False)
+    monkeypatch.setattr(bronze, "bronze_client", object())
+    monkeypatch.setattr(bronze, "common_client", None)
+
+    with pytest.raises(RuntimeError, match="Common storage client is unavailable"):
+        bronze._validate_environment()
 
 
 def test_fetch_and_save_raw_preserves_raw_payload_when_backfill_cutoff_is_set(unique_ticker):
@@ -762,6 +792,253 @@ def test_main_async_returns_success_when_symbol_is_only_invalid_candidate(unique
         mock_list_manager.add_to_blacklist.assert_not_called()
         mock_list_manager.flush.assert_called_once()
         client_manager.close_all.assert_called_once()
+
+    asyncio.run(run_test())
+
+
+def test_main_async_reprobes_promoted_blacklisted_symbol_and_recovers(unique_ticker):
+    symbol = unique_ticker
+    client_manager = MagicMock()
+    coverage_summary = bronze._empty_coverage_summary()
+
+    async def run_test():
+        with (
+            patch("tasks.finance_data.bronze_finance_data._validate_environment"),
+            patch("tasks.finance_data.bronze_finance_data.mdc.log_environment_diagnostics"),
+            patch(
+                "tasks.finance_data.bronze_finance_data.symbol_availability.sync_domain_availability",
+                return_value=_sync_result(),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.symbol_availability.get_domain_symbols",
+                return_value=pd.DataFrame({"Symbol": [symbol]}),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.list_promoted_invalid_candidate_markers",
+                return_value=[{"symbol": symbol, "status": "promoted"}],
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.bronze_bucketing.is_alpha26_mode",
+                return_value=True,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._load_alpha26_finance_row_map",
+                return_value={},
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.resolve_backfill_start_date",
+                return_value=None,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._ThreadLocalMassiveClientManager",
+                return_value=client_manager,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._process_symbol_with_recovery",
+                return_value=bronze._FinanceSymbolOutcome(
+                    wrote=1,
+                    valid_symbol=True,
+                    invalid_candidate=False,
+                    coverage_unavailable=False,
+                    invalid_evidence=[],
+                    failures=[],
+                    coverage_summary=coverage_summary,
+                ),
+            ) as mock_process,
+            patch("tasks.finance_data.bronze_finance_data.clear_invalid_candidate_marker") as mock_clear,
+            patch(
+                "tasks.finance_data.bronze_finance_data._write_alpha26_finance_buckets",
+                return_value=(1, "index", len(bronze._BUCKET_COLUMNS)),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._delete_flat_finance_symbol_blobs",
+                return_value=0,
+            ),
+            patch("tasks.finance_data.bronze_finance_data.bronze_client") as mock_bronze_client,
+            patch("tasks.finance_data.bronze_finance_data.list_manager") as mock_list_manager,
+            patch("tasks.finance_data.bronze_finance_data.mdc.write_line"),
+            patch("tasks.finance_data.bronze_finance_data.mdc.write_warning"),
+        ):
+            mock_bronze_client.list_blob_infos.return_value = []
+            mock_list_manager.is_blacklisted.side_effect = lambda value: str(value).strip().upper() == symbol
+            mock_list_manager.blacklist = MagicMock()
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        mock_process.assert_called_once()
+        assert mock_process.call_args.kwargs["skip_blacklist_check"] is True
+        assert mock_process.call_args.kwargs["force_provider_probe"] is True
+        mock_clear.assert_called_once()
+        assert mock_clear.call_args.kwargs["symbol"] == symbol
+
+    asyncio.run(run_test())
+
+
+def test_main_async_promoted_reprobe_still_invalid_updates_marker(unique_ticker):
+    symbol = unique_ticker
+    client_manager = MagicMock()
+    coverage_summary = bronze._empty_coverage_summary()
+    invalid_error = bronze.MassiveGatewayNotFoundError("invalid", status_code=404)
+
+    async def run_test():
+        with (
+            patch("tasks.finance_data.bronze_finance_data._validate_environment"),
+            patch("tasks.finance_data.bronze_finance_data.mdc.log_environment_diagnostics"),
+            patch(
+                "tasks.finance_data.bronze_finance_data.symbol_availability.sync_domain_availability",
+                return_value=_sync_result(),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.symbol_availability.get_domain_symbols",
+                return_value=pd.DataFrame({"Symbol": [symbol]}),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.list_promoted_invalid_candidate_markers",
+                return_value=[{"symbol": symbol, "status": "promoted"}],
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.bronze_bucketing.is_alpha26_mode",
+                return_value=True,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._load_alpha26_finance_row_map",
+                return_value={},
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.resolve_backfill_start_date",
+                return_value=None,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._ThreadLocalMassiveClientManager",
+                return_value=client_manager,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._process_symbol_with_recovery",
+                return_value=bronze._FinanceSymbolOutcome(
+                    wrote=0,
+                    valid_symbol=False,
+                    invalid_candidate=True,
+                    coverage_unavailable=False,
+                    invalid_evidence=[
+                        ("balance_sheet", invalid_error),
+                        ("cash_flow", invalid_error),
+                        ("income_statement", invalid_error),
+                    ],
+                    failures=[],
+                    coverage_summary=coverage_summary,
+                ),
+            ),
+            patch("tasks.finance_data.bronze_finance_data.record_promoted_symbol_reprobe_attempt") as mock_record,
+            patch("tasks.finance_data.bronze_finance_data.clear_invalid_candidate_marker") as mock_clear,
+            patch(
+                "tasks.finance_data.bronze_finance_data._write_alpha26_finance_buckets",
+                return_value=(0, "index", len(bronze._BUCKET_COLUMNS)),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._delete_flat_finance_symbol_blobs",
+                return_value=0,
+            ),
+            patch("tasks.finance_data.bronze_finance_data.bronze_client") as mock_bronze_client,
+            patch("tasks.finance_data.bronze_finance_data.list_manager") as mock_list_manager,
+            patch("tasks.finance_data.bronze_finance_data.mdc.write_line"),
+            patch("tasks.finance_data.bronze_finance_data.mdc.write_warning"),
+        ):
+            mock_bronze_client.list_blob_infos.return_value = []
+            mock_list_manager.is_blacklisted.side_effect = lambda value: str(value).strip().upper() == symbol
+            mock_list_manager.blacklist = MagicMock()
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["outcome"] == "still_invalid_symbol"
+        mock_clear.assert_not_called()
+
+    asyncio.run(run_test())
+
+
+def test_main_async_promoted_reprobe_transient_failure_counts_as_failed_symbol(unique_ticker):
+    symbol = unique_ticker
+    client_manager = MagicMock()
+    coverage_summary = bronze._empty_coverage_summary()
+    transient_error = bronze.MassiveGatewayError(
+        "gateway unavailable",
+        status_code=503,
+        detail="upstream unavailable",
+        payload={"path": "/api/providers/massive/financials/balance_sheet"},
+    )
+
+    async def run_test():
+        with (
+            patch("tasks.finance_data.bronze_finance_data._validate_environment"),
+            patch("tasks.finance_data.bronze_finance_data.mdc.log_environment_diagnostics"),
+            patch(
+                "tasks.finance_data.bronze_finance_data.symbol_availability.sync_domain_availability",
+                return_value=_sync_result(),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.symbol_availability.get_domain_symbols",
+                return_value=pd.DataFrame({"Symbol": [symbol]}),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.list_promoted_invalid_candidate_markers",
+                return_value=[{"symbol": symbol, "status": "promoted"}],
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.bronze_bucketing.is_alpha26_mode",
+                return_value=True,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._load_alpha26_finance_row_map",
+                return_value={},
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data.resolve_backfill_start_date",
+                return_value=None,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._ThreadLocalMassiveClientManager",
+                return_value=client_manager,
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._process_symbol_with_recovery",
+                return_value=bronze._FinanceSymbolOutcome(
+                    wrote=0,
+                    valid_symbol=False,
+                    invalid_candidate=False,
+                    coverage_unavailable=False,
+                    invalid_evidence=[],
+                    failures=[("balance_sheet", transient_error)],
+                    coverage_summary=coverage_summary,
+                ),
+            ),
+            patch("tasks.finance_data.bronze_finance_data.record_promoted_symbol_reprobe_attempt") as mock_record,
+            patch("tasks.finance_data.bronze_finance_data.clear_invalid_candidate_marker") as mock_clear,
+            patch(
+                "tasks.finance_data.bronze_finance_data._write_alpha26_finance_buckets",
+                return_value=(0, "index", len(bronze._BUCKET_COLUMNS)),
+            ),
+            patch(
+                "tasks.finance_data.bronze_finance_data._delete_flat_finance_symbol_blobs",
+                return_value=0,
+            ),
+            patch("tasks.finance_data.bronze_finance_data.bronze_client") as mock_bronze_client,
+            patch("tasks.finance_data.bronze_finance_data.list_manager") as mock_list_manager,
+            patch("tasks.finance_data.bronze_finance_data.resolve_job_run_status", return_value=("failed", 1)),
+            patch("tasks.finance_data.bronze_finance_data.mdc.write_line"),
+            patch("tasks.finance_data.bronze_finance_data.mdc.write_warning"),
+        ):
+            mock_bronze_client.list_blob_infos.return_value = []
+            mock_list_manager.is_blacklisted.side_effect = lambda value: str(value).strip().upper() == symbol
+            mock_list_manager.blacklist = MagicMock()
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 1
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["outcome"] == "failed_massivegatewayerror"
+        mock_clear.assert_not_called()
 
     asyncio.run(run_test())
 

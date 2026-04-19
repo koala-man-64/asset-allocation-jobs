@@ -19,6 +19,8 @@ $jobs = @(
   "gold-price-target-job",
   "gold-earnings-job",
   "gold-regime-job",
+  "intraday-monitor-job",
+  "intraday-market-refresh-job",
   "backtests-job"
 )
 

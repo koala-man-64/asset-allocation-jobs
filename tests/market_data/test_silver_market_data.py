@@ -175,6 +175,8 @@ def test_silver_processing_includes_supplemental_market_metrics(unique_ticker):
                 "volume": 150.0,
                 "short_interest": 1200.0,
                 "short_volume": 500.0,
+                "dividend_amount": 0.25,
+                "split_coefficient": 2.0,
             }
         ],
     )
@@ -182,8 +184,12 @@ def test_silver_processing_includes_supplemental_market_metrics(unique_ticker):
     assert status == "ok"
     assert "short_interest" in staged_frame.columns
     assert "short_volume" in staged_frame.columns
+    assert "dividend_amount" in staged_frame.columns
+    assert "split_coefficient" in staged_frame.columns
     assert float(staged_frame.iloc[0]["short_interest"]) == pytest.approx(1200.0)
     assert float(staged_frame.iloc[0]["short_volume"]) == pytest.approx(500.0)
+    assert float(staged_frame.iloc[0]["dividend_amount"]) == pytest.approx(0.25)
+    assert float(staged_frame.iloc[0]["split_coefficient"]) == pytest.approx(2.0)
 
 
 def test_silver_processing_prefers_primary_symbol_when_duplicate_symbol_column_conflicts(unique_ticker):
@@ -478,7 +484,7 @@ def test_main_bootstraps_alpha26_write_when_silver_buckets_missing(monkeypatch):
         write_calls["count"] += 1
         assert "A" in frames
         assert touched_buckets == {"A"}
-        return 1, "system/silver-index/market/latest.parquet", 9
+        return 1, "system/silver-index/market/latest.parquet", len(silver._ALPHA26_MARKET_MIN_COLUMNS)
 
     monkeypatch.setattr(silver, "bronze_client", object())
     monkeypatch.setattr(
@@ -509,7 +515,7 @@ def test_main_bootstraps_alpha26_write_when_silver_buckets_missing(monkeypatch):
     assert saved_last_success.get("processed") == 1
     assert saved_last_success.get("alpha26_staged_rows") == 1
     assert saved_last_success.get("alpha26_symbols") == 1
-    assert saved_last_success.get("column_count") == 9
+    assert saved_last_success.get("column_count") == len(silver._ALPHA26_MARKET_MIN_COLUMNS)
 
 
 def test_main_force_rebuild_reprocesses_market_candidates(monkeypatch):
@@ -542,7 +548,7 @@ def test_main_force_rebuild_reprocesses_market_candidates(monkeypatch):
         write_calls["count"] += 1
         assert "A" in frames
         assert touched_buckets == {"A"}
-        return 1, "system/silver-index/market/latest.parquet", 9
+        return 1, "system/silver-index/market/latest.parquet", len(silver._ALPHA26_MARKET_MIN_COLUMNS)
 
     monkeypatch.setattr(silver, "bronze_client", object())
     monkeypatch.setattr(
@@ -604,6 +610,8 @@ def test_write_alpha26_market_buckets_enforces_typed_schema_for_empty_buckets(mo
                     "volume": [1000],
                     "short_interest": [pd.NA],
                     "short_volume": [pd.NA],
+                    "dividend_amount": [0.0],
+                    "split_coefficient": [1.0],
                     "unexpected": [None],
                 }
             )
@@ -668,6 +676,8 @@ def test_write_alpha26_market_buckets_partial_update_preserves_untouched_symbol_
                     "volume": [1000.0],
                     "short_interest": [pd.NA],
                     "short_volume": [pd.NA],
+                    "dividend_amount": [0.0],
+                    "split_coefficient": [1.0],
                 }
             )
         ]
@@ -701,6 +711,8 @@ def test_write_alpha26_market_buckets_partial_update_fails_closed_without_prior_
                     "volume": [1000.0],
                     "short_interest": [pd.NA],
                     "short_volume": [pd.NA],
+                    "dividend_amount": [0.0],
+                    "split_coefficient": [1.0],
                 }
             )
         ]
