@@ -50,6 +50,10 @@ def test_project_gold_output_frame_projects_market_contract_and_coerces_types() 
                     "Date": "2026-01-02",
                     "Symbol": "msft",
                     "Close": "100.5",
+                    "Dividend Amount": "0.25",
+                    "Split Coefficient": "2.0",
+                    "Is Dividend Day": "1",
+                    "Is Split Day": "1",
                     "PAT Doji": "1",
                     "helper_flag": True,
                 }
@@ -62,8 +66,13 @@ def test_project_gold_output_frame_projects_market_contract_and_coerces_types() 
     assert projected.loc[0, "symbol"] == "MSFT"
     assert projected.loc[0, "date"] == pd.Timestamp("2026-01-02")
     assert projected.loc[0, "close"] == 100.5
+    assert projected.loc[0, "dividend_amount"] == 0.25
+    assert projected.loc[0, "split_coefficient"] == 2.0
+    assert projected.loc[0, "is_dividend_day"] == 1
+    assert projected.loc[0, "is_split_day"] == 1
     assert projected.loc[0, "pat_doji"] == 1
     assert str(projected["symbol"].dtype) == "string"
+    assert str(projected["is_dividend_day"].dtype) == "Int64"
     assert str(projected["pat_doji"].dtype) == "Int64"
     assert pd.isna(projected.loc[0, "open"])
     assert "helper_flag" not in projected.columns

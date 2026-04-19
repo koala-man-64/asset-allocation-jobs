@@ -2,11 +2,10 @@
 
 ## Summary
 
-All gold jobs now follow the same publication contract:
+All gold jobs now emit the same final `artifact_publication_status` contract, but there are two execution patterns:
 
-- Healthy bucket completion persists the gold symbol index and the bucket watermark immediately.
-- Root `domain.json` is published once, at end-of-run only.
-- Final `artifact_publication_status` logs report split failure counters and a normalized `failure_mode`.
+- Bucketed jobs (`market`, `finance`, `earnings`, `price-target`) persist bucket state incrementally and publish root `domain.json` once at end-of-run.
+- `regime` is a single-domain publication. It writes parquet surfaces first, then finalizes one shared publish-state payload across artifact metadata, watermarks, and health markers.
 
 This applies to:
 
@@ -14,6 +13,7 @@ This applies to:
 - `finance`
 - `earnings`
 - `price-target`
+- `regime`
 
 ## Final Log Fields
 
@@ -35,6 +35,26 @@ Legacy fields remain for compatibility:
 - `failed`
 - `processed`
 
+The regime job also persists a shared publish-state payload across:
+
+- `regime/_metadata/domain.json`
+- `system/watermarks/gold_regime_features.json`
+- `system/watermarks/runs/gold_regime_features.json`
+- `system/health_markers/gold/regime.json`
+
+Shared regime publish-state fields:
+
+- `published_as_of_date`
+- `input_as_of_date`
+- `history_rows`
+- `latest_rows`
+- `transition_rows`
+- `active_models`
+- `downstream_triggered`
+- `status`
+- `reason`
+- `failure_mode`
+
 ## Failure Modes
 
 - `none`: the run finalized successfully and the root artifact was published.
@@ -48,6 +68,7 @@ Legacy fields remain for compatibility:
 - Treat root `domain.json` as final domain state only. It should not appear mid-run anymore.
 - During a live run, bucket artifacts plus the gold symbol index remain the interim source of truth.
 - For root-cause analysis, use the final publication log to classify the failure, then inspect earlier per-bucket logs to find the specific failing symbol or bucket.
+- For `regime`, stale end-of-day inputs fail closed. The job emits `artifact_publication_status ... status=retry_pending reason=stale_eod_input` and does not advance success metadata or downstream work.
 
 ## Example
 

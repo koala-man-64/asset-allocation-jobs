@@ -8,6 +8,7 @@ import subprocess
 
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
+DEFAULT_ENV_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / ".env.template"
 DEFAULT_REPOSITORY_TAGS = {
     "RESOURCE_TAG_COST_CENTER": "asset-allocation",
     "RESOURCE_TAG_WORKLOAD": "asset-allocation-jobs",
@@ -37,8 +38,29 @@ def render_manifest(template_text: str, environment: dict[str, str]) -> str:
     return rendered
 
 
+def load_template_environment(template_path: Path | None = None) -> dict[str, str]:
+    template_path = template_path or DEFAULT_ENV_TEMPLATE_PATH
+    if not template_path.exists():
+        return {}
+
+    resolved: dict[str, str] = {}
+    for raw_line in template_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        resolved[key.strip()] = value.strip()
+    return resolved
+
+
 def render_environment(environment: dict[str, str]) -> dict[str, str]:
-    resolved = dict(environment)
+    resolved = load_template_environment()
+    for key, value in environment.items():
+        if value:
+            resolved[key] = value
+            continue
+        resolved.setdefault(key, value)
+
     for key, value in DEFAULT_REPOSITORY_TAGS.items():
         if not resolved.get(key):
             resolved[key] = value

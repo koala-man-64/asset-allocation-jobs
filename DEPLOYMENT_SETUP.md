@@ -37,6 +37,7 @@ Use only these workflow entry points:
 
 Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for manual job starts, including `results-reconcile` after gold-stage repairs or backfills.
 The intraday workers are normally schedule-driven; if you need to repair them manually, start `intraday-monitor-job` or `intraday-market-refresh-job` directly with Azure CLI.
+The intraday workers are normally schedule-driven; if you need to repair them manually, start `intraday-monitor-job` or `intraday-market-refresh-job` directly with Azure CLI.
 
 ## Operate
 
@@ -116,6 +117,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 6. Build the jobs image from `Dockerfile`.
 7. Deploy the job manifests you need from `deploy/job_*.yaml`.
    For intraday monitoring, deploy both `deploy/job_intraday_monitor.yaml` and `deploy/job_intraday_market_refresh.yaml` together.
+   For intraday monitoring, deploy both `deploy/job_intraday_monitor.yaml` and `deploy/job_intraday_market_refresh.yaml` together.
 8. Verify each job can:
    - pull from ACR
    - read storage
@@ -167,6 +169,8 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - `.github/workflows/deploy-prod.yml`
 - `.github/workflows/integration.yml`
 - `deploy/job_backtests.yaml`
+- `deploy/job_intraday_monitor.yaml`
+- `deploy/job_intraday_market_refresh.yaml`
 - `deploy/job_intraday_monitor.yaml`
 - `deploy/job_intraday_market_refresh.yaml`
 - `deploy/job_bronze_market_data.yaml`

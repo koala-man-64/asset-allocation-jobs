@@ -36,7 +36,10 @@ from tasks.common.bronze_symbol_policy import (
     build_bronze_run_id,
     clear_invalid_candidate_marker,
     is_explicit_invalid_candidate,
+    list_promoted_invalid_candidate_markers,
+    record_promoted_symbol_reprobe_attempt,
     record_invalid_symbol_candidate,
+    validate_bronze_storage_clients,
 )
 from asset_allocation_runtime_common.market_data import bronze_bucketing
 from tasks.common.bronze_alpha26_publish import publish_alpha26_bronze_domain
@@ -77,6 +80,7 @@ REPORTS = [
 FINANCE_REPORT_STALE_DAYS = max(0, int(getattr(cfg, "MASSIVE_FINANCE_FRESH_DAYS", 7)))
 _RECOVERY_MAX_ATTEMPTS = 3
 _RECOVERY_SLEEP_SECONDS = 5.0
+_PROMOTED_REPROBE_LIMIT = 25
 _DEFAULT_SHARED_FINANCE_LOCK = "finance-pipeline-shared"
 _COVERAGE_DOMAIN = "finance"
 _COVERAGE_PROVIDER = "massive"
@@ -293,12 +297,52 @@ def _log_finance_payload_observation(
 
 
 def _validate_environment() -> None:
-    if not cfg.AZURE_CONTAINER_BRONZE:
-        raise ValueError("Environment variable 'AZURE_CONTAINER_BRONZE' is strictly required.")
     if not os.environ.get("ASSET_ALLOCATION_API_BASE_URL"):
         raise ValueError("Environment variable 'ASSET_ALLOCATION_API_BASE_URL' is strictly required.")
     if not os.environ.get("ASSET_ALLOCATION_API_SCOPE"):
         raise ValueError("Environment variable 'ASSET_ALLOCATION_API_SCOPE' is strictly required.")
+    validate_bronze_storage_clients(
+        bronze_container_name=cfg.AZURE_CONTAINER_BRONZE,
+        common_container_name=cfg.AZURE_CONTAINER_COMMON,
+        bronze_client=bronze_client,
+        common_client=common_client,
+    )
+
+
+def _normalize_finance_provider_symbols(df_symbols: pd.DataFrame) -> list[str]:
+    symbols: list[str] = []
+    raw_symbols = df_symbols["Symbol"].astype(str).tolist() if "Symbol" in df_symbols.columns else []
+    for raw in raw_symbols:
+        if "." in raw:
+            continue
+        symbol = str(raw or "").strip().upper()
+        if not symbol:
+            continue
+        symbols.append(symbol)
+    return list(dict.fromkeys(symbols))
+
+
+def _select_promoted_finance_reprobe_symbols(
+    *,
+    provider_symbols: list[str],
+    scheduled_symbols: list[str],
+) -> list[str]:
+    blacklisted_provider_symbols = {symbol for symbol in provider_symbols if list_manager.is_blacklisted(symbol)}
+    if not blacklisted_provider_symbols:
+        return []
+
+    scheduled_symbol_set = {str(symbol or "").strip().upper() for symbol in scheduled_symbols if str(symbol or "").strip()}
+    selected: list[str] = []
+    for marker in list_promoted_invalid_candidate_markers(common_client=common_client, domain=_COVERAGE_DOMAIN):
+        symbol = str(marker.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        if symbol not in blacklisted_provider_symbols or symbol in scheduled_symbol_set:
+            continue
+        selected.append(symbol)
+        if len(selected) >= _PROMOTED_REPROBE_LIMIT:
+            break
+    return selected
 
 
 def _is_fresh(blob_last_modified: Optional[datetime], *, fresh_days: int) -> bool:
@@ -850,6 +894,8 @@ def fetch_and_save_raw(
     alpha26_existing_row: Optional[dict[str, Any]] = None,
     alpha26_rows: Optional[dict[tuple[str, str], dict[str, Any]]] = None,
     alpha26_lock: Optional[threading.Lock] = None,
+    skip_blacklist_check: bool = False,
+    force_provider_probe: bool = False,
 ) -> bool:
     """
     Fetch a finance report via the API-hosted Massive gateway and store raw provider JSON in Bronze buckets.
@@ -857,7 +903,7 @@ def fetch_and_save_raw(
     Returns True when a write occurred, False when skipped (fresh/no-op).
     """
     coverage_summary = coverage_summary if coverage_summary is not None else _empty_coverage_summary()
-    if list_manager.is_blacklisted(symbol):
+    if not skip_blacklist_check and list_manager.is_blacklisted(symbol):
         return False
 
     if not alpha26_mode:
@@ -917,6 +963,7 @@ def fetch_and_save_raw(
                 existing_payload_current
                 and _is_fresh(ingested_at, fresh_days=FINANCE_REPORT_STALE_DAYS)
                 and not force_backfill
+                and not force_provider_probe
             ):
                 list_manager.add_to_whitelist(symbol)
                 return False
@@ -1140,6 +1187,8 @@ def _process_symbol_with_recovery(
     alpha26_mode: bool = False,
     alpha26_rows: Optional[dict[tuple[str, str], dict[str, Any]]] = None,
     alpha26_lock: Optional[threading.Lock] = None,
+    skip_blacklist_check: bool = False,
+    force_provider_probe: bool = False,
     max_attempts: int = _RECOVERY_MAX_ATTEMPTS,
     sleep_seconds: float = _RECOVERY_SLEEP_SECONDS,
 ) -> _FinanceSymbolOutcome:
@@ -1166,6 +1215,10 @@ def _process_symbol_with_recovery(
                     "backfill_start": backfill_start,
                     "coverage_summary": coverage_summary,
                 }
+                if skip_blacklist_check:
+                    call_kwargs["skip_blacklist_check"] = True
+                if force_provider_probe:
+                    call_kwargs["force_provider_probe"] = True
                 if alpha26_mode:
                     alpha26_existing_row: Optional[dict[str, Any]] = None
                     if alpha26_rows is not None:
@@ -1311,29 +1364,38 @@ async def main_async() -> int:
     df_symbols = symbol_availability.get_domain_symbols("finance").dropna(subset=["Symbol"]).copy()
     provider_available_count = int(len(df_symbols))
 
+    provider_symbols = _normalize_finance_provider_symbols(df_symbols)
     symbols: list[str] = []
     blacklist_skipped = 0
-    for sym in df_symbols["Symbol"].astype(str).tolist():
-        if "." in sym:
-            continue
+    for sym in provider_symbols:
         if list_manager.is_blacklisted(sym):
             blacklist_skipped += 1
             continue
         symbols.append(sym)
-    symbols = list(dict.fromkeys(symbols))
 
+    debug_symbol_set = {str(symbol or "").strip().upper() for symbol in getattr(cfg, "DEBUG_SYMBOLS", []) if str(symbol or "").strip()}
     debug_filtered = 0
     if hasattr(cfg, "DEBUG_SYMBOLS") and cfg.DEBUG_SYMBOLS:
         mdc.write_line(f"DEBUG: Restricting to {len(cfg.DEBUG_SYMBOLS)} symbols")
-        filtered_symbols = [s for s in symbols if s in cfg.DEBUG_SYMBOLS]
+        filtered_symbols = [s for s in symbols if s in debug_symbol_set]
         debug_filtered = len(symbols) - len(filtered_symbols)
         symbols = filtered_symbols
+
+    reprobe_symbols = _select_promoted_finance_reprobe_symbols(
+        provider_symbols=provider_symbols,
+        scheduled_symbols=symbols,
+    )
+    if hasattr(cfg, "DEBUG_SYMBOLS") and cfg.DEBUG_SYMBOLS:
+        reprobe_symbols = [symbol for symbol in reprobe_symbols if symbol in debug_symbol_set]
+    reprobe_symbol_set = set(reprobe_symbols)
+    execution_symbols = reprobe_symbols + [symbol for symbol in symbols if symbol not in reprobe_symbol_set]
 
     mdc.write_line(
         "Bronze finance symbol selection: "
         f"provider_available_count={provider_available_count} "
         f"blacklist_skipped={blacklist_skipped} "
         f"debug_filtered={debug_filtered} "
+        f"reprobe_scheduled={len(reprobe_symbols)} "
         f"final_scheduled={len(symbols)}"
     )
     run_id = build_bronze_run_id(_COVERAGE_DOMAIN)
@@ -1342,12 +1404,12 @@ async def main_async() -> int:
     if not alpha26_mode:
         raise RuntimeError("Bronze finance only supports alpha26 bucket mode.")
 
-    symbol_set = {str(s).strip().upper() for s in symbols}
+    symbol_set = {str(s).strip().upper() for s in execution_symbols}
     alpha26_rows: dict[tuple[str, str], dict[str, Any]] = _load_alpha26_finance_row_map(symbols=symbol_set)
     alpha26_lock: Optional[threading.Lock] = threading.Lock()
     mdc.write_line(f"Loaded existing finance alpha26 seed rows: reports={len(alpha26_rows)} symbols={len(symbol_set)}.")
 
-    mdc.write_line(f"Starting Massive Bronze Finance Ingestion for {len(symbols)} symbols...")
+    mdc.write_line(f"Starting Massive Bronze Finance Ingestion for {len(execution_symbols)} symbols...")
 
     client_manager = _ThreadLocalMassiveClientManager()
     backfill_start = resolve_backfill_start_date()
@@ -1376,6 +1438,8 @@ async def main_async() -> int:
         "invalid_candidates": 0,
         "unavailable": 0,
         "blacklist_promotions": 0,
+        "reprobe_recovered": 0,
+        "reprobe_retained": 0,
     }
     coverage_progress = _empty_coverage_summary()
     retry_next_run: set[str] = set()
@@ -1383,7 +1447,7 @@ async def main_async() -> int:
     failure_examples: dict[str, str] = {}
     progress_lock = asyncio.Lock()
 
-    def worker(symbol: str) -> _FinanceSymbolOutcome:
+    def worker(symbol: str, *, is_reprobe: bool = False) -> _FinanceSymbolOutcome:
         return _process_symbol_with_recovery(
             symbol,
             client_manager,
@@ -1391,6 +1455,8 @@ async def main_async() -> int:
             alpha26_mode=alpha26_mode,
             alpha26_rows=alpha26_rows if alpha26_mode else None,
             alpha26_lock=alpha26_lock if alpha26_mode else None,
+            skip_blacklist_check=is_reprobe,
+            force_provider_probe=is_reprobe,
         )
 
     async def record_failures(symbol: str, failures: list[tuple[str, BaseException]]) -> None:
@@ -1421,18 +1487,18 @@ async def main_async() -> int:
             )
 
     async def run_symbol(symbol: str) -> None:
+        is_reprobe = symbol in reprobe_symbol_set
         async with semaphore:
             try:
-                result = await loop.run_in_executor(executor, worker, symbol)
+                result = await loop.run_in_executor(executor, lambda: worker(symbol, is_reprobe=is_reprobe))
                 if result.valid_symbol:
-                    try:
-                        clear_invalid_candidate_marker(
-                            common_client=common_client,
-                            domain=_COVERAGE_DOMAIN,
-                            symbol=symbol,
-                        )
-                    except Exception as exc:
-                        mdc.write_warning(f"Failed to clear finance invalid-candidate marker for {symbol}: {exc}")
+                    clear_invalid_candidate_marker(
+                        common_client=common_client,
+                        bronze_client=bronze_client,
+                        domain=_COVERAGE_DOMAIN,
+                        symbol=symbol,
+                    )
+                    list_manager.blacklist.discard(symbol)
 
                 should_log = False
                 async with progress_lock:
@@ -1441,7 +1507,57 @@ async def main_async() -> int:
                     for key in coverage_progress:
                         coverage_progress[key] += int(result.coverage_summary.get(key, 0) or 0)
 
-                if result.invalid_candidate:
+                if result.valid_symbol:
+                    success_count = 0
+                    disposition = "written" if result.wrote else "skipped"
+                    async with progress_lock:
+                        if result.wrote:
+                            progress["written"] += 1
+                        else:
+                            progress["skipped"] += 1
+                        if is_reprobe:
+                            progress["reprobe_recovered"] += 1
+                        success_count = progress["written"] + progress["skipped"]
+                    if should_log_bronze_success(success_count):
+                        log_bronze_success(
+                            domain="finance",
+                            operation="symbol_processed",
+                            symbol=symbol,
+                            disposition=disposition,
+                            reports_written=result.wrote,
+                            success_count=success_count,
+                            coverage_unavailable=result.coverage_unavailable,
+                        )
+                    if result.coverage_unavailable:
+                        async with progress_lock:
+                            should_log = progress["unavailable"] <= 20
+                    if should_log:
+                        reports = ",".join(sorted({name for name, _ in result.invalid_evidence})) or "unknown"
+                        evidence = (
+                            _summarize_exception(result.invalid_evidence[0][1]) if result.invalid_evidence else "none"
+                        )
+                        mdc.write_warning(
+                            f"Bronze finance coverage unavailable: symbol={symbol} reports={reports} evidence={evidence}"
+                        )
+                elif result.invalid_candidate and is_reprobe:
+                    record_promoted_symbol_reprobe_attempt(
+                        common_client=common_client,
+                        domain=_COVERAGE_DOMAIN,
+                        symbol=symbol,
+                        outcome="still_invalid_symbol",
+                    )
+                    async with progress_lock:
+                        progress["reprobe_retained"] += 1
+                        retained_total = progress["reprobe_retained"]
+                    if retained_total <= 20:
+                        reports = ",".join(sorted({name for name, _ in result.invalid_evidence})) or "unknown"
+                        evidence = (
+                            _summarize_exception(result.invalid_evidence[0][1]) if result.invalid_evidence else "none"
+                        )
+                        mdc.write_warning(
+                            f"Bronze finance promoted re-probe retained blacklist: symbol={symbol} reports={reports} evidence={evidence}"
+                        )
+                elif result.invalid_candidate:
                     promotion = record_invalid_symbol_candidate(
                         common_client=common_client,
                         bronze_client=bronze_client,
@@ -1468,7 +1584,32 @@ async def main_async() -> int:
                         if promotion.get("promoted"):
                             message += " promoted_to_domain_blacklist_after_2_runs=true"
                         mdc.write_warning(message)
+                elif result.coverage_unavailable and is_reprobe:
+                    record_promoted_symbol_reprobe_attempt(
+                        common_client=common_client,
+                        domain=_COVERAGE_DOMAIN,
+                        symbol=symbol,
+                        outcome="still_unavailable",
+                    )
+                    async with progress_lock:
+                        progress["reprobe_retained"] += 1
+                        retained_total = progress["reprobe_retained"]
+                    if retained_total <= 20:
+                        reports = ",".join(sorted({name for name, _ in result.invalid_evidence})) or "unknown"
+                        evidence = (
+                            _summarize_exception(result.invalid_evidence[0][1]) if result.invalid_evidence else "none"
+                        )
+                        mdc.write_warning(
+                            f"Bronze finance promoted re-probe retained blacklist: symbol={symbol} reports={reports} evidence={evidence}"
+                        )
                 elif result.failures:
+                    if is_reprobe:
+                        record_promoted_symbol_reprobe_attempt(
+                            common_client=common_client,
+                            domain=_COVERAGE_DOMAIN,
+                            symbol=symbol,
+                            outcome=f"failed_{type(result.failures[0][1]).__name__.lower()}",
+                        )
                     await record_failures(symbol, result.failures)
                 else:
                     success_count = 0
@@ -1489,18 +1630,14 @@ async def main_async() -> int:
                             success_count=success_count,
                             coverage_unavailable=result.coverage_unavailable,
                         )
-                    if result.coverage_unavailable:
-                        async with progress_lock:
-                            should_log = progress["unavailable"] <= 20
-                    if should_log:
-                        reports = ",".join(sorted({name for name, _ in result.invalid_evidence})) or "unknown"
-                        evidence = (
-                            _summarize_exception(result.invalid_evidence[0][1]) if result.invalid_evidence else "none"
-                        )
-                        mdc.write_warning(
-                            f"Bronze finance coverage unavailable: symbol={symbol} reports={reports} evidence={evidence}"
-                        )
             except Exception as exc:
+                if is_reprobe:
+                    record_promoted_symbol_reprobe_attempt(
+                        common_client=common_client,
+                        domain=_COVERAGE_DOMAIN,
+                        symbol=symbol,
+                        outcome=f"failed_{type(exc).__name__.lower()}",
+                    )
                 await record_failures(symbol, [("unknown", exc)])
             finally:
                 async with progress_lock:
@@ -1509,11 +1646,12 @@ async def main_async() -> int:
                         mdc.write_line(
                             "Bronze finance progress: processed={processed} written={written} skipped={skipped} "
                             "invalid_candidates={invalid_candidates} unavailable={unavailable} "
-                            "blacklist_promotions={blacklist_promotions} failed={failed}".format(**progress)
+                            "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
+                            "reprobe_retained={reprobe_retained} failed={failed}".format(**progress)
                         )
 
     try:
-        await asyncio.gather(*(run_symbol(s) for s in symbols), return_exceptions=True)
+        await asyncio.gather(*(run_symbol(s) for s in execution_symbols))
     finally:
         try:
             executor.shutdown(wait=True, cancel_futures=False)
@@ -1567,7 +1705,8 @@ async def main_async() -> int:
     mdc.write_line(
         "Bronze Massive finance ingest complete: processed={processed} written={written} skipped={skipped} "
         "invalid_candidates={invalid_candidates} unavailable={unavailable} "
-        "blacklist_promotions={blacklist_promotions} failed={failed} coverage_checked={coverage_checked} "
+        "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
+        "reprobe_retained={reprobe_retained} failed={failed} coverage_checked={coverage_checked} "
         "coverage_forced_refetch={coverage_forced_refetch} coverage_marked_covered={coverage_marked_covered} "
         "coverage_marked_limited={coverage_marked_limited} coverage_skipped_limited_marker={coverage_skipped_limited_marker} "
         "provider_statement_requests={provider_statement_requests} "
