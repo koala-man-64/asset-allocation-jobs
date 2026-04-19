@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 import os
 from dataclasses import dataclass
@@ -16,12 +14,14 @@ from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.foundation.postgres import connect, copy_rows
 from asset_allocation_runtime_common.domain.regime import build_regime_outputs, compute_curve_state, compute_trend_state
 from asset_allocation_runtime_common.regime_repository import RegimeRepository
-from asset_allocation_runtime_common.market_data import domain_artifacts
 from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from asset_allocation_runtime_common.market_data.gold_sync_contracts import load_domain_sync_state
-from tasks.common.job_trigger import ensure_api_awake_from_env
-from tasks.common.system_health_markers import write_system_health_marker
-from tasks.common.watermarks import save_last_success, save_watermarks
+from tasks.common.job_trigger import ensure_api_awake_from_env, trigger_next_job_from_env
+from tasks.common.regime_publication import (
+    build_regime_publish_state,
+    finalize_regime_publication,
+    log_regime_publication_status,
+)
 
 JOB_NAME = "gold-regime-job"
 WATERMARK_KEY = "gold_regime_features"
@@ -644,15 +644,13 @@ def _replace_postgres_tables(
             )
 
 
-def _write_storage_outputs(
+def _write_storage_parquet_outputs(
     *,
     gold_container: str,
     inputs: pd.DataFrame,
     history: pd.DataFrame,
     latest: pd.DataFrame,
     transitions: pd.DataFrame,
-    active_revisions: Sequence[dict[str, Any]],
-    warnings: Sequence[str] = (),
 ) -> None:
     client = mdc.get_storage_client(gold_container)
     if client is None:
@@ -661,62 +659,6 @@ def _write_storage_outputs(
     client.write_parquet("regime/history.parquet", history)
     client.write_parquet("regime/latest.parquet", latest)
     client.write_parquet("regime/transitions.parquet", transitions)
-
-    history_dates = pd.to_datetime(history["as_of_date"], errors="coerce").dropna() if not history.empty else pd.Series(dtype="datetime64[ns]")
-    date_range = None
-    if not history_dates.empty:
-        date_range = {
-            "min": history_dates.min().isoformat(),
-            "max": history_dates.max().isoformat(),
-            "column": "as_of_date",
-            "source": "artifact",
-        }
-    source_fingerprint = hashlib.md5(
-        json.dumps(
-            {
-                "activeModels": [
-                    {
-                        "name": revision.get("name"),
-                        "version": revision.get("version"),
-                        "activatedAt": revision.get("activated_at"),
-                    }
-                    for revision in active_revisions
-                ],
-                "dateRange": date_range,
-            },
-            sort_keys=True,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
-    artifact_path = domain_artifacts.domain_artifact_path(layer="gold", domain="regime")
-    now = computed_at_iso()
-    payload = {
-        "version": 1,
-        "scope": "domain",
-        "layer": "gold",
-        "domain": "regime",
-        "rootPath": "regime",
-        "artifactPath": artifact_path,
-        "updatedAt": now,
-        "computedAt": now,
-        "publishedAt": now,
-        "producerJobName": JOB_NAME,
-        "sourceCommit": source_fingerprint,
-        "symbolCount": 0,
-        "columnCount": len(sorted(set(inputs.columns) | set(history.columns) | set(latest.columns) | set(transitions.columns))),
-        "columns": sorted(set(inputs.columns) | set(history.columns) | set(latest.columns) | set(transitions.columns)),
-        "dateRange": date_range,
-        "affectedAsOfStart": date_range.get("min") if isinstance(date_range, dict) else None,
-        "affectedAsOfEnd": date_range.get("max") if isinstance(date_range, dict) else None,
-        "totalRows": int(len(history)),
-        "fileCount": 4,
-        "warnings": list(warnings),
-    }
-    domain_artifacts.publish_domain_artifact_payload(payload=payload, client=client)
-
-
-def computed_at_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def main() -> int:
@@ -736,7 +678,6 @@ def main() -> int:
     publish_window = _resolve_publish_window(inputs, market_series=market_series)
     publish_window_metadata = _publish_window_metadata(publish_window)
     publish_window_warnings = _publish_window_warnings(publish_window)
-    published_inputs = _published_inputs(inputs, window=publish_window)
     skipped_dates_for_log = ",".join(publish_window_metadata["skipped_trailing_input_dates"]) or "-"
     if publish_window.skipped_trailing_input_dates:
         mdc.write_warning(
@@ -753,6 +694,34 @@ def main() -> int:
             f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
             "skipped_count=0"
         )
+
+    if (
+        publish_window.input_as_of_date is not None
+        and publish_window.input_as_of_date > publish_window.published_as_of_date
+    ):
+        retry_pending_state = build_regime_publish_state(
+            published_as_of_date=publish_window_metadata["published_as_of_date"],
+            input_as_of_date=publish_window_metadata["input_as_of_date"],
+            history_rows=0,
+            latest_rows=0,
+            transition_rows=0,
+            active_models=[],
+            downstream_triggered=False,
+            warnings=publish_window_warnings,
+            status="retry_pending",
+            reason="stale_eod_input",
+            failure_mode="none",
+        )
+        log_regime_publication_status(retry_pending_state)
+        mdc.write_warning(
+            "Gold regime publication deferred: "
+            f"published_as_of_date={publish_window_metadata['published_as_of_date']} "
+            f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
+            f"skipped_trailing_input_dates={skipped_dates_for_log}"
+        )
+        return 2
+
+    published_inputs = _published_inputs(inputs, window=publish_window)
 
     history_frames: list[pd.DataFrame] = []
     latest_frames: list[pd.DataFrame] = []
@@ -795,70 +764,93 @@ def main() -> int:
 
     _replace_postgres_tables(
         dsn,
-        inputs=inputs,
+        inputs=published_inputs,
         history=history,
         latest=latest,
         transitions=transitions,
         active_models=active_models,
     )
-    _write_storage_outputs(
+    _write_storage_parquet_outputs(
         gold_container=gold_container,
-        inputs=inputs,
+        inputs=published_inputs,
         history=history,
         latest=latest,
         transitions=transitions,
-        active_revisions=active_revisions,
+    )
+    downstream_jobs_configured = bool(str(os.environ.get("TRIGGER_NEXT_JOB_NAME") or "").strip())
+    if downstream_jobs_configured:
+        try:
+            trigger_next_job_from_env()
+        except Exception as exc:
+            blocked_state = build_regime_publish_state(
+                published_as_of_date=publish_window_metadata["published_as_of_date"],
+                input_as_of_date=publish_window_metadata["input_as_of_date"],
+                history_rows=int(len(history)),
+                latest_rows=int(len(latest)),
+                transition_rows=int(len(transitions)),
+                active_models=[
+                    {"model_name": model_name, "model_version": model_version}
+                    for model_name, model_version in active_models
+                ],
+                downstream_triggered=False,
+                warnings=publish_window_warnings,
+                status="blocked",
+                reason="downstream_trigger_failed",
+                failure_mode="finalization",
+            )
+            log_regime_publication_status(blocked_state, failed_finalization=1)
+            mdc.write_error(f"Gold regime downstream trigger failed: {type(exc).__name__}: {exc}")
+            return 1
+
+    publish_state = build_regime_publish_state(
+        published_as_of_date=publish_window_metadata["published_as_of_date"],
+        input_as_of_date=publish_window_metadata["input_as_of_date"],
+        history_rows=int(len(history)),
+        latest_rows=int(len(latest)),
+        transition_rows=int(len(transitions)),
+        active_models=[
+            {"model_name": model_name, "model_version": model_version}
+            for model_name, model_version in active_models
+        ],
+        downstream_triggered=downstream_jobs_configured,
         warnings=publish_window_warnings,
     )
-
-    save_watermarks(
-        WATERMARK_KEY,
-        publish_window_metadata
-        | {
-            "as_of_date": publish_window_metadata["published_as_of_date"],
-            "history_rows": int(len(history)),
-            "active_models": [
-                {"model_name": model_name, "model_version": model_version}
-                for model_name, model_version in active_models
-            ],
-        },
-    )
-    save_last_success(
-        WATERMARK_KEY,
+    finalization = finalize_regime_publication(
+        gold_container=gold_container,
+        inputs=published_inputs,
+        history=history,
+        latest=latest,
+        transitions=transitions,
+        active_models=active_revisions,
+        publish_state=publish_state,
+        job_name=JOB_NAME,
+        watermark_key=WATERMARK_KEY,
         when=computed_at,
-        metadata=publish_window_metadata
-        | {
-            "as_of_date": publish_window_metadata["published_as_of_date"],
-            "history_rows": int(len(history)),
-            "latest_rows": int(len(latest)),
-            "transition_rows": int(len(transitions)),
-        },
     )
+    if finalization.status != "published":
+        return 1
+
     mdc.write_line(
         "Gold regime complete: "
         f"inputs_rows={len(inputs)} published_inputs_rows={len(published_inputs)} "
         f"history_rows={len(history)} latest_rows={len(latest)} transition_rows={len(transitions)} "
         f"active_models={len(active_models)} published_as_of_date={publish_window_metadata['published_as_of_date']} "
         f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
-        f"skipped_trailing_count={len(publish_window.skipped_trailing_input_dates)}"
+        f"skipped_trailing_count={len(publish_window.skipped_trailing_input_dates)} "
+        f"downstream_triggered={str(downstream_jobs_configured).lower()}"
     )
     return 0
 
 
 if __name__ == "__main__":
     from tasks.common.job_entrypoint import run_logged_job
-    from tasks.common.job_trigger import trigger_next_job_from_env
 
     job_name = JOB_NAME
     with mdc.JobLock(job_name, conflict_policy="fail"):
-        ensure_api_awake_from_env(required=True)
+        ensure_api_awake_from_env(required=False)
         raise SystemExit(
             run_logged_job(
                 job_name=job_name,
                 run=main,
-                on_success=(
-                    lambda: write_system_health_marker(layer="gold", domain="regime", job_name=job_name),
-                    trigger_next_job_from_env,
-                ),
             )
         )
