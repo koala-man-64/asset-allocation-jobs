@@ -15,6 +15,12 @@ def unique_ticker():
     return f"TEST_MKT_{uuid.uuid4().hex[:8].upper()}"
 
 
+@pytest.fixture(autouse=True)
+def _stub_symbol_policy_helpers(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(bronze, "clear_invalid_candidate_marker", lambda **kwargs: False)
+    monkeypatch.setattr(bronze, "list_promoted_invalid_candidate_markers", lambda **kwargs: [])
+
+
 def _market_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
@@ -359,6 +365,30 @@ def test_download_allows_regime_required_symbol_even_when_blacklisted():
         mock_massive.get_market_history.assert_called_once()
         mock_list_manager.add_to_whitelist.assert_called_once_with(symbol)
         assert symbol in collected_frames
+
+
+def test_validate_environment_requires_common_container(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "https://example.test")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://scope/.default")
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_BRONZE", "bronze", raising=False)
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_COMMON", "", raising=False)
+    monkeypatch.setattr(bronze, "bronze_client", object())
+    monkeypatch.setattr(bronze, "common_client", object())
+
+    with pytest.raises(ValueError, match="AZURE_CONTAINER_COMMON"):
+        bronze._validate_environment()
+
+
+def test_validate_environment_requires_common_client(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "https://example.test")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_SCOPE", "api://scope/.default")
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_BRONZE", "bronze", raising=False)
+    monkeypatch.setattr(bronze.cfg, "AZURE_CONTAINER_COMMON", "common", raising=False)
+    monkeypatch.setattr(bronze, "bronze_client", object())
+    monkeypatch.setattr(bronze, "common_client", None)
+
+    with pytest.raises(RuntimeError, match="Common storage client is unavailable"):
+        bronze._validate_environment()
 
 
 def test_download_uses_existing_data_window_and_merges(unique_ticker):
@@ -1179,6 +1209,8 @@ def test_main_async_schedules_regime_required_symbol_even_when_blacklisted():
         ), patch(
             "tasks.market_data.bronze_market_data._download_and_save_raw_with_recovery",
         ) as mock_download, patch(
+            "tasks.market_data.bronze_market_data.clear_invalid_candidate_marker"
+        ) as mock_clear, patch(
             "tasks.market_data.bronze_market_data.start_alpha26_bronze_publish",
             return_value=object(),
         ), patch(
@@ -1201,7 +1233,180 @@ def test_main_async_schedules_regime_required_symbol_even_when_blacklisted():
         assert exit_code == 0
         mock_download.assert_called_once()
         assert mock_download.call_args.args[0] == symbol
+        assert "skip_blacklist_check" not in mock_download.call_args.kwargs
+        mock_clear.assert_called_once()
+        assert mock_clear.call_args.kwargs["symbol"] == symbol
         client_manager.close_all.assert_called_once()
+
+    asyncio.run(run_test())
+
+
+def test_main_async_reprobes_promoted_blacklisted_symbol_and_recovers(unique_ticker):
+    symbol = unique_ticker
+    client_manager = MagicMock()
+
+    def _fake_download(
+        symbol_arg,
+        _client_manager,
+        *,
+        collected_symbol_frames,
+        collected_lock=None,
+        existing_symbol_df=None,
+        skip_blacklist_check=False,
+        treat_no_history_as_unavailable=False,
+        snapshot_row=None,
+        max_attempts=0,
+        sleep_seconds=0.0,
+    ):
+        del _client_manager, existing_symbol_df, snapshot_row, max_attempts, sleep_seconds
+        assert symbol_arg == symbol
+        assert skip_blacklist_check is True
+        assert treat_no_history_as_unavailable is True
+        bronze._set_collected_market_frame(
+            symbol=symbol_arg,
+            frame=_market_frame(
+                [
+                    {
+                        "Date": "2024-01-03",
+                        "Open": 11.0,
+                        "High": 12.0,
+                        "Low": 10.0,
+                        "Close": 11.5,
+                        "Volume": 150.0,
+                        "ShortInterest": 1100.0,
+                        "ShortVolume": 550.0,
+                    }
+                ]
+            ),
+            collected_symbol_frames=collected_symbol_frames,
+            collected_lock=collected_lock,
+        )
+
+    async def run_test():
+        with patch("tasks.market_data.bronze_market_data._validate_environment"), patch(
+            "tasks.market_data.bronze_market_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_promoted_invalid_candidate_markers",
+            return_value=[{"symbol": symbol, "status": "promoted"}],
+        ), patch(
+            "tasks.market_data.bronze_market_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.market_data.bronze_market_data._load_alpha26_existing_market_bucket",
+            side_effect=_fake_empty_bucket_load,
+        ), patch(
+            "tasks.market_data.bronze_market_data._ThreadLocalMassiveClientManager",
+            return_value=client_manager,
+        ), patch(
+            "tasks.market_data.bronze_market_data._get_max_workers",
+            return_value=1,
+        ), patch(
+            "tasks.market_data.bronze_market_data._download_and_save_raw_with_recovery",
+            side_effect=_fake_download,
+        ) as mock_download, patch(
+            "tasks.market_data.bronze_market_data.clear_invalid_candidate_marker"
+        ) as mock_clear, patch(
+            "tasks.market_data.bronze_market_data.start_alpha26_bronze_publish",
+            return_value=object(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.write_alpha26_bronze_bucket",
+            return_value={"size": 1},
+        ), patch(
+            "tasks.market_data.bronze_market_data.finalize_alpha26_bronze_publish",
+            return_value=_fake_publish_result(written_symbols=1),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.market_data.bronze_market_data.mdc.write_line"
+        ), patch(
+            "tasks.market_data.bronze_market_data.mdc.write_warning"
+        ):
+            mock_list_manager.is_blacklisted.side_effect = lambda value: str(value).strip().upper() == symbol
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        mock_download.assert_called_once()
+        mock_clear.assert_called_once()
+        assert mock_clear.call_args.kwargs["symbol"] == symbol
+
+    asyncio.run(run_test())
+
+
+def test_main_async_promoted_reprobe_retains_blacklist_on_no_history(unique_ticker):
+    symbol = unique_ticker
+    client_manager = MagicMock()
+
+    async def run_test():
+        with patch("tasks.market_data.bronze_market_data._validate_environment"), patch(
+            "tasks.market_data.bronze_market_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_promoted_invalid_candidate_markers",
+            return_value=[{"symbol": symbol, "status": "promoted"}],
+        ), patch(
+            "tasks.market_data.bronze_market_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.market_data.bronze_market_data._load_alpha26_existing_market_bucket",
+            side_effect=_fake_empty_bucket_load,
+        ), patch(
+            "tasks.market_data.bronze_market_data._ThreadLocalMassiveClientManager",
+            return_value=client_manager,
+        ), patch(
+            "tasks.market_data.bronze_market_data._get_max_workers",
+            return_value=1,
+        ), patch(
+            "tasks.market_data.bronze_market_data._download_and_save_raw_with_recovery",
+            side_effect=bronze.BronzeCoverageUnavailableError(
+                bronze._NO_MARKET_HISTORY_REASON_CODE,
+                detail=f"Massive returned no market history for {symbol}.",
+            ),
+        ) as mock_download, patch(
+            "tasks.market_data.bronze_market_data.record_promoted_symbol_reprobe_attempt"
+        ) as mock_record_reprobe, patch(
+            "tasks.market_data.bronze_market_data.clear_invalid_candidate_marker"
+        ) as mock_clear, patch(
+            "tasks.market_data.bronze_market_data.resolve_job_run_status",
+            return_value=("succeeded", 0),
+        ), patch(
+            "tasks.market_data.bronze_market_data.start_alpha26_bronze_publish",
+            return_value=object(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.write_alpha26_bronze_bucket",
+            return_value={"size": 1},
+        ), patch(
+            "tasks.market_data.bronze_market_data.finalize_alpha26_bronze_publish",
+            return_value=_fake_publish_result(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.market_data.bronze_market_data.mdc.write_line"
+        ), patch(
+            "tasks.market_data.bronze_market_data.mdc.write_warning"
+        ):
+            mock_list_manager.is_blacklisted.side_effect = lambda value: str(value).strip().upper() == symbol
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        mock_download.assert_called_once()
+        assert mock_download.call_args.kwargs["skip_blacklist_check"] is True
+        assert mock_download.call_args.kwargs["treat_no_history_as_unavailable"] is True
+        mock_record_reprobe.assert_called_once()
+        assert mock_record_reprobe.call_args.kwargs["outcome"] == "still_no_history"
+        mock_clear.assert_not_called()
 
     asyncio.run(run_test())
 

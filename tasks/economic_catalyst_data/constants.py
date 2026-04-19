@@ -285,14 +285,6 @@ SOURCE_PRIORITY: Final[dict[str, int]] = {
     "alpha_vantage_news": 30,
 }
 
-HIGH_IMPACT_DEFAULT_GROUPS: Final[tuple[str, ...]] = (
-    "Inflation",
-    "Labor",
-    "GrowthActivity",
-    "CentralBankPolicy",
-    "RatesFiscal",
-)
-
 
 def bronze_run_prefix(run_id: str) -> str:
     return f"{BRONZE_ROOT_PREFIX}/{str(run_id or '').strip()}"

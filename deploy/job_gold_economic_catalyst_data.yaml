@@ -63,8 +63,6 @@ properties:
         value: ${AZURE_CONTAINER_SILVER}
       - name: AZURE_CONTAINER_GOLD
         value: ${AZURE_CONTAINER_GOLD}
-      - name: AZURE_CONTAINER_COMMON
-        value: ${AZURE_CONTAINER_COMMON}
       - name: AZURE_FOLDER_ECONOMIC_CATALYST
         value: ${AZURE_FOLDER_ECONOMIC_CATALYST}
       image: ${JOB_IMAGE}
