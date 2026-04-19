@@ -1,10 +1,12 @@
 name: Jobs Release
-run-name: Jobs Release / ${{ github.event_name }} / ${{ github.ref_name }}
+run-name: Jobs Release / ${{ github.event_name }} / ${{ github.event.workflow_run.head_branch || github.ref_name }}
 
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows:
+      - Jobs Integration
+    types:
+      - completed
   workflow_dispatch:
 
 permissions:
@@ -12,12 +14,13 @@ permissions:
   id-token: write
 
 concurrency:
-  group: jobs-release-${{ github.ref }}
+  group: jobs-release-${{ github.event.workflow_run.head_sha || github.ref || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   release:
     name: release
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == github.event.repository.default_branch)
     runs-on: ubuntu-22.04
     outputs:
       image_ref: ${{ steps.image.outputs.image_ref }}
@@ -26,9 +29,32 @@ jobs:
       runtime_common_version: ${{ steps.shared.outputs.runtime_common_version }}
       jobs_version: ${{ steps.shared.outputs.jobs_version }}
     steps:
+      - name: Resolve release source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_branch="${GITHUB_REF_NAME}"
+          release_git_sha="${GITHUB_SHA}"
+          checkout_ref="${GITHUB_SHA}"
+          trigger_source="${GITHUB_EVENT_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
+            release_branch="${{ github.event.workflow_run.head_branch }}"
+            release_git_sha="${{ github.event.workflow_run.head_sha }}"
+            checkout_ref="${release_git_sha}"
+            trigger_source="workflow_run:${{ github.event.workflow_run.name }}"
+          fi
+          {
+            echo "release_branch=${release_branch}"
+            echo "release_git_sha=${release_git_sha}"
+            echo "checkout_ref=${checkout_ref}"
+            echo "trigger_source=${trigger_source}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout jobs repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ steps.source.outputs.checkout_ref }}
           path: asset-allocation-jobs
 
       - name: Set up Python
@@ -70,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           registry="$(az acr show --name "${{ vars.ACR_NAME }}" --resource-group "${{ vars.RESOURCE_GROUP }}" --query loginServer -o tsv)"
-          image_ref="${registry}/asset-allocation-jobs:${GITHUB_SHA}"
+          image_ref="${registry}/asset-allocation-jobs:${{ steps.source.outputs.release_git_sha }}"
           build_args=(
             python
             asset-allocation-jobs/scripts/workflows/build_jobs_image.py
@@ -99,7 +125,7 @@ jobs:
           set -euo pipefail
           python asset-allocation-jobs/scripts/workflows/write_release_manifest.py \
             --repo "${GITHUB_REPOSITORY}" \
-            --git-sha "${GITHUB_SHA}" \
+            --git-sha "${RELEASE_GIT_SHA}" \
             --image-ref "${IMAGE_REF}" \
             --image-digest "${IMAGE_DIGEST}" \
             --contracts-version "${CONTRACTS_VERSION}" \
@@ -111,6 +137,7 @@ jobs:
           IMAGE_REF: ${{ steps.image.outputs.image_ref }}
           IMAGE_DIGEST: ${{ steps.image.outputs.image_digest }}
           JOBS_VERSION: ${{ steps.shared.outputs.jobs_version }}
+          RELEASE_GIT_SHA: ${{ steps.source.outputs.release_git_sha }}
           RUNTIME_COMMON_VERSION: ${{ steps.shared.outputs.runtime_common_version }}
 
       - name: Upload release artifacts
@@ -130,6 +157,9 @@ jobs:
             echo "## Jobs release"
             echo ""
             echo "- Image: \`${IMAGE_DIGEST}\`"
+            echo "- Trigger: \`${{ steps.source.outputs.trigger_source }}\`"
+            echo "- Release branch: \`${{ steps.source.outputs.release_branch }}\`"
+            echo "- Release git SHA: \`${{ steps.source.outputs.release_git_sha }}\`"
             echo "- Contracts: \`${{ steps.shared.outputs.contracts_version }}\`"
             echo "- Runtime common: \`${{ steps.shared.outputs.runtime_common_version }}\`"
             echo "- Manifest: \`artifacts/release-manifest.json\`"

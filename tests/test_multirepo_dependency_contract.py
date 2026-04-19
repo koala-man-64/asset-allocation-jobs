@@ -57,6 +57,17 @@ def test_quality_and_release_workflows_do_not_checkout_sibling_repos() -> None:
         assert '${{ steps.shared.outputs.runtime_common_version }}' in text
 
 
+def test_release_workflow_runs_from_successful_mainline_integration_or_manual_dispatch() -> None:
+    release = (repo_root() / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "\n  workflow_run:\n" in release
+    assert "\n      - Jobs Integration\n" in release
+    assert "github.event.workflow_run.conclusion == 'success'" in release
+    assert "github.event.workflow_run.head_branch == github.event.repository.default_branch" in release
+    assert "github.event.workflow_run.head_sha" in release
+    assert "steps.source.outputs.release_git_sha" in release
+    assert "\n  push:\n" not in release
+
+
 def test_integration_workflow_is_the_only_place_cross_repo_checkout_and_contract_adoption_are_allowed() -> None:
     integration = (repo_root() / ".github" / "workflows" / "integration.yml").read_text(encoding="utf-8")
     assert "Checkout control-plane repository" in integration
