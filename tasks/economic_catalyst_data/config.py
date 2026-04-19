@@ -116,18 +116,13 @@ class EconomicCatalystConfig:
     bronze_container: str
     silver_container: str
     gold_container: str
-    common_container: str
     official_sources: tuple[str, ...]
     vendor_sources: tuple[str, ...]
-    country_scope: tuple[str, ...]
-    high_impact_groups: tuple[str, ...]
     structured_lookback_days: int
     headline_lookback_days: int
     future_schedule_days: int
     general_poll_minutes: int
-    hot_window_poll_minutes: int
     fred_api_key: str
-    bea_api_key: str
     alpha_vantage_api_key: str
     massive_api_key: str
     alpaca_key_id: str
@@ -170,24 +165,13 @@ class EconomicCatalystConfig:
             bronze_container=_env_text("AZURE_CONTAINER_BRONZE", "bronze"),
             silver_container=_env_text("AZURE_CONTAINER_SILVER", "silver"),
             gold_container=_env_text("AZURE_CONTAINER_GOLD", "gold"),
-            common_container=_env_text("AZURE_CONTAINER_COMMON", "common"),
             official_sources=official_sources,
             vendor_sources=vendor_sources,
-            country_scope=_csv_or_default(
-                os.environ.get("ECONOMIC_CATALYST_COUNTRY_SCOPE", ""),
-                ("US", "EA", "GB", "JP"),
-            ),
-            high_impact_groups=_csv_or_default(
-                os.environ.get("ECONOMIC_CATALYST_HIGH_IMPACT_GROUPS", ""),
-                constants.HIGH_IMPACT_DEFAULT_GROUPS,
-            ),
             structured_lookback_days=_env_int("ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS", 90),
             headline_lookback_days=_env_int("ECONOMIC_CATALYST_HEADLINE_CORRECTION_LOOKBACK_DAYS", 14),
             future_schedule_days=_env_int("ECONOMIC_CATALYST_FUTURE_SCHEDULE_DAYS", 180),
             general_poll_minutes=_env_int("ECONOMIC_CATALYST_GENERAL_POLL_MINUTES", 15),
-            hot_window_poll_minutes=_env_int("ECONOMIC_CATALYST_HOT_WINDOW_POLL_MINUTES", 5),
             fred_api_key=_env_text("FRED_API_KEY"),
-            bea_api_key=_env_text("BEA_API_KEY"),
             alpha_vantage_api_key=_env_text("ALPHA_VANTAGE_API_KEY"),
             massive_api_key=_env_text("MASSIVE_API_KEY"),
             alpaca_key_id=_env_text("ALPACA_KEY_ID"),
@@ -264,4 +248,3 @@ class EconomicCatalystConfig:
     def future_window_end(self, *, now: datetime | None = None) -> datetime:
         anchor = now or datetime.now(timezone.utc)
         return anchor + timedelta(days=max(self.future_schedule_days, 1))
-

@@ -133,10 +133,8 @@ def test_assert_complete_regime_inputs_reports_non_overlapping_series() -> None:
     assert "coverage=" in message
 
 
-def test_write_storage_outputs_refreshes_persisted_metadata_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_write_storage_parquet_outputs_writes_all_regime_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     parquet_paths: list[str] = []
-    saved_artifact: dict[str, object] = {}
-    snapshot_updates: list[dict[str, object]] = []
 
     class _FakeClient:
         def write_parquet(self, path: str, frame: pd.DataFrame) -> None:
@@ -144,37 +142,18 @@ def test_write_storage_outputs_refreshes_persisted_metadata_snapshots(monkeypatc
             assert isinstance(frame, pd.DataFrame)
 
     monkeypatch.setattr(regime_job.mdc, "get_storage_client", lambda _container: _FakeClient())
-    monkeypatch.setattr(regime_job, "computed_at_iso", lambda: "2026-03-21T12:00:00+00:00")
-    monkeypatch.setattr(
-        regime_job.domain_artifacts.mdc,
-        "save_json_content",
-        lambda payload, path, client=None: saved_artifact.update({"payload": payload, "path": path, "client": client}),
-    )
-    monkeypatch.setattr(
-        regime_job.domain_artifacts.domain_metadata_snapshots,
-        "update_domain_metadata_snapshots_from_artifact",
-        lambda **kwargs: snapshot_updates.append(kwargs),
-    )
 
     inputs = pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-20")], "symbol": ["SPY"]})
     history = pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-20")], "regime_code": ["risk_on"]})
     latest = history.copy()
     transitions = pd.DataFrame({"effective_from_date": [pd.Timestamp("2026-03-20")]})
 
-    regime_job._write_storage_outputs(
+    regime_job._write_storage_parquet_outputs(
         gold_container="gold",
         inputs=inputs,
         history=history,
         latest=latest,
         transitions=transitions,
-        active_revisions=[
-            {
-                "name": "default-regime",
-                "version": 1,
-                "activated_at": "2026-03-20T00:00:00+00:00",
-            }
-        ],
-        warnings=["Trailing incomplete regime input dates skipped from published regime surfaces."],
     )
 
     assert parquet_paths == [
@@ -183,16 +162,6 @@ def test_write_storage_outputs_refreshes_persisted_metadata_snapshots(monkeypatc
         "regime/latest.parquet",
         "regime/transitions.parquet",
     ]
-    assert saved_artifact["path"] == "regime/_metadata/domain.json"
-    assert saved_artifact["payload"]["artifactPath"] == "regime/_metadata/domain.json"
-    assert saved_artifact["payload"]["rootPath"] == "regime"
-    assert saved_artifact["payload"]["warnings"] == [
-        "Trailing incomplete regime input dates skipped from published regime surfaces."
-    ]
-    assert len(snapshot_updates) == 1
-    assert snapshot_updates[0]["layer"] == "gold"
-    assert snapshot_updates[0]["domain"] == "regime"
-    assert snapshot_updates[0]["artifact"]["artifactPath"] == "regime/_metadata/domain.json"
 
 
 def test_build_revision_inputs_uses_model_halt_threshold_for_streak_and_overlay() -> None:
@@ -491,3 +460,96 @@ def test_replace_postgres_tables_deletes_scoped_model_rows_even_when_stage_is_em
         in message
         for message in messages
     )
+
+
+def test_main_fails_closed_on_stale_eod_input_without_publishing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql://test")
+    monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")
+    logged_status: list[tuple[dict[str, object], int]] = []
+    call_counts = {"replace": 0, "storage": 0, "finalize": 0, "trigger": 0}
+
+    monkeypatch.setattr(regime_job.mdc, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(regime_job, "_load_market_series", lambda _dsn: pd.DataFrame())
+    monkeypatch.setattr(
+        regime_job.RegimeRepository,
+        "list_active_regime_model_revisions",
+        lambda self: [{"name": "default-regime", "version": 2, "config": {}}],
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "_build_inputs_daily",
+        lambda market_series, *, computed_at: pd.DataFrame(
+            {
+                "as_of_date": ["2026-03-19", "2026-03-20"],
+                "return_1d": [0.01, pd.NA],
+                "return_20d": [0.04, pd.NA],
+                "rvol_10d_ann": [14.0, pd.NA],
+                "vix_spot_close": [18.0, 25.0],
+                "vix3m_close": [18.8, pd.NA],
+                "vix_slope": [0.8, pd.NA],
+                "vix_gt_32_streak": [0, 0],
+                "inputs_complete_flag": [True, False],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "_resolve_publish_window",
+        lambda inputs, *, market_series: regime_job._RegimePublishWindow(
+            published_as_of_date=date(2026, 3, 19),
+            input_as_of_date=date(2026, 3, 20),
+            skipped_trailing_input_dates=(date(2026, 3, 20),),
+        ),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "_replace_postgres_tables",
+        lambda *args, **kwargs: call_counts.__setitem__("replace", call_counts["replace"] + 1),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "_write_storage_parquet_outputs",
+        lambda *args, **kwargs: call_counts.__setitem__("storage", call_counts["storage"] + 1),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "finalize_regime_publication",
+        lambda *args, **kwargs: call_counts.__setitem__("finalize", call_counts["finalize"] + 1),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "trigger_next_job_from_env",
+        lambda: call_counts.__setitem__("trigger", call_counts["trigger"] + 1),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "log_regime_publication_status",
+        lambda state, failed_finalization=0: logged_status.append((dict(state), int(failed_finalization))),
+    )
+
+    exit_code = regime_job.main()
+
+    assert exit_code == 2
+    assert call_counts == {"replace": 0, "storage": 0, "finalize": 0, "trigger": 0}
+    assert logged_status == [
+        (
+            {
+                "as_of_date": "2026-03-19",
+                "published_as_of_date": "2026-03-19",
+                "input_as_of_date": "2026-03-20",
+                "history_rows": 0,
+                "latest_rows": 0,
+                "transition_rows": 0,
+                "active_models": [],
+                "downstream_triggered": False,
+                "warnings": [
+                    "Trailing incomplete regime input dates skipped from published regime surfaces: 2026-03-20. "
+                    "Published regime state remains capped at 2026-03-19."
+                ],
+                "status": "retry_pending",
+                "reason": "stale_eod_input",
+                "failure_mode": "none",
+            },
+            0,
+        )
+    ]

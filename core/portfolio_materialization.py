@@ -4,7 +4,6 @@ import hashlib
 import json
 import math
 import re
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence

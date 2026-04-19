@@ -15,7 +15,7 @@ from asset_allocation_runtime_common.market_data.pipeline import ListManager
 from asset_allocation_runtime_common.market_data import bronze_bucketing
 from tasks.common.bronze_alpha26_publish import publish_alpha26_bronze_domain
 from tasks.common.bronze_observability import log_bronze_success, should_log_bronze_success
-from tasks.common.bronze_symbol_policy import build_bronze_run_id
+from tasks.common.bronze_symbol_policy import build_bronze_run_id, validate_bronze_storage_clients
 from tasks.common.job_status import resolve_job_run_status
 from tasks.common.bronze_backfill_coverage import (
     extract_min_date_from_dataframe,
@@ -93,11 +93,18 @@ def _failure_bucket_key(exc: BaseException) -> str:
 
 
 def _validate_environment() -> None:
-    required = ["AZURE_CONTAINER_BRONZE", "NASDAQ_API_KEY"]
+    required = ["AZURE_CONTAINER_BRONZE", "AZURE_CONTAINER_COMMON", "NASDAQ_API_KEY"]
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
         raise RuntimeError("Missing env vars: " + " ".join(missing))
-    
+
+    validate_bronze_storage_clients(
+        bronze_container_name=cfg.AZURE_CONTAINER_BRONZE,
+        common_container_name=cfg.AZURE_CONTAINER_COMMON,
+        bronze_client=bronze_client,
+        common_client=common_client,
+    )
+
     nasdaqdatalink.ApiConfig.api_key = os.environ.get('NASDAQ_API_KEY')
 
 def _empty_coverage_summary() -> dict[str, int]:

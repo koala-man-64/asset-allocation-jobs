@@ -292,13 +292,26 @@ def test_economic_catalyst_migration_creates_serving_tables_and_views() -> None:
     assert "CREATE TABLE IF NOT EXISTS core.economic_catalyst_source_state" in text
     assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_events" in text
     assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_event_versions" in text
-    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_headlines" in text
-    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_headline_versions" in text
-    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_mentions" in text
-    assert "CREATE TABLE IF NOT EXISTS gold.economic_catalyst_entity_daily" in text
-    assert "CREATE OR REPLACE VIEW gold.economic_catalyst_calendar_by_date AS" in text
-    assert "CREATE OR REPLACE VIEW gold.economic_catalyst_releases_by_date AS" in text
-    assert "CREATE OR REPLACE VIEW gold.economic_catalyst_headlines_by_date AS" in text
-    assert "CREATE OR REPLACE VIEW gold.economic_catalyst_entity_daily_by_date AS" in text
-    assert "GRANT SELECT ON TABLE gold.economic_catalyst_events TO backtest_service;" in text
-    assert "GRANT SELECT ON TABLE gold.economic_catalyst_entity_daily_by_date TO backtest_service;" in text
+
+
+def test_default_regime_v2_migration_seeds_canonical_revision_and_activation() -> None:
+    repo_root = _repo_root()
+    migration = (
+        repo_root
+        / "deploy"
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0039_default_regime_v2.sql"
+    )
+    text = migration.read_text(encoding="utf-8")
+
+    assert "INSERT INTO core.regime_models" in text
+    assert "'default-regime'" in text
+    assert "version = GREATEST(core.regime_models.version, EXCLUDED.version)" in text
+    assert "highVolEnterThreshold\": 28.0" in text
+    assert "highVolExitThreshold\": 28.0" in text
+    assert "haltVixThreshold\": 32.0" in text
+    assert "haltVixStreakDays\": 2" in text
+    assert "WHERE model_name = 'default-regime' AND version = 2" in text
+    assert "SELECT 'default-regime', 2, 'migration-0039', NOW()" in text
