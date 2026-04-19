@@ -73,7 +73,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
         "\n".join(
             [
                 "[project]",
-                'dependencies = ["asset-allocation-contracts==2.1.0", "asset-allocation-runtime-common==2.0.8"]',
+                'dependencies = ["asset-allocation-contracts==2.4.0", "asset-allocation-runtime-common==2.0.9"]',
                 "",
             ]
         ),
@@ -89,7 +89,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
 
     versions = module.validate_repo_shared_dependency_compatibility(repo_root=tmp_path, python_exe="/python")
 
-    assert versions == ("2.1.0", "2.0.8")
+    assert versions == ("2.4.0", "2.0.9")
     assert commands == [
         [
             "/python",
@@ -98,8 +98,8 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
             "install",
             "--dry-run",
             "--ignore-installed",
-            "asset-allocation-contracts==2.1.0",
-            "asset-allocation-runtime-common==2.0.8",
+            "asset-allocation-contracts==2.4.0",
+            "asset-allocation-runtime-common==2.0.9",
         ]
     ]
 
@@ -120,7 +120,7 @@ def test_validate_shared_dependency_compatibility_surfaces_resolver_failure() ->
             module.validate_shared_dependency_compatibility(
                 python_exe="/python",
                 contracts_version="2.0.0",
-                runtime_common_version="2.0.8",
+                runtime_common_version="2.0.9",
             )
     finally:
         monkeypatch.undo()
