@@ -8,6 +8,7 @@ import subprocess
 
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
+SECRET_VALUE_PLACEHOLDER_PATTERN = re.compile(r"^\s*value:\s*\$\{([A-Z][A-Z0-9_]*)\}\s*$")
 DEFAULT_ENV_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / ".env.template"
 DEFAULT_REPOSITORY_TAGS = {
     "RESOURCE_TAG_COST_CENTER": "asset-allocation",
@@ -79,6 +80,33 @@ def unresolved_placeholders(text: str) -> list[str]:
     return sorted({match.group(1) for match in PLACEHOLDER_PATTERN.finditer(text)})
 
 
+def required_secret_variables(template_text: str) -> tuple[str, ...]:
+    required: list[str] = []
+    in_secrets_block = False
+    secrets_indent = 0
+
+    for line in template_text.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+
+        if stripped == "secrets:":
+            in_secrets_block = True
+            secrets_indent = indent
+            continue
+
+        if in_secrets_block and stripped and indent <= secrets_indent and not line.lstrip().startswith("- "):
+            in_secrets_block = False
+
+        if not in_secrets_block:
+            continue
+
+        match = SECRET_VALUE_PLACEHOLDER_PATTERN.match(line)
+        if match:
+            required.append(match.group(1))
+
+    return tuple(dict.fromkeys(required))
+
+
 def ensure_manifest_fully_rendered(*, manifest_path: Path, rendered_text: str) -> None:
     unresolved = unresolved_placeholders(rendered_text)
     if not unresolved:
@@ -86,6 +114,26 @@ def ensure_manifest_fully_rendered(*, manifest_path: Path, rendered_text: str) -
     missing = ", ".join(unresolved)
     raise SystemExit(
         f"Manifest {manifest_path} still contains unresolved template variables: {missing}. "
+        "Export them in the deploy environment before applying manifests."
+    )
+
+
+def ensure_required_secrets_present(
+    *,
+    manifest_path: Path,
+    template_text: str,
+    environment: dict[str, str],
+) -> None:
+    missing = [
+        name
+        for name in required_secret_variables(template_text)
+        if not str(environment.get(name) or "").strip()
+    ]
+    if not missing:
+        return
+    missing_names = ", ".join(missing)
+    raise SystemExit(
+        f"Manifest {manifest_path} has secret variables resolved to empty values: {missing_names}. "
         "Export them in the deploy environment before applying manifests."
     )
 
@@ -113,7 +161,13 @@ def render_and_apply_manifests(*, deploy_dir: Path, rendered_dir: Path, resource
     resolved_environment = render_environment(environment)
     rendered_dir.mkdir(parents=True, exist_ok=True)
     for manifest in sorted(deploy_dir.glob("job_*.yaml")):
-        rendered = render_manifest(manifest.read_text(encoding="utf-8"), resolved_environment)
+        template_text = manifest.read_text(encoding="utf-8")
+        ensure_required_secrets_present(
+            manifest_path=manifest,
+            template_text=template_text,
+            environment=resolved_environment,
+        )
+        rendered = render_manifest(template_text, resolved_environment)
         ensure_manifest_fully_rendered(manifest_path=manifest, rendered_text=rendered)
         rendered_path = rendered_dir / manifest.name
         rendered_path.write_text(rendered, encoding="utf-8")

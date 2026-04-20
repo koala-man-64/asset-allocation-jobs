@@ -471,6 +471,48 @@ def test_render_and_apply_manifests_fails_on_unresolved_placeholders(
     assert not (rendered_dir / "job_broken.yaml").exists()
 
 
+def test_render_and_apply_manifests_fails_on_blank_secret_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    env_template = tmp_path / ".env.template"
+    env_template.write_text("FRED_API_KEY=\n", encoding="utf-8")
+    monkeypatch.setattr(module, "DEFAULT_ENV_TEMPLATE_PATH", env_template)
+
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir()
+    rendered_dir = tmp_path / "rendered"
+    (deploy_dir / "job_secret.yaml").write_text(
+        "\n".join(
+            [
+                "name: secret-job",
+                "properties:",
+                "  configuration:",
+                "    secrets:",
+                "    - name: fred-api-key",
+                "      value: ${FRED_API_KEY}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "manifest_exists", lambda **_: False)
+    monkeypatch.setattr(module.subprocess, "check_call", lambda command: commands.append(list(command)))
+
+    with pytest.raises(SystemExit, match="secret variables resolved to empty values: FRED_API_KEY"):
+        module.render_and_apply_manifests(
+            deploy_dir=deploy_dir,
+            rendered_dir=rendered_dir,
+            resource_group="rg",
+            environment={},
+        )
+
+    assert commands == []
+    assert not (rendered_dir / "job_secret.yaml").exists()
+
+
 def test_deploy_prod_workflow_does_not_define_ranking_override_env_vars() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
@@ -483,6 +525,16 @@ def test_deploy_prod_workflow_exports_subscription_id_for_manifest_rendering() -
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
     assert "AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}" in workflow_text
+
+
+def test_deploy_prod_workflow_exports_economic_catalyst_secret_vars() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert "FRED_API_KEY: ${{ secrets.FRED_API_KEY }}" in workflow_text
+    assert "MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}" in workflow_text
+    assert "ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}" in workflow_text
+    assert "ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}" in workflow_text
+    assert "ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}" in workflow_text
 
 
 def test_verify_deployed_job_images_detects_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

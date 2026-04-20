@@ -60,7 +60,12 @@ jobs:
       GOLD_PRICE_TARGET_JOB: ${{ vars.GOLD_PRICE_TARGET_JOB || 'gold-price-target-job' }}
       GOLD_EARNINGS_JOB: ${{ vars.GOLD_EARNINGS_JOB || 'gold-earnings-job' }}
       AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       NASDAQ_API_KEY: ${{ secrets.NASDAQ_API_KEY }}
+      MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+      ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+      ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
       POSTGRES_DSN: ${{ secrets.POSTGRES_DSN }}
     steps:
       - name: Checkout repository
