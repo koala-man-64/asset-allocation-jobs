@@ -12,8 +12,9 @@ identity:
     "${ACR_PULL_IDENTITY_RESOURCE_ID}": {}
 properties:
   configuration:
-    triggerType: Manual
-    manualTriggerConfig:
+    triggerType: Schedule
+    scheduleTriggerConfig:
+      cronExpression: "0 23 * * 1-5"
       parallelism: 1
       replicaCompletionCount: 1
     replicaRetryLimit: 1

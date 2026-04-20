@@ -194,10 +194,11 @@ def test_results_reconcile_job_is_manual_and_not_dry_run() -> None:
     assert "RESULTS_RECONCILE_DRY_RUN" not in text
 
 
-def test_symbol_cleanup_job_is_manual_and_points_to_worker_module() -> None:
+def test_symbol_cleanup_job_is_scheduled_and_points_to_worker_module() -> None:
     text = (repo_root() / "deploy" / "job_symbol_cleanup.yaml").read_text(encoding="utf-8")
-    assert "triggerType: Manual" in text
-    assert "manualTriggerConfig:" in text
+    assert "triggerType: Schedule" in text
+    assert "scheduleTriggerConfig:" in text
+    assert 'cronExpression: "0 23 * * 1-5"' in text
     assert 'command: ["python", "-m", "tasks.symbol_cleanup.worker"]' in text
 
 

@@ -48,6 +48,7 @@ The intraday workers are normally schedule-driven; if you need to repair them ma
 - Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for ad hoc operator-driven starts after deployment.
 - Treat `results-reconcile-job` as trigger-driven. Gold jobs invoke it automatically, and operators start it manually only for repair or replay workflows.
 - Treat the intraday pair as queue-driven schedules. `intraday-monitor-job` only claims due watchlists and `intraday-market-refresh-job` only drains queued targeted market refresh batches.
+- Treat `symbol-cleanup-job` as a queue-driven weekday schedule. It runs at `23:00 UTC` (`0 23 * * 1-5`) after Bronze day-end refreshes and drains queued symbol cleanup work in a bounded serial pass; operators can still start it manually for repair or replay workflows.
 
 ## Backtesting Runtime V4
 
@@ -143,6 +144,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - If `results-reconcile-job` does not run after a gold-stage success, verify the upstream gold manifest still defines `TRIGGER_NEXT_JOB_NAME=results-reconcile-job` or start it manually with `python scripts\ops\trigger_job.py --job results-reconcile --resource-group AssetAllocationRG`.
 - If intraday watchlists stay due but no runs are claimed, verify `job_intraday_monitor.yaml` is deployed, the job schedule is active, and the control plane still allows the `intraday-monitor-job` caller name.
 - If intraday refresh batches accumulate, verify `job_intraday_market_refresh.yaml` is deployed and that the manifest does not define `TRIGGER_NEXT_JOB_NAME`; the refresh worker is expected to run Bronze, Silver, and Gold in-process for the targeted symbols.
+- If symbol cleanup work accumulates, verify `job_symbol_cleanup.yaml` is deployed with the expected `0 23 * * 1-5` UTC schedule, and use `python scripts\ops\trigger_job.py --job symbol-cleanup --resource-group AssetAllocationRG` for an immediate repair run.
 - If a backtest run fails before claim/start with an auth or reachability error, treat it as a preflight failure. Verify the readiness dependency, `ASSET_ALLOCATION_API_BASE_URL`, `ASSET_ALLOCATION_API_SCOPE`, and the control-plane identity path before retrying the job.
 - If summary metrics look daily-only on an intraday run, treat that as a cadence-metric issue, not a deployment issue. The remediation should publish cadence-aware metrics and rolling windows, so a job that still looks daily-only is not on the expected v4 path.
 - If gross and net return converge when commissions or slippage are non-zero, treat that as a cost-accounting issue. The expected v4 behavior is to publish net-of-cost summary returns plus additive gross-return and cost-drag fields.

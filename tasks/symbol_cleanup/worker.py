@@ -18,6 +18,8 @@ from core.symbol_cleanup_runtime import (
 
 logger = logging.getLogger("asset-allocation.tasks.symbol-cleanup")
 
+_EXECUTION_BUDGET_SECONDS = 1500.0
+
 
 def _require_env(name: str) -> str:
     value = str(os.environ.get(name) or "").strip()
@@ -54,6 +56,10 @@ def preflight_dependencies(*, dsn: str, execution_name: str | None) -> None:
         execution_name=execution_name,
         duration_sec=f"{(monotonic_time.monotonic() - started_at):.2f}",
     )
+
+
+def _execution_budget_exhausted(started_at: float) -> bool:
+    return (monotonic_time.monotonic() - started_at) >= _EXECUTION_BUDGET_SECONDS
 
 
 def process_work_item(
@@ -117,7 +123,6 @@ def main() -> int:
     execution_name = str(os.environ.get("CONTAINER_APP_JOB_EXECUTION_NAME") or "").strip() or None
     transport: ControlPlaneTransport | None = None
     repo: SymbolEnrichmentRepository | None = None
-    work = None
     try:
         preflight_dependencies(dsn=dsn, execution_name=execution_name)
     except Exception:
@@ -127,55 +132,98 @@ def main() -> int:
     try:
         transport = ControlPlaneTransport.from_env()
         repo = SymbolEnrichmentRepository(transport=transport)
-        work = repo.claim_work(execution_name=execution_name)
-        if work is None:
-            logger.info("No queued symbol cleanup work found.")
-            _log_lifecycle("no_work", execution_name=execution_name)
-            return 0
+        pass_started_at = monotonic_time.monotonic()
+        claimed_count = 0
+        completed_count = 0
+        failed_count = 0
+        deferred_to_next_run = False
+
+        while True:
+            if _execution_budget_exhausted(pass_started_at):
+                deferred_to_next_run = claimed_count > 0
+                _log_lifecycle(
+                    "budget_exhausted",
+                    execution_name=execution_name,
+                    claimed_count=claimed_count,
+                    completed_count=completed_count,
+                    failed_count=failed_count,
+                    budget_seconds=f"{_EXECUTION_BUDGET_SECONDS:.0f}",
+                )
+                break
+
+            work = repo.claim_work(execution_name=execution_name)
+            if work is None:
+                if claimed_count == 0:
+                    logger.info("No queued symbol cleanup work found.")
+                    _log_lifecycle("no_work", execution_name=execution_name)
+                break
+
+            claimed_count += 1
+            _log_lifecycle(
+                "claim",
+                execution_name=execution_name,
+                work_id=work.workId,
+                run_id=work.runId,
+                symbol=work.symbol,
+                attempt_count=work.attemptCount,
+                claimed_count=claimed_count,
+            )
+
+            try:
+                result = process_work_item(
+                    repo=repo,
+                    dsn=dsn,
+                    work_id=work.workId,
+                    run_id=work.runId,
+                    symbol=work.symbol,
+                    requested_fields=work.requestedFields,
+                    execution_name=execution_name,
+                )
+                repo.complete_work(work.workId, result=result)
+                completed_count += 1
+                _log_lifecycle(
+                    "complete",
+                    execution_name=execution_name,
+                    work_id=work.workId,
+                    run_id=work.runId,
+                    symbol=work.symbol,
+                    result_applied=result is not None,
+                    completed_count=completed_count,
+                )
+            except Exception as exc:
+                failed_count += 1
+                logger.exception("Symbol cleanup work failed: work_id=%s symbol=%s", work.workId, work.symbol)
+                _log_lifecycle(
+                    "fail",
+                    execution_name=execution_name,
+                    work_id=work.workId,
+                    run_id=work.runId,
+                    symbol=work.symbol,
+                    failure_reason=str(exc),
+                    failed_count=failed_count,
+                )
+                try:
+                    repo.fail_work(work.workId, error=str(exc))
+                except Exception:
+                    logger.exception("Symbol cleanup failure reporting failed: work_id=%s", work.workId)
 
         _log_lifecycle(
-            "claim",
+            "pass_complete",
             execution_name=execution_name,
-            work_id=work.workId,
-            run_id=work.runId,
-            symbol=work.symbol,
-            attempt_count=work.attemptCount,
+            claimed_count=claimed_count,
+            completed_count=completed_count,
+            failed_count=failed_count,
+            deferred_to_next_run=deferred_to_next_run,
+            duration_sec=f"{(monotonic_time.monotonic() - pass_started_at):.2f}",
         )
-
-        result = process_work_item(
-            repo=repo,
-            dsn=dsn,
-            work_id=work.workId,
-            run_id=work.runId,
-            symbol=work.symbol,
-            requested_fields=work.requestedFields,
-            execution_name=execution_name,
-        )
-        repo.complete_work(work.workId, result=result)
-        _log_lifecycle(
-            "complete",
-            execution_name=execution_name,
-            work_id=work.workId,
-            run_id=work.runId,
-            symbol=work.symbol,
-            result_applied=result is not None,
-        )
-        return 0
+        return 1 if failed_count else 0
     except Exception as exc:
-        logger.exception("Symbol cleanup work failed: work_id=%s symbol=%s", getattr(work, "workId", "-"), getattr(work, "symbol", "-"))
+        logger.exception("Symbol cleanup pass aborted before completion.")
         _log_lifecycle(
-            "fail",
+            "abort",
             execution_name=execution_name,
-            work_id=getattr(work, "workId", None),
-            run_id=getattr(work, "runId", None),
-            symbol=getattr(work, "symbol", None),
             failure_reason=str(exc),
         )
-        if repo is not None and work is not None:
-            try:
-                repo.fail_work(work.workId, error=str(exc))
-            except Exception:
-                logger.exception("Symbol cleanup failure reporting failed: work_id=%s", work.workId)
         return 1
     finally:
         if transport is not None:

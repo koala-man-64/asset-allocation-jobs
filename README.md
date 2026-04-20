@@ -56,8 +56,8 @@ Canonical workflows live under `.github/workflows/`.
 
 Symbol enrichment lifecycle state is owned by the control-plane plus shared contracts. This repo only owns the worker runtime and the ACA job manifest.
 
-- `deploy/job_symbol_cleanup.yaml` is the manual worker job that claims queued symbol cleanup work from the control-plane.
-- `tasks.symbol_cleanup.worker` loads provider facts and current profile state from Postgres, applies deterministic normalization first, then asks the control-plane enrichment endpoint for the remaining AI-owned fields.
+- `deploy/job_symbol_cleanup.yaml` is the scheduled weekday worker job that runs at `23:00 UTC` (`0 23 * * 1-5`) and drains queued symbol cleanup work from the control-plane. Operators can still start it manually for repair or replay.
+- `tasks.symbol_cleanup.worker` loads provider facts and current profile state from Postgres, applies deterministic normalization first, then asks the control-plane enrichment endpoint for the remaining AI-owned fields while draining a bounded serial pass of queued work per execution.
 - The worker never streams `/api/ai/chat/stream` directly and never auto-overrides locked fields.
 
 ## Backtesting
