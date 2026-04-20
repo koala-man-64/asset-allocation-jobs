@@ -681,6 +681,54 @@
     {
       "schema_name": "gold",
       "table_name": "market_data",
+      "column_name": "dividend_amount",
+      "description": "Cash dividend amount carried into the gold feature layer from corporate-action enrichment.",
+      "calculation_type": "source",
+      "calculation_notes": "Replicated from canonical gold dataset columns during Postgres serving sync.",
+      "calculation_expression": null,
+      "calculation_dependencies": [],
+      "status": "reviewed"
+    },
+    {
+      "schema_name": "gold",
+      "table_name": "market_data",
+      "column_name": "split_coefficient",
+      "description": "Split multiplier carried into the gold feature layer from corporate-action enrichment.",
+      "calculation_type": "source",
+      "calculation_notes": "Replicated from canonical gold dataset columns during Postgres serving sync.",
+      "calculation_expression": null,
+      "calculation_dependencies": [],
+      "status": "reviewed"
+    },
+    {
+      "schema_name": "gold",
+      "table_name": "market_data",
+      "column_name": "is_dividend_day",
+      "description": "Binary corporate-action flag set when the row carries a positive cash dividend.",
+      "calculation_type": "derived_python",
+      "calculation_notes": "Computed by the gold ETL pipeline from canonical domain inputs; see DATA.md for lineage context.",
+      "calculation_expression": "dividend_amount > 0",
+      "calculation_dependencies": [
+        "dividend_amount"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "schema_name": "gold",
+      "table_name": "market_data",
+      "column_name": "is_split_day",
+      "description": "Binary corporate-action flag set when the row carries a split coefficient different from 1.0.",
+      "calculation_type": "derived_python",
+      "calculation_notes": "Computed by the gold ETL pipeline from canonical domain inputs; see DATA.md for lineage context.",
+      "calculation_expression": "split_coefficient != 1.0",
+      "calculation_dependencies": [
+        "split_coefficient"
+      ],
+      "status": "reviewed"
+    },
+    {
+      "schema_name": "gold",
+      "table_name": "market_data",
       "column_name": "return_1d",
       "description": "Rolling return feature over the suffix lookback window.",
       "calculation_type": "derived_python",
