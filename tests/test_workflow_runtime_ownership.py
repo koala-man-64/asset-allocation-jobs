@@ -52,6 +52,13 @@ MARKET_PIPELINE_JOB_MANIFESTS = (
     "job_gold_market_data.yaml",
 )
 
+QUIVER_PIPELINE_JOB_MANIFESTS = (
+    "job_bronze_quiver_data.yaml",
+    "job_bronze_quiver_backfill.yaml",
+    "job_silver_quiver_data.yaml",
+    "job_gold_quiver_data.yaml",
+)
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -113,6 +120,16 @@ def test_api_backed_manual_jobs_define_control_plane_env_vars() -> None:
         assert "value: ${ASSET_ALLOCATION_API_SCOPE}" in text, manifest_name
 
 
+def test_quiver_job_manifests_define_control_plane_env_vars() -> None:
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name in QUIVER_PIPELINE_JOB_MANIFESTS:
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        assert "name: ASSET_ALLOCATION_API_BASE_URL" in text, manifest_name
+        assert "value: ${ASSET_ALLOCATION_API_BASE_URL}" in text, manifest_name
+        assert "name: ASSET_ALLOCATION_API_SCOPE" in text, manifest_name
+        assert "value: ${ASSET_ALLOCATION_API_SCOPE}" in text, manifest_name
+
+
 def test_intraday_job_manifests_run_on_weekday_five_minute_cadence() -> None:
     deploy_dir = repo_root() / "deploy"
     for manifest_name in ("job_intraday_monitor.yaml", "job_intraday_market_refresh.yaml"):
@@ -130,6 +147,15 @@ def test_intraday_refresh_manifest_keeps_market_refresh_in_process() -> None:
 def test_market_job_manifests_use_contract_storage_account_variable() -> None:
     deploy_dir = repo_root() / "deploy"
     for manifest_name in MARKET_PIPELINE_JOB_MANIFESTS:
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        assert "name: AZURE_STORAGE_ACCOUNT_NAME" in text, manifest_name
+        assert "value: ${AZURE_STORAGE_ACCOUNT_NAME}" in text, manifest_name
+        assert "value: assetallocstorage001" not in text, manifest_name
+
+
+def test_quiver_job_manifests_use_contract_storage_account_variable() -> None:
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name in QUIVER_PIPELINE_JOB_MANIFESTS:
         text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
         assert "name: AZURE_STORAGE_ACCOUNT_NAME" in text, manifest_name
         assert "value: ${AZURE_STORAGE_ACCOUNT_NAME}" in text, manifest_name
@@ -162,6 +188,67 @@ def test_market_job_manifests_keep_folder_envs_aligned_to_contract_names() -> No
         text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
         for line in lines:
             assert line in text, f"{manifest_name} missing expected folder mapping: {line}"
+
+
+def test_quiver_job_manifests_keep_folder_envs_aligned_to_contract_names() -> None:
+    expected_lines = {
+        "job_bronze_quiver_data.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
+        "job_bronze_quiver_backfill.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
+        "job_silver_quiver_data.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
+        "job_gold_quiver_data.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
+    }
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name, lines in expected_lines.items():
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        for line in lines:
+            assert line in text, f"{manifest_name} missing expected folder mapping: {line}"
+
+
+def test_quiver_job_manifests_keep_expected_trigger_types_and_chaining() -> None:
+    deploy_dir = repo_root() / "deploy"
+
+    bronze_text = (deploy_dir / "job_bronze_quiver_data.yaml").read_text(encoding="utf-8")
+    assert "triggerType: Schedule" in bronze_text
+    assert 'cronExpression: "0 * * * 1-5"' in bronze_text
+    assert "value: incremental" in bronze_text
+    assert "name: TRIGGER_NEXT_JOB_NAME" in bronze_text
+    assert "value: ${SILVER_QUIVER_JOB}" in bronze_text
+
+    backfill_text = (deploy_dir / "job_bronze_quiver_backfill.yaml").read_text(encoding="utf-8")
+    assert "triggerType: Manual" in backfill_text
+    assert "manualTriggerConfig:" in backfill_text
+    assert "value: historical_backfill" in backfill_text
+    assert "value: ${SILVER_QUIVER_JOB}" in backfill_text
+
+    silver_text = (deploy_dir / "job_silver_quiver_data.yaml").read_text(encoding="utf-8")
+    assert "triggerType: Manual" in silver_text
+    assert "manualTriggerConfig:" in silver_text
+    assert "name: TRIGGER_NEXT_JOB_NAME" in silver_text
+    assert "value: ${GOLD_QUIVER_JOB}" in silver_text
+
+    gold_text = (deploy_dir / "job_gold_quiver_data.yaml").read_text(encoding="utf-8")
+    assert "triggerType: Manual" in gold_text
+    assert "manualTriggerConfig:" in gold_text
+    assert "TRIGGER_NEXT_JOB_NAME" not in gold_text
+
+
+def test_quiver_bronze_manifests_define_mode_and_runtime_envs() -> None:
+    deploy_dir = repo_root() / "deploy"
+    for manifest_name in ("job_bronze_quiver_data.yaml", "job_bronze_quiver_backfill.yaml"):
+        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+        for required_name in (
+            "QUIVER_DATA_UNIVERSE_SOURCE",
+            "QUIVER_DATA_JOB_MODE",
+            "QUIVER_DATA_TICKER_BATCH_SIZE",
+            "QUIVER_DATA_HISTORICAL_BATCH_SIZE",
+            "QUIVER_DATA_SYMBOL_LIMIT",
+            "QUIVER_DATA_TICKERS",
+            "QUIVER_DATA_PAGE_SIZE",
+            "QUIVER_DATA_SEC13F_TODAY_ONLY",
+        ):
+            assert f"name: {required_name}" in text, f"{manifest_name} missing {required_name}"
+        assert 'name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS' in text, manifest_name
+        assert 'value: "120"' in text, manifest_name
 
 
 def test_platinum_rankings_job_does_not_define_deploy_time_ranking_overrides() -> None:

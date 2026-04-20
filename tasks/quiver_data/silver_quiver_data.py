@@ -111,7 +111,11 @@ if __name__ == "__main__":
                 job_name=job_name,
                 run=main,
                 on_success=(
-                    lambda: write_system_health_marker(layer="silver", domain="quiver-data", job_name=job_name),
+                    lambda: write_system_health_marker(
+                        layer="silver",
+                        domain=constants.domain_slug_for_layer("silver"),
+                        job_name=job_name,
+                    ),
                     trigger_next_job_from_env,
                 ),
             )

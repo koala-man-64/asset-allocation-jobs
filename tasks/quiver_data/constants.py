@@ -60,11 +60,15 @@ except Exception:
         return str(dataset or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
-DOMAIN_SLUG: Final[str] = str(os.environ.get("AZURE_FOLDER_QUIVER") or "quiver-data").strip()
-BRONZE_ROOT_PREFIX: Final[str] = f"{DOMAIN_SLUG}/runs"
-DOMAIN_ARTIFACT_PATH: Final[str] = f"{DOMAIN_SLUG}/_metadata/domain.json"
+BRONZE_DOMAIN_SLUG: Final[str] = str(os.environ.get("AZURE_FOLDER_QUIVER") or "quiver-data").strip()
+SILVER_DOMAIN_SLUG: Final[str] = BRONZE_DOMAIN_SLUG
+GOLD_DOMAIN_SLUG: Final[str] = "quiver"
+DOMAIN_SLUG: Final[str] = BRONZE_DOMAIN_SLUG
+BRONZE_ROOT_PREFIX: Final[str] = f"{BRONZE_DOMAIN_SLUG}/runs"
+DOMAIN_ARTIFACT_PATH: Final[str] = f"{BRONZE_DOMAIN_SLUG}/_metadata/domain.json"
 
 BRONZE_JOB_NAME: Final[str] = "bronze-quiver-data-job"
+BRONZE_BACKFILL_JOB_NAME: Final[str] = "bronze-quiver-backfill-job"
 SILVER_JOB_NAME: Final[str] = "silver-quiver-data-job"
 GOLD_JOB_NAME: Final[str] = "gold-quiver-data-job"
 
@@ -100,6 +104,19 @@ def bronze_raw_path(run_id: str, source_dataset: str, bucket: str) -> str:
 
 def bronze_manifest_path(run_id: str) -> str:
     return f"{bronze_run_prefix(run_id)}/manifest.json"
+
+
+def domain_slug_for_layer(layer: str) -> str:
+    clean_layer = str(layer or "").strip().lower()
+    if clean_layer == "gold":
+        return GOLD_DOMAIN_SLUG
+    if clean_layer == "silver":
+        return SILVER_DOMAIN_SLUG
+    return BRONZE_DOMAIN_SLUG
+
+
+def domain_artifact_path_for_layer(layer: str) -> str:
+    return f"{domain_slug_for_layer(layer)}/_metadata/domain.json"
 
 
 def silver_table_path(dataset_family: str, bucket: str) -> str:

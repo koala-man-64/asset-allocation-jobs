@@ -17,6 +17,7 @@ AZURE_FOLDER_FINANCE,deploy_var,var,deploy_config,true,Canonical finance folder 
 AZURE_FOLDER_EARNINGS,deploy_var,var,deploy_config,true,Canonical earnings folder name.
 AZURE_FOLDER_TARGETS,deploy_var,var,deploy_config,true,Canonical price-target folder name.
 AZURE_FOLDER_ECONOMIC_CATALYST,deploy_var,var,deploy_config,true,Canonical economic catalyst folder name.
+AZURE_FOLDER_QUIVER,deploy_var,var,deploy_config,true,Canonical Quiver bronze and silver folder name.
 CONTRACTS_REPOSITORY,deploy_var,var,deploy_config,true,Sibling contracts repo slug used by workflows.
 CONTRACTS_REF,deploy_var,var,deploy_config,true,Contracts ref to validate against by default.
 CONTROL_PLANE_REPOSITORY,deploy_var,var,deploy_config,true,Sibling control-plane repo slug used by repository_dispatch.
@@ -27,17 +28,21 @@ BRONZE_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for 
 BRONZE_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze price-target sync.
 BRONZE_EARNINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze earnings sync.
 BRONZE_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze economic catalyst sync.
+BRONZE_QUIVER_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for scheduled incremental Quiver bronze sync.
+BRONZE_QUIVER_BACKFILL_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for manual Quiver historical backfill.
 SILVER_MARKET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver market sync.
 SILVER_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver finance sync.
 SILVER_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver price-target sync.
 SILVER_EARNINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver earnings sync.
 SILVER_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver economic catalyst sync.
+SILVER_QUIVER_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for Quiver silver sync.
 GOLD_MARKET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold market sync.
 GOLD_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold finance sync.
 GOLD_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold price-target sync.
 GOLD_EARNINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold earnings sync.
 GOLD_REGIME_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for regime recompute.
 GOLD_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold economic catalyst sync.
+GOLD_QUIVER_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for Quiver gold sync.
 PLATINUM_RANKINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for platinum rankings.
 BACKTEST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for backtests.
 JOB_STARTUP_API_CONTAINER_APPS,deploy_var,var,deploy_config,true,Container Apps that jobs may wake before running. Default this to the internal control-plane app name.
@@ -64,6 +69,14 @@ ECONOMIC_CATALYST_BOJ_SCHEDULE_URL,deploy_var,var,deploy_config,true,Bank of Jap
 ECONOMIC_CATALYST_TREASURY_AUCTIONS_URL,deploy_var,var,deploy_config,true,Treasury auction calendar URL.
 ECONOMIC_CATALYST_NASDAQ_TABLES,deploy_var,var,deploy_config,true,JSON table mapping configuration for Nasdaq economic event tables.
 ECONOMIC_CATALYST_HTTP_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,HTTP timeout for economic catalyst source fetches.
+QUIVER_DATA_UNIVERSE_SOURCE,deploy_var,var,deploy_config,true,Quiver symbol-universe source. Use core_symbols in prod and env_tickers for local/manual runs.
+QUIVER_DATA_JOB_MODE,deploy_var,var,deploy_config,true,Quiver bronze mode. Use incremental for the scheduled path and historical_backfill for manual replay.
+QUIVER_DATA_TICKER_BATCH_SIZE,deploy_var,var,deploy_config,true,Rotating ticker batch size for scheduled Quiver incremental bronze runs.
+QUIVER_DATA_HISTORICAL_BATCH_SIZE,deploy_var,var,deploy_config,true,Rotating ticker batch size for manual Quiver historical backfill runs.
+QUIVER_DATA_SYMBOL_LIMIT,deploy_var,var,deploy_config,true,Cap on the resolved Quiver symbol universe during rollout and soak testing.
+QUIVER_DATA_TICKERS,deploy_var,var,deploy_config,true,Comma-separated manual Quiver ticker list when QUIVER_DATA_UNIVERSE_SOURCE=env_tickers.
+QUIVER_DATA_PAGE_SIZE,deploy_var,var,deploy_config,true,Quiver page size for paginated live and historical pulls.
+QUIVER_DATA_SEC13F_TODAY_ONLY,deploy_var,var,deploy_config,true,Whether Quiver sec13f incremental pulls should restrict to the current day.
 ASSET_ALLOCATION_API_BASE_URL,secret,secret,secret_store,true,Control-plane base URL used by jobs HTTP clients. Default to the internal ACA service URL http://asset-allocation-api-vnet; do not use a public ACA ingress FQDN in prod.
 ASSET_ALLOCATION_API_SCOPE,secret,secret,secret_store,true,Managed-identity scope used for jobs to control-plane auth. Auto-discovered from the asset-allocation-api Entra app when available.
 AZURE_STORAGE_CONNECTION_STRING,secret,secret,secret_store,true,Storage connection string. Never auto-discovered.

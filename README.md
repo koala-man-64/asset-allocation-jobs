@@ -11,7 +11,7 @@ Local development installs versioned shared packages rather than sibling repos:
 
 ```powershell
 python -m pip install asset-allocation-contracts==2.4.0
-python -m pip install asset-allocation-runtime-common==2.0.9
+python -m pip install asset-allocation-runtime-common==2.0.10
 python scripts/run_quality_gate.py check-fast
 ```
 
@@ -36,6 +36,29 @@ Cross-repo control data is read from the control-plane over HTTP. Configure:
 - `ASSET_ALLOCATION_API_SCOPE`
 
 In prod, set `ASSET_ALLOCATION_API_BASE_URL` to the internal control-plane service URL `http://asset-allocation-api-vnet`. Do not point jobs at a public ACA ingress FQDN.
+
+## Quiver Pipeline
+
+Quiver runs as a control-plane-gated Bronze/Silver/Gold pipeline in this repo.
+
+- Bronze stays API-backed for provider access and supports two modes:
+  - `incremental`: hourly weekday schedule for global live feeds plus a rotating ticker slice
+  - `historical_backfill`: manual replay for ticker-heavy historical feeds
+- The ticker universe is resolved directly from Postgres when `QUIVER_DATA_UNIVERSE_SOURCE=core_symbols`.
+- Local and manual runs can still use `QUIVER_DATA_TICKERS` by setting `QUIVER_DATA_UNIVERSE_SOURCE=env_tickers`.
+- Bronze and Silver persist under `quiver-data/...`; Gold persists under `quiver/...`.
+
+Key Quiver envs:
+
+- `AZURE_FOLDER_QUIVER`
+- `QUIVER_DATA_UNIVERSE_SOURCE`
+- `QUIVER_DATA_JOB_MODE`
+- `QUIVER_DATA_TICKER_BATCH_SIZE`
+- `QUIVER_DATA_HISTORICAL_BATCH_SIZE`
+- `QUIVER_DATA_SYMBOL_LIMIT`
+- `QUIVER_DATA_TICKERS`
+- `QUIVER_DATA_PAGE_SIZE`
+- `QUIVER_DATA_SEC13F_TODAY_ONLY`
 
 ## Operations
 

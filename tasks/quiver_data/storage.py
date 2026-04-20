@@ -66,13 +66,15 @@ def write_domain_artifact(
     tables: dict[str, pd.DataFrame],
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    domain_slug = constants.domain_slug_for_layer(layer)
+    artifact_path = constants.domain_artifact_path_for_layer(layer)
     payload = {
         "version": 1,
         "scope": "domain",
         "layer": str(layer or "").strip(),
-        "domain": constants.DOMAIN_SLUG,
-        "rootPath": constants.DOMAIN_SLUG,
-        "artifactPath": constants.DOMAIN_ARTIFACT_PATH,
+        "domain": domain_slug,
+        "rootPath": domain_slug,
+        "artifactPath": artifact_path,
         "updatedAt": computed_at_iso(),
         "producerJobName": str(job_name or "").strip() or None,
         "jobRunId": str(run_id or "").strip() or None,
@@ -81,5 +83,5 @@ def write_domain_artifact(
     }
     if extra_metadata:
         payload["metadata"] = dict(extra_metadata)
-    mdc.save_json_content(payload, constants.DOMAIN_ARTIFACT_PATH, client=client)
+    mdc.save_json_content(payload, artifact_path, client=client)
     return payload
