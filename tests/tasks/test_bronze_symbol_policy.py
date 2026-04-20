@@ -3,9 +3,6 @@ import json
 import pandas as pd
 import pytest
 
-import pandas as pd
-import pytest
-
 from tasks.common import bronze_symbol_policy as policy
 
 
