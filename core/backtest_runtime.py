@@ -1089,6 +1089,8 @@ def _regime_context_for_session(
     mode = str(getattr(policy, "mode", "observe_only") or "observe_only").strip() or "observe_only"
     if mode != "observe_only":
         raise ValueError(f"Unsupported regime policy mode '{mode}'.")
+    regime_code = primary_regime
+    regime_status = "confirmed" if primary_regime else "unclassified"
 
     return {
         "blocked": False,

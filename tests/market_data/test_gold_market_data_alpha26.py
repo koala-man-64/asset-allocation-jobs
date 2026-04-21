@@ -5,6 +5,7 @@ import pytest
 
 from asset_allocation_runtime_common.market_data import core as core_module
 from asset_allocation_runtime_common.market_data import delta_core as delta_core_module
+from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from asset_allocation_contracts.paths import DataPaths
 from asset_allocation_runtime_common.foundation.postgres import PostgresError
 from tasks.market_data import gold_market_data as gold
@@ -77,6 +78,14 @@ def _capture_log_messages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(core_module, "write_warning", lambda msg: messages.append(str(msg)))
     monkeypatch.setattr(core_module, "write_error", lambda msg: messages.append(str(msg)))
     return messages
+
+
+def _critical_market_symbols_by_bucket() -> dict[str, list[str]]:
+    buckets: dict[str, list[str]] = {}
+    for symbol in REGIME_REQUIRED_MARKET_SYMBOLS:
+        bucket = gold.layer_bucketing.bucket_letter(symbol)
+        buckets.setdefault(bucket, []).append(symbol)
+    return {bucket: buckets[bucket] for bucket in sorted(buckets)}
 
 
 def _transient_postgres_sync_failure(
@@ -1189,9 +1198,19 @@ def test_run_alpha26_market_gold_completes_when_critical_symbol_verification_pas
     watermarks: dict = {}
     captured_index: dict = {}
     messages = _capture_log_messages(monkeypatch)
-    cursor = _FakeCursor(fetchall_rows=[("SPY", 10), ("^VIX", 10), ("^VIX3M", 10)])
+    bucket_symbols = _critical_market_symbols_by_bucket()
+    expected_symbol_to_bucket = {
+        symbol: bucket
+        for bucket, symbols in bucket_symbols.items()
+        for symbol in symbols
+    }
+    bucket_paths = {
+        DataPaths.get_silver_market_bucket_path(bucket): bucket
+        for bucket in bucket_symbols
+    }
+    cursor = _FakeCursor(fetchall_rows=[(symbol, 10) for symbol in REGIME_REQUIRED_MARKET_SYMBOLS])
 
-    monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", ["S", "V"])
+    monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", list(bucket_symbols))
     monkeypatch.setattr(gold.layer_bucketing, "load_layer_symbol_index", lambda **_kwargs: pd.DataFrame())
     monkeypatch.setattr(
         gold.layer_bucketing,
@@ -1203,18 +1222,14 @@ def test_run_alpha26_market_gold_completes_when_critical_symbol_verification_pas
     monkeypatch.setattr(gold, "connect", lambda _dsn: _FakeConnection(cursor))
 
     def _fake_last_commit(_container: str, path: str):
-        if path in {
-            DataPaths.get_silver_market_bucket_path("S"),
-            DataPaths.get_silver_market_bucket_path("V"),
-        }:
+        if path in bucket_paths:
             return 100.0
         return None
 
     def _fake_load_delta(_container: str, path: str, **_kwargs):
-        if path == DataPaths.get_silver_market_bucket_path("S"):
-            return _bucket_df("SPY")
-        if path == DataPaths.get_silver_market_bucket_path("V"):
-            return _bucket_df("^VIX", "^VIX3M")
+        bucket = bucket_paths.get(path)
+        if bucket is not None:
+            return _bucket_df(*bucket_symbols[bucket])
         return pd.DataFrame()
 
     def _fake_sync_gold_bucket(**kwargs):
@@ -1256,13 +1271,13 @@ def test_run_alpha26_market_gold_completes_when_critical_symbol_verification_pas
         watermarks=watermarks,
     )
 
-    assert processed == 2
+    assert processed == len(bucket_symbols)
     assert failed == 0
     assert watermarks_dirty is True
     assert index_path == "system/gold-index/market/latest.parquet"
-    assert watermarks["bucket::S"]["silver_last_commit"] == 100.0
-    assert watermarks["bucket::V"]["silver_last_commit"] == 100.0
-    assert captured_index["symbol_to_bucket"] == {"SPY": "S", "^VIX": "V", "^VIX3M": "V"}
+    for bucket in bucket_symbols:
+        assert watermarks[f"bucket::{bucket}"]["silver_last_commit"] == 100.0
+    assert captured_index["symbol_to_bucket"] == expected_symbol_to_bucket
     assert any("postgres_gold_critical_symbol_status domain=market status=ok" in message for message in messages)
 
 

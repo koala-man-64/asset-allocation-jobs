@@ -257,6 +257,8 @@ def test_regime_context_surfaces_primary_regime_and_signals_observationally() ->
             "halt_flag": False,
         },
     )
+    assert confirmed["regime_code"] == "trending_down"
+    assert confirmed["regime_status"] == "confirmed"
     assert confirmed["primary_regime_code"] == "trending_down"
     assert confirmed["active_regimes"] == ["trending_down", "high_volatility"]
     assert confirmed["signals"][0]["regime_code"] == "trending_down"
