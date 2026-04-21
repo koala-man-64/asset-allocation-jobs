@@ -1086,8 +1086,17 @@ def _regime_context_for_session(
     signals = list(regime_row.get("signals") or [])
     halt_flag = bool(regime_row.get("halt_flag"))
     halt_reason = regime_row.get("halt_reason")
+    mode = str(getattr(policy, "mode", "observe_only") or "observe_only").strip() or "observe_only"
+    if mode != "observe_only":
+        raise ValueError(f"Unsupported regime policy mode '{mode}'.")
 
     return {
+        "blocked": False,
+        "blocked_reason": None,
+        "blocked_action": None,
+        "exposure_multiplier": 1.0,
+        "regime_code": regime_code,
+        "regime_status": regime_status,
         "primary_regime_code": primary_regime,
         "halt_flag": halt_flag,
         "halt_reason": halt_reason,

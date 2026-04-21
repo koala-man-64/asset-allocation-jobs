@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib.metadata import distribution
 from pathlib import Path
 import tomllib
 
@@ -8,14 +9,30 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def shared_dependencies() -> dict[str, str]:
+def project_dependencies() -> dict[str, str]:
     pyproject = tomllib.loads((repo_root() / "pyproject.toml").read_text(encoding="utf-8"))
-    shared: dict[str, str] = {}
+    dependencies: dict[str, str] = {}
     for dependency in pyproject["project"]["dependencies"]:
-        if dependency.startswith("asset-allocation-"):
-            name, version = dependency.split("==", 1)
-            shared[name] = version
-    return shared
+        if "==" not in dependency:
+            continue
+        name, version = dependency.split("==", 1)
+        dependencies[name] = version
+    return dependencies
+
+
+def shared_dependencies() -> dict[str, str]:
+    return {name: version for name, version in project_dependencies().items() if name.startswith("asset-allocation-")}
+
+
+def installed_exact_dependency_versions(package_name: str) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for requirement in distribution(package_name).requires or []:
+        requirement_text = requirement.split(";", 1)[0].strip()
+        if "==" not in requirement_text:
+            continue
+        name, version = requirement_text.split("==", 1)
+        versions[name] = version
+    return versions
 
 
 def test_pyproject_pins_shared_packages() -> None:
@@ -32,6 +49,22 @@ def test_python_dependency_manifests_stay_in_sync() -> None:
     assert f"asset-allocation-contracts=={shared['asset-allocation-contracts']}" in lockfile
     assert f"asset-allocation-runtime-common=={shared['asset-allocation-runtime-common']}" in requirements
     assert f"asset-allocation-runtime-common=={shared['asset-allocation-runtime-common']}" in lockfile
+
+
+def test_project_dependency_pins_stay_compatible_with_installed_shared_packages() -> None:
+    project = project_dependencies()
+    mismatches: dict[str, dict[str, tuple[str, str]]] = {}
+
+    for package_name in ("asset-allocation-contracts", "asset-allocation-runtime-common"):
+        overlaps = {
+            name: (project[name], installed_version)
+            for name, installed_version in installed_exact_dependency_versions(package_name).items()
+            if name in project and project[name] != installed_version
+        }
+        if overlaps:
+            mismatches[package_name] = overlaps
+
+    assert mismatches == {}
 
 
 def test_jobs_dockerfile_does_not_copy_sibling_repos() -> None:

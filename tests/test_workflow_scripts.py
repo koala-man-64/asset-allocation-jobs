@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import subprocess
+import tomllib
 from types import ModuleType
 
 import pytest
@@ -10,6 +11,19 @@ import pytest
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def repo_shared_versions() -> tuple[str, str]:
+    pyproject = tomllib.loads((repo_root() / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies: dict[str, str] = {}
+    for dependency in pyproject["project"]["dependencies"]:
+        if dependency.startswith("asset-allocation-"):
+            name, version = dependency.split("==", 1)
+            dependencies[name] = version
+    return dependencies["asset-allocation-contracts"], dependencies["asset-allocation-runtime-common"]
+
+
+CURRENT_CONTRACTS_VERSION, CURRENT_RUNTIME_COMMON_VERSION = repo_shared_versions()
 
 
 def load_module(relative_path: str, module_name: str) -> ModuleType:
@@ -73,7 +87,12 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
         "\n".join(
             [
                 "[project]",
-                'dependencies = ["asset-allocation-contracts==2.4.0", "asset-allocation-runtime-common==2.1.0"]',
+                (
+                    'dependencies = ['
+                    f'"asset-allocation-contracts=={CURRENT_CONTRACTS_VERSION}", '
+                    f'"asset-allocation-runtime-common=={CURRENT_RUNTIME_COMMON_VERSION}"'
+                    "]"
+                ),
                 "",
             ]
         ),
@@ -89,7 +108,7 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
 
     versions = module.validate_repo_shared_dependency_compatibility(repo_root=tmp_path, python_exe="/python")
 
-    assert versions == ("2.4.0", "2.1.0")
+    assert versions == (CURRENT_CONTRACTS_VERSION, CURRENT_RUNTIME_COMMON_VERSION)
     assert commands == [
         [
             "/python",
@@ -98,8 +117,8 @@ def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
             "install",
             "--dry-run",
             "--ignore-installed",
-            "asset-allocation-contracts==2.4.0",
-            "asset-allocation-runtime-common==2.1.0",
+            f"asset-allocation-contracts=={CURRENT_CONTRACTS_VERSION}",
+            f"asset-allocation-runtime-common=={CURRENT_RUNTIME_COMMON_VERSION}",
         ]
     ]
 

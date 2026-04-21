@@ -28,6 +28,7 @@ from core.backtest_runtime import (
     validate_backtest_submission,
 )
 from asset_allocation_runtime_common import BACKTEST_RESULTS_SCHEMA_VERSION
+from asset_allocation_runtime_common import BACKTEST_RESULTS_SCHEMA_VERSION
 from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
 from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
 from asset_allocation_runtime_common.strategy_engine.position_state import PositionState
@@ -238,6 +239,7 @@ def test_regime_context_surfaces_primary_regime_and_signals_observationally() ->
             "intrabarConflictPolicy": "stop_first",
             "regimePolicy": {
                 "modelName": "default-regime",
+                "mode": "observe_only",
                 "mode": "observe_only",
             },
             "exits": [],
@@ -790,6 +792,7 @@ def test_execute_backtest_run_publishes_full_results_payload(monkeypatch: pytest
     assert summary["cost_drag_bps"] == pytest.approx(30.3)
     assert summary["closed_positions"] == 1
     assert captured["summary"] == captured["completed_summary"]
+    assert captured["results_schema_version"] == BACKTEST_RESULTS_SCHEMA_VERSION
     assert captured["results_schema_version"] == BACKTEST_RESULTS_SCHEMA_VERSION
     assert len(captured["timeseries_rows"]) == 2
     assert len(captured["rolling_metric_rows"]) == 2

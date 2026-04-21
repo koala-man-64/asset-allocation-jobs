@@ -55,11 +55,12 @@ The intraday workers are normally schedule-driven; if you need to repair them ma
   - `silver-quiver-data-job` and `gold-quiver-data-job` stay manual and are triggered by the upstream Quiver stage
   - Quiver gold does not trigger `results-reconcile-job` in this rollout
 
-## Backtesting Runtime V4
+## Backtesting Runtime V5
 
-- Backtesting runtime v4 is contracts-repo-first. Treat result-shape changes, new summary metadata, trade lifecycle fields, and closed-position response payloads as upstream contract work before this repo adopts them.
+- Backtesting runtime v5 is contracts-repo-first. Treat result-shape changes, new summary metadata, trade lifecycle fields, and closed-position response payloads as upstream contract work before this repo adopts them.
 - Worker preflight should be read as `env + Postgres + authenticated control-plane readiness probe`, not as a loose config parse. Failure before claim/start is expected when the readiness dependency is missing or unhealthy.
 - The remediation adds a dedicated backtesting runtime quality gate (`test-backtesting-runtime`) so resize-state, cadence-aware metrics, publish-path regressions, and closed-position analytics do not hide inside `test-fast`.
+- Default-regime policy is observe-only under the published contracts. Use regime trace rows for diagnostics; do not expect the worker to block or rescale exposure from default-regime state.
 
 ## Shared Azure Foundation
 
@@ -169,9 +170,9 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - If Quiver historical replay is needed, start `bronze-quiver-backfill-job` manually and confirm `QUIVER_DATA_JOB_MODE=historical_backfill`; do not repurpose the scheduled bronze manifest for replay.
 - If Quiver gold writes domain metadata under `quiver-data/...`, treat that as a rollback blocker. Gold artifacts and gold system-health markers must publish under `quiver/...`.
 - If a backtest run fails before claim/start with an auth or reachability error, treat it as a preflight failure. Verify the readiness dependency, `ASSET_ALLOCATION_API_BASE_URL`, `ASSET_ALLOCATION_API_SCOPE`, and the control-plane identity path before retrying the job.
-- If summary metrics look daily-only on an intraday run, treat that as a cadence-metric issue, not a deployment issue. The remediation should publish cadence-aware metrics and rolling windows, so a job that still looks daily-only is not on the expected v4 path.
-- If gross and net return converge when commissions or slippage are non-zero, treat that as a cost-accounting issue. The expected v4 behavior is to publish net-of-cost summary returns plus additive gross-return and cost-drag fields.
-- If a partial rebalance appears to reset time-stop or trailing-stop behavior, treat that as a state-preservation issue. The expected v4 behavior is to preserve active `PositionState` fields across resize operations while tracking weighted-average cost, lifecycle costs, and closed-position attribution.
+- If summary metrics look daily-only on an intraday run, treat that as a cadence-metric issue, not a deployment issue. The remediation should publish cadence-aware metrics and rolling windows, so a job that still looks daily-only is not on the expected v5 path.
+- If gross and net return converge when commissions or slippage are non-zero, treat that as a cost-accounting issue. The expected v5 behavior is to publish net-of-cost summary returns plus additive gross-return and cost-drag fields.
+- If a partial rebalance appears to reset time-stop or trailing-stop behavior, treat that as a state-preservation issue. The expected v5 behavior is to preserve active `PositionState` fields across resize operations while tracking weighted-average cost, lifecycle costs, and closed-position attribution.
 
 ## Dependencies
 

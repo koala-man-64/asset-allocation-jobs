@@ -10,8 +10,8 @@ Runtime-owned jobs repository for:
 Local development installs versioned shared packages rather than sibling repos:
 
 ```powershell
-python -m pip install asset-allocation-contracts==2.4.0
-python -m pip install asset-allocation-runtime-common==2.1.0
+python -m pip install asset-allocation-contracts==3.0.0
+python -m pip install asset-allocation-runtime-common==3.1.0
 python scripts/run_quality_gate.py check-fast
 ```
 
@@ -92,6 +92,7 @@ Backtest lifecycle state is owned by `asset-allocation-contracts` plus the contr
 - `deploy/job_intraday_monitor.yaml` is the scheduled intraday watchlist poller. It claims due runs from the control plane and posts symbol observations plus refresh candidates back to the internal intraday APIs.
 - `deploy/job_intraday_market_refresh.yaml` is the scheduled targeted refresh worker. It drains queued intraday market batches and runs the existing selected-symbol Bronze/Silver/Gold market path in-process without chaining the full downstream job fan-out.
 - `tasks/backtesting/worker.py` now performs fail-fast dependency preflight before looking up a targeted run or claiming queued work.
-- `core/backtest_runtime.py` sends wall-clock heartbeats during long sections, writes Postgres-backed v4 results, and now publishes net and gross return metrics, cost drag, corrected `net_exposure`, trade lifecycle fields, and flat-to-flat closed-position analytics. There is no cross-run persistent cache.
+- `core/backtest_runtime.py` sends wall-clock heartbeats during long sections, writes Postgres-backed v5 results, and now publishes net and gross return metrics, cost drag, corrected `net_exposure`, trade lifecycle fields, and flat-to-flat closed-position analytics. There is no cross-run persistent cache.
+- Default-regime backtest policy is observe-only under the published contracts. The runtime records regime trace rows but does not block entries or rescale exposure from default-regime state.
 - `scripts/profile_backtest_runtime.py` is the profiling harness for the multiprocessing gate. `BACKTEST_RANKING_MAX_WORKERS` remains a benchmark-only knob and defaults to `1`.
 - Multiprocessing is intentionally disabled by default. Scale backtests by starting more ACA executions, not by turning one worker into a multi-run drain loop.
