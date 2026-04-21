@@ -1030,25 +1030,15 @@ def _regime_context_for_session(
     regime_status = str(regime_row.get("regime_status") or "").strip() or None
     halt_flag = bool(regime_row.get("halt_flag"))
     halt_reason = regime_row.get("halt_reason")
-    blocked_reason: str | None = None
-
-    if halt_flag and policy.honorHaltFlag:
-        blocked_reason = "halt_flag"
-    elif regime_status == "transition" and policy.blockOnTransition:
-        blocked_reason = "transition"
-    elif regime_code == "unclassified" and policy.blockOnUnclassified:
-        blocked_reason = "unclassified"
-
-    exposure_targets = policy.targetGrossExposureByRegime.model_dump(mode="python")
-    exposure_multiplier = 1.0
-    if blocked_reason is None and regime_code:
-        exposure_multiplier = float(exposure_targets.get(regime_code, 1.0))
+    mode = str(getattr(policy, "mode", "observe_only") or "observe_only").strip() or "observe_only"
+    if mode != "observe_only":
+        raise ValueError(f"Unsupported regime policy mode '{mode}'.")
 
     return {
-        "blocked": blocked_reason is not None,
-        "blocked_reason": blocked_reason,
-        "blocked_action": policy.onBlocked if blocked_reason is not None else None,
-        "exposure_multiplier": exposure_multiplier,
+        "blocked": False,
+        "blocked_reason": None,
+        "blocked_action": None,
+        "exposure_multiplier": 1.0,
         "regime_code": regime_code,
         "regime_status": regime_status,
         "halt_flag": halt_flag,

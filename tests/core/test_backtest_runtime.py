@@ -25,6 +25,7 @@ from core.backtest_runtime import (
     _compute_summary,
     validate_backtest_submission,
 )
+from asset_allocation_runtime_common import BACKTEST_RESULTS_SCHEMA_VERSION
 from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
 from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
 from asset_allocation_runtime_common.strategy_engine.position_state import PositionState
@@ -221,7 +222,7 @@ def test_validate_backtest_submission_rejects_regime_coverage_gaps(monkeypatch: 
     assert "Regime history coverage gap" in str(exc.value)
 
 
-def test_regime_context_blocks_and_scales_exposure() -> None:
+def test_regime_context_observe_only_records_trace_without_blocking() -> None:
     policy = StrategyConfig.model_validate(
         {
             "universeConfigName": "large-cap-quality",
@@ -236,45 +237,30 @@ def test_regime_context_blocks_and_scales_exposure() -> None:
             "regimePolicy": {
                 "enabled": True,
                 "modelName": "default-regime",
-                "targetGrossExposureByRegime": {
-                    "trending_bull": 1.0,
-                    "trending_bear": 0.5,
-                    "choppy_mean_reversion": 0.75,
-                    "high_vol": 0.0,
-                    "unclassified": 0.0,
-                },
-                "blockOnTransition": True,
-                "blockOnUnclassified": True,
-                "honorHaltFlag": True,
-                "onBlocked": "skip_entries",
+                "mode": "observe_only",
             },
             "exits": [],
         }
     ).regimePolicy
 
-    confirmed = _regime_context_for_session(
-        policy,
-        {
-            "regime_code": "trending_bear",
-            "regime_status": "confirmed",
-            "halt_flag": False,
-            "matched_rule_id": "trending_bear",
-        },
-    )
-    assert confirmed["blocked"] is False
-    assert confirmed["exposure_multiplier"] == 0.5
-
-    transition = _regime_context_for_session(
+    observed = _regime_context_for_session(
         policy,
         {
             "regime_code": "trending_bear",
             "regime_status": "transition",
-            "halt_flag": False,
+            "halt_flag": True,
+            "halt_reason": "manual-review",
+            "matched_rule_id": "trending_bear",
         },
     )
-    assert transition["blocked"] is True
-    assert transition["blocked_reason"] == "transition"
-    assert transition["blocked_action"] == "skip_entries"
+    assert observed["blocked"] is False
+    assert observed["blocked_reason"] is None
+    assert observed["blocked_action"] is None
+    assert observed["exposure_multiplier"] == 1.0
+    assert observed["regime_code"] == "trending_bear"
+    assert observed["regime_status"] == "transition"
+    assert observed["halt_flag"] is True
+    assert observed["halt_reason"] == "manual-review"
 
 
 def test_snapshot_symbol_index_reuses_preindexed_rows() -> None:
@@ -619,7 +605,7 @@ def test_apply_trade_to_position_tracks_partial_reductions_until_flat() -> None:
     assert closed_position["realized_return"] > 0.0
 
 
-def test_execute_backtest_run_publishes_full_v4_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execute_backtest_run_publishes_current_results_schema_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     schedule = [
         datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc),
         datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
@@ -772,7 +758,7 @@ def test_execute_backtest_run_publishes_full_v4_payload(monkeypatch: pytest.Monk
     assert summary["cost_drag_bps"] == pytest.approx(30.3)
     assert summary["closed_positions"] == 1
     assert captured["summary"] == captured["completed_summary"]
-    assert captured["results_schema_version"] == 4
+    assert captured["results_schema_version"] == BACKTEST_RESULTS_SCHEMA_VERSION
     assert len(captured["timeseries_rows"]) == 2
     assert len(captured["rolling_metric_rows"]) == 2
     assert len(captured["trade_rows"]) == 2
