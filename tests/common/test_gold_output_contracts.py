@@ -54,6 +54,7 @@ def test_project_gold_output_frame_projects_market_contract_and_coerces_types() 
                     "Split Coefficient": "2.0",
                     "Is Dividend Day": "1",
                     "Is Split Day": "1",
+                    "RSI 14D": "67.5",
                     "PAT Doji": "1",
                     "helper_flag": True,
                 }
@@ -70,6 +71,7 @@ def test_project_gold_output_frame_projects_market_contract_and_coerces_types() 
     assert projected.loc[0, "split_coefficient"] == 2.0
     assert projected.loc[0, "is_dividend_day"] == 1
     assert projected.loc[0, "is_split_day"] == 1
+    assert projected.loc[0, "rsi_14d"] == 67.5
     assert projected.loc[0, "pat_doji"] == 1
     assert str(projected["symbol"].dtype) == "string"
     assert str(projected["is_dividend_day"].dtype) == "Int64"

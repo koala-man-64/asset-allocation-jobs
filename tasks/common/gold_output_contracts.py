@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,7 @@ GOLD_MARKET_OUTPUT_COLUMNS: tuple[str, ...] = (
     "return_5d",
     "return_20d",
     "return_60d",
+    "rsi_14d",
     "vol_20d",
     "vol_60d",
     "rolling_max_252d",
@@ -275,6 +277,8 @@ _CONTRACTS: dict[str, GoldOutputContract] = {
     ),
 }
 
+_SUFFIX_ALIAS_PATTERN = re.compile(r"_(\d+)_([dmyqwh])(?=_|$)")
+
 
 def _coerce_datetime(series: pd.Series) -> pd.Series:
     parsed = pd.to_datetime(series, errors="coerce")
@@ -307,6 +311,13 @@ def _normalized_gold_domain(domain: str) -> str:
     return normalized
 
 
+def _canonicalize_output_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    # Normalize inputs like "RSI 14D" to the contract column name "rsi_14d".
+    out.columns = [_SUFFIX_ALIAS_PATTERN.sub(r"_\1\2", str(column)) for column in out.columns]
+    return out
+
+
 def empty_gold_output_frame(*, domain: str) -> pd.DataFrame:
     normalized_domain = _normalized_gold_domain(domain)
     contract = _CONTRACTS[normalized_domain]
@@ -331,7 +342,7 @@ def project_gold_output_frame(df: pd.DataFrame | None, *, domain: str) -> pd.Dat
     if df is None or df.empty:
         return empty_gold_output_frame(domain=normalized_domain)
 
-    out = normalize_columns_to_snake_case(df).reset_index(drop=True)
+    out = _canonicalize_output_columns(normalize_columns_to_snake_case(df)).reset_index(drop=True)
     projected = pd.DataFrame(index=out.index)
 
     for column in contract.columns:

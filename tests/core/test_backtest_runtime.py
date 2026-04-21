@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 from core.backtest_runtime import (
     ResolvedBacktestDefinition,
@@ -13,6 +14,7 @@ from core.backtest_runtime import (
     _build_intraday_frames_by_timestamp,
     _build_snapshot_symbol_index,
     _prepare_slow_snapshot_frames,
+    _resolve_regime_revision,
     _snapshot_for_timestamp,
     execute_backtest_run,
     _market_row,
@@ -25,6 +27,7 @@ from core.backtest_runtime import (
     _compute_summary,
     validate_backtest_submission,
 )
+from asset_allocation_runtime_common import BACKTEST_RESULTS_SCHEMA_VERSION
 from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
 from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
 from asset_allocation_runtime_common.strategy_engine.position_state import PositionState
@@ -221,7 +224,7 @@ def test_validate_backtest_submission_rejects_regime_coverage_gaps(monkeypatch: 
     assert "Regime history coverage gap" in str(exc.value)
 
 
-def test_regime_context_blocks_and_scales_exposure() -> None:
+def test_regime_context_surfaces_primary_regime_and_signals_observationally() -> None:
     policy = StrategyConfig.model_validate(
         {
             "universeConfigName": "large-cap-quality",
@@ -234,19 +237,8 @@ def test_regime_context_blocks_and_scales_exposure() -> None:
             "rankingSchemaName": "quality",
             "intrabarConflictPolicy": "stop_first",
             "regimePolicy": {
-                "enabled": True,
                 "modelName": "default-regime",
-                "targetGrossExposureByRegime": {
-                    "trending_bull": 1.0,
-                    "trending_bear": 0.5,
-                    "choppy_mean_reversion": 0.75,
-                    "high_vol": 0.0,
-                    "unclassified": 0.0,
-                },
-                "blockOnTransition": True,
-                "blockOnUnclassified": True,
-                "honorHaltFlag": True,
-                "onBlocked": "skip_entries",
+                "mode": "observe_only",
             },
             "exits": [],
         }
@@ -255,26 +247,52 @@ def test_regime_context_blocks_and_scales_exposure() -> None:
     confirmed = _regime_context_for_session(
         policy,
         {
-            "regime_code": "trending_bear",
-            "regime_status": "confirmed",
+            "active_regimes": ["trending_down", "high_volatility"],
+            "signals": [
+                {"regime_code": "trending_down", "signal_state": "active", "score": 1.0},
+                {"regime_code": "high_volatility", "signal_state": "active", "score": 0.67},
+            ],
             "halt_flag": False,
-            "matched_rule_id": "trending_bear",
         },
     )
-    assert confirmed["blocked"] is False
-    assert confirmed["exposure_multiplier"] == 0.5
+    assert confirmed["primary_regime_code"] == "trending_down"
+    assert confirmed["active_regimes"] == ["trending_down", "high_volatility"]
+    assert confirmed["signals"][0]["regime_code"] == "trending_down"
+    assert confirmed["halt_flag"] is False
 
-    transition = _regime_context_for_session(
-        policy,
-        {
-            "regime_code": "trending_bear",
-            "regime_status": "transition",
-            "halt_flag": False,
-        },
-    )
-    assert transition["blocked"] is True
-    assert transition["blocked_reason"] == "transition"
-    assert transition["blocked_action"] == "skip_entries"
+
+def test_strategy_config_rejects_legacy_default_regime_policy() -> None:
+    with pytest.raises(ValidationError, match="observe_only"):
+        StrategyConfig.model_validate(
+            {
+                "universeConfigName": "large-cap-quality",
+                "rebalance": "weekly",
+                "longOnly": True,
+                "topN": 2,
+                "lookbackWindow": 20,
+                "holdingPeriod": 5,
+                "costModel": "default",
+                "rankingSchemaName": "quality",
+                "intrabarConflictPolicy": "stop_first",
+                "regimePolicy": {
+                    "modelName": "default-regime",
+                    "targetGrossExposureByRegime": {
+                        "trending_up": 1.0,
+                        "trending_down": 0.5,
+                        "mean_reverting": 0.75,
+                        "low_volatility": 1.0,
+                        "high_volatility": 0.0,
+                        "liquidity_stress": 0.0,
+                        "macro_alignment": 1.0,
+                        "unclassified": 0.0,
+                    },
+                    "blockOnTransition": True,
+                    "blockOnUnclassified": True,
+                    "honorHaltFlag": True,
+                },
+                "exits": [],
+            }
+        )
 
 
 def test_snapshot_symbol_index_reuses_preindexed_rows() -> None:
@@ -619,7 +637,7 @@ def test_apply_trade_to_position_tracks_partial_reductions_until_flat() -> None:
     assert closed_position["realized_return"] > 0.0
 
 
-def test_execute_backtest_run_publishes_full_v4_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execute_backtest_run_publishes_full_results_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     schedule = [
         datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc),
         datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
@@ -772,7 +790,7 @@ def test_execute_backtest_run_publishes_full_v4_payload(monkeypatch: pytest.Monk
     assert summary["cost_drag_bps"] == pytest.approx(30.3)
     assert summary["closed_positions"] == 1
     assert captured["summary"] == captured["completed_summary"]
-    assert captured["results_schema_version"] == 4
+    assert captured["results_schema_version"] == BACKTEST_RESULTS_SCHEMA_VERSION
     assert len(captured["timeseries_rows"]) == 2
     assert len(captured["rolling_metric_rows"]) == 2
     assert len(captured["trade_rows"]) == 2

@@ -18,7 +18,7 @@ def _build_transport(handler) -> ControlPlaneTransport:
 def test_get_active_regime_model_revision_reads_internal_endpoint() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/internal/regimes/models/default-regime/active"
-        return httpx.Response(200, json={"name": "default-regime", "version": 2})
+        return httpx.Response(200, json={"name": "default-regime", "version": 3})
 
     transport = _build_transport(handler)
     try:
@@ -27,13 +27,13 @@ def test_get_active_regime_model_revision_reads_internal_endpoint() -> None:
     finally:
         transport.close()
 
-    assert result == {"name": "default-regime", "version": 2}
+    assert result == {"name": "default-regime", "version": 3}
 
 
 def test_list_active_regime_model_revisions_reads_internal_endpoint() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/internal/regimes/models/active"
-        return httpx.Response(200, json=[{"name": "default-regime", "version": 2}])
+        return httpx.Response(200, json=[{"name": "default-regime", "version": 3}])
 
     transport = _build_transport(handler)
     try:
@@ -42,4 +42,4 @@ def test_list_active_regime_model_revisions_reads_internal_endpoint() -> None:
     finally:
         transport.close()
 
-    assert result == [{"name": "default-regime", "version": 2}]
+    assert result == [{"name": "default-regime", "version": 3}]

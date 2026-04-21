@@ -389,6 +389,15 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         out[f"return_{window}d"] = close.pct_change(periods=window)
 
     daily_return = out["return_1d"]
+    delta = close.diff()
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+    avg_gain_14 = gains.rolling(window=14, min_periods=14).mean()
+    avg_loss_14 = losses.rolling(window=14, min_periods=14).mean()
+    relative_strength = avg_gain_14 / avg_loss_14.replace(0.0, np.nan)
+    out["rsi_14d"] = 100.0 - (100.0 / (1.0 + relative_strength))
+    out.loc[(avg_loss_14 == 0.0) & (avg_gain_14 > 0.0), "rsi_14d"] = 100.0
+    out.loc[(avg_gain_14 == 0.0) & (avg_loss_14 > 0.0), "rsi_14d"] = 0.0
 
     # Volatility measured as rolling standard deviation of daily return.
     for window in (20, 60):

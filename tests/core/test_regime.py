@@ -14,78 +14,62 @@ from asset_allocation_runtime_common.domain.regime import (
 
 
 def test_compute_states_use_canonical_boundaries() -> None:
-    assert compute_trend_state(0.03) == "positive"
-    assert compute_trend_state(-0.03) == "negative"
-    assert compute_trend_state(0.01) == "near_zero"
     assert compute_trend_state(0.02) == "near_zero"
+    assert compute_trend_state(0.0201) == "positive"
     assert compute_trend_state(-0.02) == "near_zero"
+    assert compute_trend_state(-0.0201) == "negative"
 
-    assert compute_curve_state(0.6) == "contango"
-    assert compute_curve_state(-0.6) == "inverted"
-    assert compute_curve_state(0.1) == "flat"
-    assert compute_curve_state(0.5) == "contango"
-    assert compute_curve_state(-0.5) == "inverted"
+    assert compute_curve_state(0.50) == "contango"
+    assert compute_curve_state(0.49) == "flat"
+    assert compute_curve_state(-0.50) == "inverted"
+    assert compute_curve_state(-0.49) == "flat"
 
 
-def test_classify_regime_row_uses_optional_transition_band_only_for_legacy_configs() -> None:
-    cold_start = classify_regime_row(
+def test_classify_regime_row_activates_multiple_labels_independently() -> None:
+    row = classify_regime_row(
         {
             "inputs_complete_flag": True,
-            "return_20d": 0.0,
-            "vix_slope": 0.0,
-            "rvol_10d_ann": 26.5,
-            "vix_spot_close": 24.0,
+            "spy_close": 110.0,
+            "qqq_close": 120.0,
+            "spy_sma_200d": 100.0,
+            "qqq_sma_200d": 100.0,
+            "return_20d": 0.04,
+            "vix_spot_close": 14.0,
+            "atr_14d": 2.5,
+            "bb_width_20d": 0.10,
+            "gap_atr": 0.20,
+            "volume_pct_rank_252d": 0.55,
+            "hy_oas_z_20d": 0.10,
+            "acwi_return_20d": 0.03,
+            "rates_event_flag": False,
             "vix_gt_32_streak": 0,
         }
     )
-    assert cold_start["regime_code"] == "unclassified"
-    assert cold_start["regime_status"] == "unclassified"
-    assert cold_start["matched_rule_id"] is None
 
-    legacy_follow_on = classify_regime_row(
-        {
-            "inputs_complete_flag": True,
-            "return_20d": 0.0,
-            "vix_slope": 0.2,
-            "rvol_10d_ann": 26.0,
-            "vix_spot_close": 24.0,
-            "vix_gt_32_streak": 0,
-        },
-        prev_confirmed_regime="trending_bear",
-        config={"highVolExitThreshold": 25.0},
-    )
-    assert legacy_follow_on["regime_code"] == "trending_bear"
-    assert legacy_follow_on["regime_status"] == "transition"
-    assert legacy_follow_on["matched_rule_id"] == "transition_band"
+    active_regimes = set(row["active_regimes"])
+    signals_by_code = {signal["regime_code"]: signal for signal in row["signals"]}
+
+    assert "trending_up" in active_regimes
+    assert "low_volatility" in active_regimes
+    assert "unclassified" not in active_regimes
+    assert signals_by_code["trending_up"]["signal_state"] == "active"
+    assert signals_by_code["macro_alignment"]["signal_state"] == "inactive"
+    assert row["halt_flag"] is False
 
 
-def test_classify_regime_row_sets_strict_high_vol_and_halt_overlay() -> None:
-    boundary_row = classify_regime_row(
+def test_classify_regime_row_marks_unclassified_when_inputs_are_incomplete() -> None:
+    row = classify_regime_row(
         {
-            "inputs_complete_flag": True,
-            "return_20d": -0.04,
-            "vix_slope": -1.1,
-            "rvol_10d_ann": 28.0,
-            "vix_spot_close": 35.0,
-            "vix_gt_32_streak": 2,
-        }
-    )
-    active_row = classify_regime_row(
-        {
-            "inputs_complete_flag": True,
-            "return_20d": -0.04,
-            "vix_slope": -1.1,
-            "rvol_10d_ann": 30.2,
-            "vix_spot_close": 35.0,
-            "vix_gt_32_streak": 2,
+            "inputs_complete_flag": False,
+            "return_20d": None,
+            "vix_spot_close": None,
         }
     )
 
-    assert boundary_row["regime_code"] == "unclassified"
-    assert active_row["regime_code"] == "high_vol"
-    assert active_row["regime_status"] == "confirmed"
-    assert active_row["halt_flag"] is True
-    assert active_row["halt_reason"] == "vix_spot_close_gt_32_for_2_days"
+    signals_by_code = {signal["regime_code"]: signal for signal in row["signals"]}
+    assert row["active_regimes"] == ["unclassified"]
+    assert signals_by_code["unclassified"]["signal_state"] == "active"
+    assert signals_by_code["trending_up"]["signal_state"] == "insufficient_data"
 
 
 def test_next_business_session_skips_weekends_and_market_holidays() -> None:
@@ -93,28 +77,48 @@ def test_next_business_session_skips_weekends_and_market_holidays() -> None:
     assert next_business_session(pd.Timestamp("2026-04-02").date()).isoformat() == "2026-04-06"
 
 
-def test_build_regime_outputs_uses_next_business_session_as_effective_date() -> None:
+def test_build_regime_outputs_emits_normalized_history_latest_and_enter_exit_transitions() -> None:
     inputs = pd.DataFrame(
         [
             {
                 "as_of_date": "2026-03-02",
-                "return_1d": 0.01,
+                "spy_close": 110.0,
+                "qqq_close": 120.0,
+                "spy_sma_200d": 100.0,
+                "qqq_sma_200d": 100.0,
                 "return_20d": 0.04,
-                "rvol_10d_ann": 12.0,
-                "vix_spot_close": 18.0,
-                "vix3m_close": 18.7,
-                "vix_slope": 0.7,
+                "acwi_return_20d": 0.03,
+                "atr_14d": 2.5,
+                "bb_width_20d": 0.10,
+                "gap_atr": 0.20,
+                "volume_pct_rank_252d": 0.55,
+                "vix_spot_close": 14.0,
+                "vix3m_close": 15.0,
+                "vix_slope": 1.0,
+                "hy_oas_z_20d": 0.10,
+                "rates_event_flag": False,
+                "rsi_14d": 74.0,
                 "vix_gt_32_streak": 0,
                 "inputs_complete_flag": True,
             },
             {
                 "as_of_date": "2026-03-04",
-                "return_1d": -0.02,
+                "spy_close": 90.0,
+                "qqq_close": 92.0,
+                "spy_sma_200d": 100.0,
+                "qqq_sma_200d": 100.0,
                 "return_20d": -0.05,
-                "rvol_10d_ann": 18.0,
-                "vix_spot_close": 24.0,
-                "vix3m_close": 23.2,
-                "vix_slope": -0.8,
+                "acwi_return_20d": -0.04,
+                "atr_14d": 4.5,
+                "bb_width_20d": 0.16,
+                "gap_atr": 0.85,
+                "volume_pct_rank_252d": 0.10,
+                "vix_spot_close": 28.0,
+                "vix3m_close": 26.5,
+                "vix_slope": -1.5,
+                "hy_oas_z_20d": 1.5,
+                "rates_event_flag": True,
+                "rsi_14d": 42.0,
                 "vix_gt_32_streak": 0,
                 "inputs_complete_flag": True,
             },
@@ -124,10 +128,21 @@ def test_build_regime_outputs_uses_next_business_session_as_effective_date() -> 
     history, latest, transitions = build_regime_outputs(
         inputs,
         model_name="default-regime",
-        model_version=1,
-        computed_at=datetime(2026, 3, 8, tzinfo=timezone.utc),
+        model_version=3,
+        computed_at=datetime(2026, 4, 7, tzinfo=timezone.utc),
     )
 
-    assert history["effective_from_date"].tolist()[0].isoformat() == "2026-03-03"
+    assert len(history) == 16
+    assert history["effective_from_date"].drop_duplicates().tolist()[0].isoformat() == "2026-03-03"
+    assert history["effective_from_date"].drop_duplicates().tolist()[1].isoformat() == "2026-03-05"
+    assert latest["as_of_date"].nunique() == 1
     assert latest.iloc[0]["as_of_date"].isoformat() == "2026-03-04"
-    assert transitions["new_regime_code"].tolist() == ["trending_bull", "trending_bear"]
+    assert latest["regime_code"].nunique() == 8
+
+    transition_pairs = {
+        (row["regime_code"], row["transition_type"])
+        for row in transitions.to_dict("records")
+    }
+    assert ("trending_up", "entered") in transition_pairs
+    assert ("trending_up", "exited") in transition_pairs
+    assert ("trending_down", "entered") in transition_pairs

@@ -315,3 +315,29 @@ def test_default_regime_v2_migration_seeds_canonical_revision_and_activation() -
     assert "haltVixStreakDays\": 2" in text
     assert "WHERE model_name = 'default-regime' AND version = 2" in text
     assert "SELECT 'default-regime', 2, 'migration-0039', NOW()" in text
+
+
+def test_default_regime_multilabel_cutover_migration_normalizes_tables_and_policy() -> None:
+    repo_root = _repo_root()
+    migration = (
+        repo_root
+        / "deploy"
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0040_default_regime_multilabel_cutover.sql"
+    )
+    text = migration.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS gold.regime_macro_inputs_daily" in text
+    assert "ADD COLUMN IF NOT EXISTS qqq_close DOUBLE PRECISION" in text
+    assert "ADD COLUMN IF NOT EXISTS rsi_14d DOUBLE PRECISION" in text
+    assert "ADD PRIMARY KEY (as_of_date, model_name, model_version, regime_code)" in text
+    assert "ADD PRIMARY KEY (model_name, model_version, regime_code)" in text
+    assert "ADD PRIMARY KEY (model_name, model_version, effective_from_date, regime_code, transition_type)" in text
+    assert "ADD COLUMN IF NOT EXISTS active_regimes_json JSONB" in text
+    assert "ADD COLUMN IF NOT EXISTS signals_json JSONB" in text
+    assert "'mode', 'observe_only'" in text
+    assert "'default-regime'," in text
+    assert "'Default multi-label observational regime monitor model'" in text
+    assert "'migration-0040'" in text

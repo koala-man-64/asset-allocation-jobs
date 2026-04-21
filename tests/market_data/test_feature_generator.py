@@ -37,6 +37,7 @@ def test_compute_features_adds_expected_columns():
         "return_5d",
         "return_20d",
         "return_60d",
+        "rsi_14d",
         "dividend_amount",
         "split_coefficient",
         "is_dividend_day",
@@ -94,6 +95,7 @@ def test_compute_features_basic_sanity_on_monotonic_series():
     last = out.iloc[-1]
     assert last["sma_20_gt_sma_50"] == 1
     assert last["sma_50_gt_sma_200"] == 1
+    assert 0.0 <= float(last["rsi_14d"]) <= 100.0
 
     assert 0.0 <= float(last["volume_pct_rank_252d"]) <= 1.0
     assert float(last["volume_pct_rank_252d"]) > 0.99

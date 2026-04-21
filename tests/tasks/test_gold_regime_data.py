@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
 from datetime import date, datetime, timezone
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -51,19 +51,51 @@ class _FakeConnection:
         return self._cursor
 
 
+def _market_row(symbol: str, as_of_date: str, **overrides: Any) -> dict[str, Any]:
+    base = {
+        "symbol": symbol,
+        "date": as_of_date,
+        "close": 100.0,
+        "return_1d": 0.01,
+        "return_20d": 0.03,
+        "sma_200d": 95.0,
+        "atr_14d": 2.0,
+        "gap_atr": 0.2,
+        "bb_width_20d": 0.1,
+        "volume_pct_rank_252d": 0.6,
+        "rsi_14d": 55.0,
+    }
+    base.update(overrides)
+    return base
+
+
+def _macro_row(as_of_date: str, **overrides: Any) -> dict[str, Any]:
+    base = {
+        "as_of_date": as_of_date,
+        "rate_2y": 4.2,
+        "rate_10y": 4.6,
+        "curve_2s10s": 0.4,
+        "hy_oas": 3.6,
+        "hy_oas_z_20d": 0.2,
+        "rates_event_flag": False,
+        "computed_at": pd.Timestamp("2026-03-20T12:00:00Z"),
+    }
+    base.update(overrides)
+    return base
+
+
 def test_regime_job_uses_shared_required_market_symbol_contract() -> None:
     assert regime_job.REGIME_REQUIRED_MARKET_SYMBOLS == REGIME_REQUIRED_MARKET_SYMBOLS
+    assert REGIME_REQUIRED_MARKET_SYMBOLS == ("SPY", "QQQ", "IWM", "ACWI", "^VIX", "^VIX3M")
 
 
 def test_validate_required_market_series_reports_missing_symbols() -> None:
     frame = pd.DataFrame(
-        {
-            "symbol": ["SPY", "SPY", "^VIX"],
-            "date": ["2026-03-03", "2026-03-04", "2026-03-04"],
-            "close": [580.0, 582.0, 21.5],
-            "return_1d": [0.01, 0.003, None],
-            "return_20d": [0.04, 0.05, None],
-        }
+        [
+            _market_row("SPY", "2026-03-03"),
+            _market_row("QQQ", "2026-03-03"),
+            _market_row("^VIX", "2026-03-03", return_1d=None, return_20d=None),
+        ]
     )
 
     normalized = regime_job._normalize_market_series(frame)
@@ -73,67 +105,119 @@ def test_validate_required_market_series_reports_missing_symbols() -> None:
 
     message = str(excinfo.value)
     assert "missing required regime symbols" in message
-    assert REGIME_REQUIRED_MARKET_SYMBOLS[-1] in message
-    assert "coverage=" in message
+    assert "IWM" in message
+    assert "ACWI" in message
 
 
-def test_validate_required_market_series_logs_fast_fail_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    frame = regime_job._normalize_market_series(
+def test_build_inputs_daily_joins_market_and_macro_inputs_and_marks_complete_rows() -> None:
+    market_series = regime_job._normalize_market_series(
         pd.DataFrame(
-            {
-                "symbol": ["SPY", "^VIX"],
-                "date": ["2026-03-03", "2026-03-03"],
-                "close": [580.0, 21.5],
-                "return_1d": [0.01, None],
-                "return_20d": [0.04, None],
-            }
+            [
+                _market_row("SPY", "2026-03-20", close=110.0, sma_200d=100.0, atr_14d=2.5, gap_atr=0.2, bb_width_20d=0.1, volume_pct_rank_252d=0.55, rsi_14d=62.0),
+                _market_row("QQQ", "2026-03-20", close=120.0, return_20d=0.05, sma_200d=105.0),
+                _market_row("IWM", "2026-03-20", close=95.0, return_20d=0.01),
+                _market_row("ACWI", "2026-03-20", close=88.0, return_20d=0.02),
+                _market_row("^VIX", "2026-03-20", close=14.0, return_1d=None, return_20d=None, sma_200d=None, atr_14d=None, gap_atr=None, bb_width_20d=None, volume_pct_rank_252d=None, rsi_14d=None),
+                _market_row("^VIX3M", "2026-03-20", close=15.1, return_1d=None, return_20d=None, sma_200d=None, atr_14d=None, gap_atr=None, bb_width_20d=None, volume_pct_rank_252d=None, rsi_14d=None),
+                _market_row("SPY", "2026-03-21", close=111.0, sma_200d=100.5, atr_14d=2.7, gap_atr=0.25, bb_width_20d=0.11, volume_pct_rank_252d=0.57, rsi_14d=64.0),
+                _market_row("QQQ", "2026-03-21", close=121.0, return_20d=0.04, sma_200d=106.0),
+                _market_row("IWM", "2026-03-21", close=96.0, return_20d=0.01),
+                _market_row("ACWI", "2026-03-21", close=89.0, return_20d=0.02),
+                _market_row("^VIX", "2026-03-21", close=15.0, return_1d=None, return_20d=None, sma_200d=None, atr_14d=None, gap_atr=None, bb_width_20d=None, volume_pct_rank_252d=None, rsi_14d=None),
+                _market_row("^VIX3M", "2026-03-21", close=15.8, return_1d=None, return_20d=None, sma_200d=None, atr_14d=None, gap_atr=None, bb_width_20d=None, volume_pct_rank_252d=None, rsi_14d=None),
+            ]
         )
     )
-    errors: list[str] = []
-
-    monkeypatch.setattr(regime_job, "_summarize_market_sync_state", lambda _dsn: "market_sync_state=empty")
-    monkeypatch.setattr(regime_job.mdc, "write_error", lambda msg: errors.append(str(msg)))
-
-    with pytest.raises(ValueError) as excinfo:
-        regime_job._validate_required_market_series(frame, dsn="postgresql://example")
-
-    message = str(excinfo.value)
-    assert "Gold regime fast-fail" in message
-    assert "market_sync_state=empty" in message
-    assert "gold-market-job" in message
-    assert errors == [message]
-
-
-def test_assert_complete_regime_inputs_reports_non_overlapping_series() -> None:
-    market_series = regime_job._validate_required_market_series(
-        regime_job._normalize_market_series(
-            pd.DataFrame(
-                {
-                    "symbol": ["SPY", "SPY", "^VIX", "^VIX3M"],
-                    "date": ["2026-03-03", "2026-03-04", "2026-03-05", "2026-03-05"],
-                    "close": [580.0, 582.0, 21.5, 22.0],
-                    "return_1d": [0.01, 0.003, None, None],
-                    "return_20d": [0.04, 0.05, None, None],
-                }
-            )
+    macro_inputs = regime_job._normalize_macro_inputs(
+        pd.DataFrame(
+            [
+                _macro_row("2026-03-20", rates_event_flag=False),
+                _macro_row("2026-03-21", rate_10y=None),
+            ]
         )
     )
 
     inputs = regime_job._build_inputs_daily(
         market_series,
-        computed_at=datetime(2026, 3, 9, tzinfo=timezone.utc),
+        macro_inputs,
+        computed_at=datetime(2026, 3, 22, tzinfo=timezone.utc),
     )
 
-    with pytest.raises(ValueError) as excinfo:
-        regime_job._assert_complete_regime_inputs(inputs, market_series=market_series)
-
-    message = str(excinfo.value)
-    assert "no complete SPY/^VIX/^VIX3M rows" in message
-    assert "inputs_range=" in message
-    assert "coverage=" in message
+    assert inputs["as_of_date"].tolist() == [date(2026, 3, 20), date(2026, 3, 21)]
+    assert inputs.iloc[0]["qqq_close"] == 120.0
+    assert inputs.iloc[0]["hy_oas_z_20d"] == pytest.approx(0.2)
+    assert bool(inputs.iloc[0]["inputs_complete_flag"]) is True
+    assert bool(inputs.iloc[1]["inputs_complete_flag"]) is False
 
 
-def test_write_storage_parquet_outputs_writes_all_regime_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_publish_window_skips_trailing_incomplete_rows() -> None:
+    inputs = pd.DataFrame(
+        [
+            {
+                **_macro_row("2026-03-20"),
+                "spy_close": 110.0,
+                "qqq_close": 120.0,
+                "iwm_close": 95.0,
+                "acwi_close": 88.0,
+                "return_1d": 0.01,
+                "return_20d": 0.04,
+                "qqq_return_20d": 0.05,
+                "iwm_return_20d": 0.01,
+                "acwi_return_20d": 0.02,
+                "spy_sma_200d": 100.0,
+                "qqq_sma_200d": 105.0,
+                "atr_14d": 2.5,
+                "gap_atr": 0.2,
+                "bb_width_20d": 0.1,
+                "rsi_14d": 55.0,
+                "volume_pct_rank_252d": 0.55,
+                "vix_spot_close": 14.0,
+                "vix3m_close": 15.0,
+                "vix_slope": 1.0,
+                "vix_gt_32_streak": 0,
+                "inputs_complete_flag": True,
+            },
+            {
+                **_macro_row("2026-03-21", rate_10y=None),
+                "spy_close": 111.0,
+                "qqq_close": 121.0,
+                "iwm_close": 96.0,
+                "acwi_close": 89.0,
+                "return_1d": 0.01,
+                "return_20d": 0.04,
+                "qqq_return_20d": 0.05,
+                "iwm_return_20d": 0.01,
+                "acwi_return_20d": 0.02,
+                "spy_sma_200d": 100.0,
+                "qqq_sma_200d": 105.0,
+                "atr_14d": 2.5,
+                "gap_atr": 0.2,
+                "bb_width_20d": 0.1,
+                "rsi_14d": 55.0,
+                "volume_pct_rank_252d": 0.55,
+                "vix_spot_close": 14.0,
+                "vix3m_close": 15.0,
+                "vix_slope": 1.0,
+                "vix_gt_32_streak": 0,
+                "inputs_complete_flag": False,
+            },
+        ]
+    )
+    market_series = regime_job._normalize_market_series(
+        pd.DataFrame([_market_row(symbol, "2026-03-20") for symbol in REGIME_REQUIRED_MARKET_SYMBOLS])
+    )
+    macro_inputs = regime_job._normalize_macro_inputs(pd.DataFrame([_macro_row("2026-03-20")]))
+
+    window = regime_job._resolve_publish_window(inputs, market_series=market_series, macro_inputs=macro_inputs)
+    published_inputs = regime_job._published_inputs(inputs, window=window)
+
+    assert window.published_as_of_date == date(2026, 3, 20)
+    assert window.input_as_of_date == date(2026, 3, 21)
+    assert window.skipped_trailing_input_dates == (date(2026, 3, 21),)
+    assert pd.to_datetime(published_inputs["as_of_date"]).dt.date.tolist() == [date(2026, 3, 20)]
+
+
+def test_write_storage_parquet_outputs_writes_macro_and_regime_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     parquet_paths: list[str] = []
 
     class _FakeClient:
@@ -143,20 +227,17 @@ def test_write_storage_parquet_outputs_writes_all_regime_surfaces(monkeypatch: p
 
     monkeypatch.setattr(regime_job.mdc, "get_storage_client", lambda _container: _FakeClient())
 
-    inputs = pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-20")], "symbol": ["SPY"]})
-    history = pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-20")], "regime_code": ["risk_on"]})
-    latest = history.copy()
-    transitions = pd.DataFrame({"effective_from_date": [pd.Timestamp("2026-03-20")]})
-
     regime_job._write_storage_parquet_outputs(
         gold_container="gold",
-        inputs=inputs,
-        history=history,
-        latest=latest,
-        transitions=transitions,
+        macro_inputs=pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-20")]}),
+        inputs=pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-20")]}),
+        history=pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-20")], "regime_code": ["trending_up"]}),
+        latest=pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-20")], "regime_code": ["trending_up"]}),
+        transitions=pd.DataFrame({"effective_from_date": [pd.Timestamp("2026-03-20")], "regime_code": ["trending_up"]}),
     )
 
     assert parquet_paths == [
+        "regime/macro_inputs.parquet",
         "regime/inputs.parquet",
         "regime/history.parquet",
         "regime/latest.parquet",
@@ -164,158 +245,22 @@ def test_write_storage_parquet_outputs_writes_all_regime_surfaces(monkeypatch: p
     ]
 
 
-def test_build_revision_inputs_uses_model_halt_threshold_for_streak_and_overlay() -> None:
-    inputs = pd.DataFrame(
-        [
-            {
-                "as_of_date": "2026-03-18",
-                "return_1d": -0.01,
-                "return_20d": -0.05,
-                "rvol_10d_ann": 31.0,
-                "vix_spot_close": 27.0,
-                "vix3m_close": 26.0,
-                "vix_slope": -1.0,
-                "vix_gt_32_streak": 0,
-                "inputs_complete_flag": True,
-            },
-            {
-                "as_of_date": "2026-03-19",
-                "return_1d": -0.01,
-                "return_20d": -0.05,
-                "rvol_10d_ann": 31.0,
-                "vix_spot_close": 29.0,
-                "vix3m_close": 28.0,
-                "vix_slope": -1.0,
-                "vix_gt_32_streak": 0,
-                "inputs_complete_flag": True,
-            },
-            {
-                "as_of_date": "2026-03-20",
-                "return_1d": -0.01,
-                "return_20d": -0.05,
-                "rvol_10d_ann": 31.0,
-                "vix_spot_close": 29.0,
-                "vix3m_close": 28.0,
-                "vix_slope": -1.0,
-                "vix_gt_32_streak": 0,
-                "inputs_complete_flag": True,
-            },
-        ]
-    )
-
-    revision_inputs, resolved_config = regime_job._build_revision_inputs(
-        inputs,
-        config={"haltVixThreshold": 28.0, "haltVixStreakDays": 2},
-    )
-    history, latest, _transitions = regime_job.build_regime_outputs(
-        revision_inputs,
-        model_name="default-regime",
-        model_version=7,
-        config=resolved_config,
-        computed_at=datetime(2026, 3, 21, tzinfo=timezone.utc),
-    )
-
-    assert revision_inputs["vix_gt_32_streak"].tolist() == [0, 1, 2]
-    assert history["vix_gt_32_streak"].tolist() == [0, 1, 2]
-    assert bool(latest.iloc[0]["halt_flag"]) is True
-    assert latest.iloc[0]["halt_reason"] is not None
-
-
-def test_publish_window_skips_trailing_incomplete_latest_inputs() -> None:
-    inputs = pd.DataFrame(
-        [
-            {
-                "as_of_date": "2026-03-18",
-                "return_1d": 0.01,
-                "return_20d": 0.04,
-                "rvol_10d_ann": 14.0,
-                "vix_spot_close": 18.0,
-                "vix3m_close": 18.8,
-                "vix_slope": 0.8,
-                "vix_gt_32_streak": 0,
-                "inputs_complete_flag": True,
-            },
-            {
-                "as_of_date": "2026-03-19",
-                "return_1d": -0.02,
-                "return_20d": -0.05,
-                "rvol_10d_ann": 20.0,
-                "vix_spot_close": 24.0,
-                "vix3m_close": 23.1,
-                "vix_slope": -0.9,
-                "vix_gt_32_streak": 0,
-                "inputs_complete_flag": True,
-            },
-            {
-                "as_of_date": "2026-03-20",
-                "return_1d": pd.NA,
-                "return_20d": pd.NA,
-                "rvol_10d_ann": pd.NA,
-                "vix_spot_close": 25.0,
-                "vix3m_close": pd.NA,
-                "vix_slope": pd.NA,
-                "vix_gt_32_streak": 0,
-                "inputs_complete_flag": False,
-            },
-        ]
-    )
-    market_series = pd.DataFrame(columns=["symbol", "date", "close", "return_1d", "return_20d"])
-
-    window = regime_job._resolve_publish_window(inputs, market_series=market_series)
-    metadata = regime_job._publish_window_metadata(window)
-    warnings = regime_job._publish_window_warnings(window)
-    published_inputs = regime_job._published_inputs(inputs, window=window)
-    full_history, full_latest, full_transitions = regime_job.build_regime_outputs(
-        inputs,
-        model_name="default-regime",
-        model_version=1,
-        computed_at=datetime(2026, 3, 21, tzinfo=timezone.utc),
-    )
-    published_history, published_latest, published_transitions = regime_job.build_regime_outputs(
-        published_inputs,
-        model_name="default-regime",
-        model_version=1,
-        computed_at=datetime(2026, 3, 21, tzinfo=timezone.utc),
-    )
-
-    assert window.published_as_of_date == date(2026, 3, 19)
-    assert window.input_as_of_date == date(2026, 3, 20)
-    assert window.skipped_trailing_input_dates == (date(2026, 3, 20),)
-    assert metadata["skipped_trailing_input_dates"] == ["2026-03-20"]
-    assert warnings == [
-        "Trailing incomplete regime input dates skipped from published regime surfaces: 2026-03-20. "
-        "Published regime state remains capped at 2026-03-19."
-    ]
-    assert pd.to_datetime(inputs["as_of_date"]).dt.date.tolist() == [
-        date(2026, 3, 18),
-        date(2026, 3, 19),
-        date(2026, 3, 20),
-    ]
-    assert pd.to_datetime(published_inputs["as_of_date"]).dt.date.tolist() == [
-        date(2026, 3, 18),
-        date(2026, 3, 19),
-    ]
-    assert full_latest.iloc[0]["as_of_date"].isoformat() == "2026-03-20"
-    assert full_latest.iloc[0]["regime_status"] == "unclassified"
-    assert published_history["as_of_date"].max().isoformat() == "2026-03-19"
-    assert published_latest.iloc[0]["as_of_date"].isoformat() == "2026-03-19"
-    assert len(published_transitions) <= len(full_transitions)
-
-
-def test_replace_postgres_tables_uses_staged_apply_for_all_regime_tables(
+def test_replace_postgres_tables_uses_staged_apply_for_macro_and_regime_tables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cursor = _FakeCursor(
-        fetchone_rows=[("off",), (False,)],
+        fetchone_rows=[("off",), ("off",), (False,)],
         rowcount_map={
+            "DELETE FROM gold.regime_macro_inputs_daily AS target": 1,
+            "INSERT INTO gold.regime_macro_inputs_daily AS target": 1,
             "DELETE FROM gold.regime_inputs_daily AS target": 1,
             "INSERT INTO gold.regime_inputs_daily AS target": 1,
-            "DELETE FROM gold.regime_history AS target": 2,
-            "INSERT INTO gold.regime_history AS target": 2,
-            "DELETE FROM gold.regime_latest AS target": 1,
-            "INSERT INTO gold.regime_latest AS target": 1,
-            "DELETE FROM gold.regime_transitions AS target": 1,
-            "INSERT INTO gold.regime_transitions AS target": 1,
+            "DELETE FROM gold.regime_history AS target": 8,
+            "INSERT INTO gold.regime_history AS target": 8,
+            "DELETE FROM gold.regime_latest AS target": 8,
+            "INSERT INTO gold.regime_latest AS target": 8,
+            "DELETE FROM gold.regime_transitions AS target": 2,
+            "INSERT INTO gold.regime_transitions AS target": 2,
         },
     )
     messages: list[str] = []
@@ -330,226 +275,203 @@ def test_replace_postgres_tables_uses_staged_apply_for_all_regime_tables(
 
     monkeypatch.setattr(regime_job, "copy_rows", _fake_copy_rows)
 
-    inputs = pd.DataFrame(
-        {
-            "as_of_date": [pd.Timestamp("2026-03-20")],
-            "spy_close": [580.0],
-            "return_1d": [0.01],
-            "return_20d": [0.05],
-            "rvol_10d_ann": [18.0],
-            "vix_spot_close": [21.5],
-            "vix3m_close": [22.1],
-            "vix_slope": [0.6],
-            "trend_state": ["up"],
-            "curve_state": ["contango"],
-            "vix_gt_32_streak": [0],
-            "inputs_complete_flag": [True],
-            "computed_at": [pd.Timestamp("2026-03-20T12:00:00Z")],
-        }
-    )
-    history = pd.DataFrame(
-        {
-            "as_of_date": [pd.Timestamp("2026-03-20"), pd.Timestamp("2026-03-21")],
-            "effective_from_date": [pd.Timestamp("2026-03-20"), pd.Timestamp("2026-03-20")],
-            "model_name": ["default-regime", "default-regime"],
-            "model_version": [1, 1],
-            "regime_code": ["risk_on", "risk_on"],
-            "regime_status": ["active", "active"],
-            "matched_rule_id": ["rule-1", "rule-1"],
-            "halt_flag": [False, False],
-            "halt_reason": [pd.NA, pd.NA],
-            "spy_return_20d": [0.05, 0.06],
-            "rvol_10d_ann": [18.0, 17.5],
-            "vix_spot_close": [21.5, 20.8],
-            "vix3m_close": [22.1, 21.6],
-            "vix_slope": [0.6, 0.8],
-            "trend_state": ["up", "up"],
-            "curve_state": ["contango", "contango"],
-            "vix_gt_32_streak": [0, 0],
-            "computed_at": [pd.Timestamp("2026-03-20T12:00:00Z"), pd.Timestamp("2026-03-21T12:00:00Z")],
-        }
-    )
-    latest = history.tail(1).copy()
-    transitions = pd.DataFrame(
-        {
-            "model_name": ["default-regime"],
-            "model_version": [1],
-            "effective_from_date": [pd.Timestamp("2026-03-20")],
-            "prior_regime_code": [pd.NA],
-            "new_regime_code": ["risk_on"],
-            "trigger_rule_id": ["rule-1"],
-            "computed_at": [pd.Timestamp("2026-03-20T12:00:00Z")],
-        }
-    )
-
     regime_job._replace_postgres_tables(
         "postgresql://test",
-        inputs=inputs,
-        history=history,
-        latest=latest,
-        transitions=transitions,
-        active_models=[("default-regime", 1)],
+        macro_inputs=pd.DataFrame([_macro_row("2026-03-20")]),
+        inputs=pd.DataFrame(
+            [
+                {
+                    "as_of_date": pd.Timestamp("2026-03-20"),
+                    "spy_close": 110.0,
+                    "qqq_close": 120.0,
+                    "iwm_close": 95.0,
+                    "acwi_close": 88.0,
+                    "return_1d": 0.01,
+                    "return_20d": 0.04,
+                    "qqq_return_20d": 0.05,
+                    "iwm_return_20d": 0.01,
+                    "acwi_return_20d": 0.02,
+                    "spy_sma_200d": 100.0,
+                    "qqq_sma_200d": 105.0,
+                    "atr_14d": 2.5,
+                    "gap_atr": 0.2,
+                    "bb_width_20d": 0.1,
+                    "rsi_14d": 55.0,
+                    "volume_pct_rank_252d": 0.55,
+                    "vix_spot_close": 14.0,
+                    "vix3m_close": 15.0,
+                    "vix_slope": 1.0,
+                    "hy_oas": 3.6,
+                    "hy_oas_z_20d": 0.2,
+                    "rate_2y": 4.2,
+                    "rate_10y": 4.6,
+                    "curve_2s10s": 0.4,
+                    "rates_event_flag": False,
+                    "vix_gt_32_streak": 0,
+                    "inputs_complete_flag": True,
+                    "computed_at": pd.Timestamp("2026-03-20T12:00:00Z"),
+                }
+            ]
+        ),
+        history=pd.DataFrame(
+            [
+                {
+                    "as_of_date": pd.Timestamp("2026-03-20"),
+                    "effective_from_date": pd.Timestamp("2026-03-23"),
+                    "model_name": "default-regime",
+                    "model_version": 3,
+                    "regime_code": "trending_up",
+                    "display_name": "Trending (Up)",
+                    "signal_state": "active",
+                    "score": 1.0,
+                    "activation_threshold": 0.6,
+                    "is_active": True,
+                    "matched_rule_id": "trending_up",
+                    "halt_flag": False,
+                    "halt_reason": None,
+                    "evidence_json": "{}",
+                    "computed_at": pd.Timestamp("2026-03-20T12:00:00Z"),
+                }
+            ]
+        ),
+        latest=pd.DataFrame(
+            [
+                {
+                    "model_name": "default-regime",
+                    "model_version": 3,
+                    "as_of_date": pd.Timestamp("2026-03-20"),
+                    "effective_from_date": pd.Timestamp("2026-03-23"),
+                    "regime_code": "trending_up",
+                    "display_name": "Trending (Up)",
+                    "signal_state": "active",
+                    "score": 1.0,
+                    "activation_threshold": 0.6,
+                    "is_active": True,
+                    "matched_rule_id": "trending_up",
+                    "halt_flag": False,
+                    "halt_reason": None,
+                    "evidence_json": "{}",
+                    "computed_at": pd.Timestamp("2026-03-20T12:00:00Z"),
+                }
+            ]
+        ),
+        transitions=pd.DataFrame(
+            [
+                {
+                    "model_name": "default-regime",
+                    "model_version": 3,
+                    "effective_from_date": pd.Timestamp("2026-03-23"),
+                    "regime_code": "trending_up",
+                    "transition_type": "entered",
+                    "prior_score": None,
+                    "new_score": 1.0,
+                    "activation_threshold": 0.6,
+                    "trigger_rule_id": "trending_up",
+                    "computed_at": pd.Timestamp("2026-03-20T12:00:00Z"),
+                }
+            ]
+        ),
+        active_models=[("default-regime", 3)],
     )
 
     assert copied_tables == [
         "pg_temp.regime_active_models_scope",
+        "pg_temp.regime_stage_regime_macro_inputs_daily",
         "pg_temp.regime_stage_regime_inputs_daily",
         "pg_temp.regime_stage_regime_history",
         "pg_temp.regime_stage_regime_latest",
         "pg_temp.regime_stage_regime_transitions",
     ]
-    assert all("TRUNCATE TABLE gold.regime_inputs_daily" not in sql for sql, _params in cursor.executed)
-    assert any("DELETE FROM gold.regime_inputs_daily AS target" in sql for sql, _params in cursor.executed)
+    assert sum("gold_regime_postgres_apply_stats" in message for message in messages) == 5
+    assert any("DELETE FROM gold.regime_macro_inputs_daily AS target" in sql for sql, _params in cursor.executed)
     assert any("DELETE FROM gold.regime_history AS target" in sql for sql, _params in cursor.executed)
-    assert any("DELETE FROM gold.regime_latest AS target" in sql for sql, _params in cursor.executed)
-    assert any("DELETE FROM gold.regime_transitions AS target" in sql for sql, _params in cursor.executed)
-    assert any("INSERT INTO gold.regime_inputs_daily AS target" in sql for sql, _params in cursor.executed)
-    assert any("INSERT INTO gold.regime_history AS target" in sql for sql, _params in cursor.executed)
-    assert any("INSERT INTO gold.regime_latest AS target" in sql for sql, _params in cursor.executed)
-    assert any("INSERT INTO gold.regime_transitions AS target" in sql for sql, _params in cursor.executed)
-    assert any("IS DISTINCT FROM" in sql for sql, _params in cursor.executed)
-    history_delete_sql = next(
-        sql for sql, _params in cursor.executed if "DELETE FROM gold.regime_history AS target" in sql
-    )
-    assert "pg_temp.regime_active_models_scope AS scope" in history_delete_sql
-    assert "pg_temp.regime_stage_regime_history AS stage" in history_delete_sql
-    assert all("pg_advisory_lock" not in sql and "LOCK TABLE" not in sql for sql, _params in cursor.executed)
-    assert sum("gold_regime_postgres_apply_stats" in message for message in messages) == 4
 
 
-def test_replace_postgres_tables_deletes_scoped_model_rows_even_when_stage_is_empty(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cursor = _FakeCursor(
-        fetchone_rows=[("off",), (False,)],
-        rowcount_map={
-            "DELETE FROM gold.regime_inputs_daily AS target": 3,
-            "DELETE FROM gold.regime_history AS target": 2,
-            "DELETE FROM gold.regime_latest AS target": 1,
-            "DELETE FROM gold.regime_transitions AS target": 1,
-        },
-    )
-    messages: list[str] = []
-    copied_tables: list[str] = []
+def test_main_returns_retry_pending_when_latest_macro_join_is_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged_states: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(regime_job, "connect", lambda _dsn: _FakeConnection(cursor))
-    monkeypatch.setattr(regime_job.mdc, "write_line", lambda msg: messages.append(str(msg)))
-    monkeypatch.setattr(
-        regime_job,
-        "copy_rows",
-        lambda _cur, *, table, columns, rows: copied_tables.append(str(table)),
-    )
-
-    regime_job._replace_postgres_tables(
-        "postgresql://test",
-        inputs=pd.DataFrame(columns=regime_job._INPUTS_COLUMNS),
-        history=pd.DataFrame(columns=regime_job._HISTORY_COLUMNS),
-        latest=pd.DataFrame(columns=regime_job._HISTORY_COLUMNS),
-        transitions=pd.DataFrame(columns=regime_job._TRANSITIONS_COLUMNS),
-        active_models=[("default-regime", 1)],
-    )
-
-    assert copied_tables == ["pg_temp.regime_active_models_scope"]
-    assert any("DELETE FROM gold.regime_inputs_daily AS target" in sql for sql, _params in cursor.executed)
-    assert any("DELETE FROM gold.regime_history AS target" in sql for sql, _params in cursor.executed)
-    assert any("DELETE FROM gold.regime_latest AS target" in sql for sql, _params in cursor.executed)
-    assert any("DELETE FROM gold.regime_transitions AS target" in sql for sql, _params in cursor.executed)
-    assert any(
-        "gold_regime_postgres_apply_stats table=gold.regime_history staged_rows=0 "
-        "deleted_rows=2 upserted_rows=0 unchanged_rows=0 scope=active_models scope_models=1"
-        in message
-        for message in messages
-    )
-
-
-def test_main_fails_closed_on_stale_eod_input_without_publishing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://test")
     monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")
-    logged_status: list[tuple[dict[str, object], int]] = []
-    call_counts = {"replace": 0, "storage": 0, "finalize": 0, "trigger": 0}
-
-    monkeypatch.setattr(regime_job.mdc, "log_environment_diagnostics", lambda: None)
-    monkeypatch.setattr(regime_job, "_load_market_series", lambda _dsn: pd.DataFrame())
     monkeypatch.setattr(
-        regime_job.RegimeRepository,
-        "list_active_regime_model_revisions",
-        lambda self: [{"name": "default-regime", "version": 2, "config": {}}],
+        regime_job,
+        "_load_market_series",
+        lambda _dsn: regime_job._normalize_market_series(
+            pd.DataFrame([_market_row(symbol, "2026-03-20") for symbol in REGIME_REQUIRED_MARKET_SYMBOLS])
+        ),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "_load_macro_inputs",
+        lambda _dsn: regime_job._normalize_macro_inputs(pd.DataFrame([_macro_row("2026-03-20")])),
     )
     monkeypatch.setattr(
         regime_job,
         "_build_inputs_daily",
-        lambda market_series, *, computed_at: pd.DataFrame(
-            {
-                "as_of_date": ["2026-03-19", "2026-03-20"],
-                "return_1d": [0.01, pd.NA],
-                "return_20d": [0.04, pd.NA],
-                "rvol_10d_ann": [14.0, pd.NA],
-                "vix_spot_close": [18.0, 25.0],
-                "vix3m_close": [18.8, pd.NA],
-                "vix_slope": [0.8, pd.NA],
-                "vix_gt_32_streak": [0, 0],
-                "inputs_complete_flag": [True, False],
-            }
+        lambda _market, _macro, computed_at: pd.DataFrame(
+            [
+                {
+                    **_macro_row("2026-03-20"),
+                    "spy_close": 110.0,
+                    "qqq_close": 120.0,
+                    "iwm_close": 95.0,
+                    "acwi_close": 88.0,
+                    "return_1d": 0.01,
+                    "return_20d": 0.04,
+                    "qqq_return_20d": 0.05,
+                    "iwm_return_20d": 0.01,
+                    "acwi_return_20d": 0.02,
+                    "spy_sma_200d": 100.0,
+                    "qqq_sma_200d": 105.0,
+                    "atr_14d": 2.5,
+                    "gap_atr": 0.2,
+                    "bb_width_20d": 0.1,
+                    "rsi_14d": 55.0,
+                    "volume_pct_rank_252d": 0.55,
+                    "vix_spot_close": 14.0,
+                    "vix3m_close": 15.0,
+                    "vix_slope": 1.0,
+                    "vix_gt_32_streak": 0,
+                    "inputs_complete_flag": True,
+                },
+                {
+                    **_macro_row("2026-03-21", rate_10y=None),
+                    "spy_close": 111.0,
+                    "qqq_close": 121.0,
+                    "iwm_close": 96.0,
+                    "acwi_close": 89.0,
+                    "return_1d": 0.01,
+                    "return_20d": 0.04,
+                    "qqq_return_20d": 0.05,
+                    "iwm_return_20d": 0.01,
+                    "acwi_return_20d": 0.02,
+                    "spy_sma_200d": 100.0,
+                    "qqq_sma_200d": 105.0,
+                    "atr_14d": 2.5,
+                    "gap_atr": 0.2,
+                    "bb_width_20d": 0.1,
+                    "rsi_14d": 55.0,
+                    "volume_pct_rank_252d": 0.55,
+                    "vix_spot_close": 14.0,
+                    "vix3m_close": 15.0,
+                    "vix_slope": 1.0,
+                    "vix_gt_32_streak": 0,
+                    "inputs_complete_flag": False,
+                },
+            ]
         ),
     )
     monkeypatch.setattr(
-        regime_job,
-        "_resolve_publish_window",
-        lambda inputs, *, market_series: regime_job._RegimePublishWindow(
-            published_as_of_date=date(2026, 3, 19),
-            input_as_of_date=date(2026, 3, 20),
-            skipped_trailing_input_dates=(date(2026, 3, 20),),
-        ),
+        regime_job.RegimeRepository,
+        "list_active_regime_model_revisions",
+        lambda self: [{"name": "default-regime", "version": 3, "config": {}}],
     )
-    monkeypatch.setattr(
-        regime_job,
-        "_replace_postgres_tables",
-        lambda *args, **kwargs: call_counts.__setitem__("replace", call_counts["replace"] + 1),
-    )
-    monkeypatch.setattr(
-        regime_job,
-        "_write_storage_parquet_outputs",
-        lambda *args, **kwargs: call_counts.__setitem__("storage", call_counts["storage"] + 1),
-    )
-    monkeypatch.setattr(
-        regime_job,
-        "finalize_regime_publication",
-        lambda *args, **kwargs: call_counts.__setitem__("finalize", call_counts["finalize"] + 1),
-    )
-    monkeypatch.setattr(
-        regime_job,
-        "trigger_next_job_from_env",
-        lambda: call_counts.__setitem__("trigger", call_counts["trigger"] + 1),
-    )
-    monkeypatch.setattr(
-        regime_job,
-        "log_regime_publication_status",
-        lambda state, failed_finalization=0: logged_status.append((dict(state), int(failed_finalization))),
-    )
+    monkeypatch.setattr(regime_job, "log_regime_publication_status", lambda state, failed_finalization=0: logged_states.append(dict(state)))
+    monkeypatch.setattr(regime_job.mdc, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(regime_job.mdc, "write_warning", lambda _msg: None)
+    monkeypatch.setattr(regime_job.mdc, "write_line", lambda _msg: None)
 
-    exit_code = regime_job.main()
+    result = regime_job.main()
 
-    assert exit_code == 2
-    assert call_counts == {"replace": 0, "storage": 0, "finalize": 0, "trigger": 0}
-    assert logged_status == [
-        (
-            {
-                "as_of_date": "2026-03-19",
-                "published_as_of_date": "2026-03-19",
-                "input_as_of_date": "2026-03-20",
-                "history_rows": 0,
-                "latest_rows": 0,
-                "transition_rows": 0,
-                "active_models": [],
-                "downstream_triggered": False,
-                "warnings": [
-                    "Trailing incomplete regime input dates skipped from published regime surfaces: 2026-03-20. "
-                    "Published regime state remains capped at 2026-03-19."
-                ],
-                "status": "retry_pending",
-                "reason": "stale_eod_input",
-                "failure_mode": "none",
-            },
-            0,
-        )
-    ]
+    assert result == 2
+    assert logged_states[0]["status"] == "retry_pending"
+    assert logged_states[0]["published_as_of_date"] == "2026-03-20"

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import time
 import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from math import sqrt
 from typing import Any, NoReturn, Sequence
 
 import pandas as pd
@@ -12,7 +11,7 @@ import pandas as pd
 from asset_allocation_contracts.regime import RegimeModelConfig
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.foundation.postgres import connect, copy_rows
-from asset_allocation_runtime_common.domain.regime import build_regime_outputs, compute_curve_state, compute_trend_state
+from asset_allocation_runtime_common.domain.regime import build_regime_outputs
 from asset_allocation_runtime_common.regime_repository import RegimeRepository
 from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from asset_allocation_runtime_common.market_data.gold_sync_contracts import load_domain_sync_state
@@ -28,16 +27,42 @@ WATERMARK_KEY = "gold_regime_features"
 _INPUTS_COLUMNS = (
     "as_of_date",
     "spy_close",
+    "qqq_close",
+    "iwm_close",
+    "acwi_close",
     "return_1d",
     "return_20d",
-    "rvol_10d_ann",
+    "qqq_return_20d",
+    "iwm_return_20d",
+    "acwi_return_20d",
+    "spy_sma_200d",
+    "qqq_sma_200d",
+    "atr_14d",
+    "gap_atr",
+    "bb_width_20d",
+    "rsi_14d",
+    "volume_pct_rank_252d",
     "vix_spot_close",
     "vix3m_close",
     "vix_slope",
-    "trend_state",
-    "curve_state",
+    "hy_oas",
+    "hy_oas_z_20d",
+    "rate_2y",
+    "rate_10y",
+    "curve_2s10s",
+    "rates_event_flag",
     "vix_gt_32_streak",
     "inputs_complete_flag",
+    "computed_at",
+)
+_MACRO_INPUTS_COLUMNS = (
+    "as_of_date",
+    "rate_2y",
+    "rate_10y",
+    "curve_2s10s",
+    "hy_oas",
+    "hy_oas_z_20d",
+    "rates_event_flag",
     "computed_at",
 )
 _HISTORY_COLUMNS = (
@@ -46,26 +71,26 @@ _HISTORY_COLUMNS = (
     "model_name",
     "model_version",
     "regime_code",
-    "regime_status",
+    "display_name",
+    "signal_state",
+    "score",
+    "activation_threshold",
+    "is_active",
     "matched_rule_id",
     "halt_flag",
     "halt_reason",
-    "spy_return_20d",
-    "rvol_10d_ann",
-    "vix_spot_close",
-    "vix3m_close",
-    "vix_slope",
-    "trend_state",
-    "curve_state",
-    "vix_gt_32_streak",
+    "evidence_json",
     "computed_at",
 )
 _TRANSITIONS_COLUMNS = (
     "model_name",
     "model_version",
     "effective_from_date",
-    "prior_regime_code",
-    "new_regime_code",
+    "regime_code",
+    "transition_type",
+    "prior_score",
+    "new_score",
+    "activation_threshold",
     "trigger_rule_id",
     "computed_at",
 )
@@ -89,6 +114,12 @@ class _RegimePublishWindow:
 
 _REGIME_APPLY_CONFIGS: tuple[_RegimeApplyConfig, ...] = (
     _RegimeApplyConfig(
+        table="gold.regime_macro_inputs_daily",
+        columns=_MACRO_INPUTS_COLUMNS,
+        key_columns=("as_of_date",),
+        scope="all_rows",
+    ),
+    _RegimeApplyConfig(
         table="gold.regime_inputs_daily",
         columns=_INPUTS_COLUMNS,
         key_columns=("as_of_date",),
@@ -97,19 +128,19 @@ _REGIME_APPLY_CONFIGS: tuple[_RegimeApplyConfig, ...] = (
     _RegimeApplyConfig(
         table="gold.regime_history",
         columns=_HISTORY_COLUMNS,
-        key_columns=("as_of_date", "model_name", "model_version"),
+        key_columns=("as_of_date", "model_name", "model_version", "regime_code"),
         scope="active_models",
     ),
     _RegimeApplyConfig(
         table="gold.regime_latest",
         columns=_HISTORY_COLUMNS,
-        key_columns=("model_name", "model_version"),
+        key_columns=("model_name", "model_version", "regime_code"),
         scope="active_models",
     ),
     _RegimeApplyConfig(
         table="gold.regime_transitions",
         columns=_TRANSITIONS_COLUMNS,
-        key_columns=("model_name", "model_version", "effective_from_date"),
+        key_columns=("model_name", "model_version", "effective_from_date", "regime_code", "transition_type"),
         scope="active_models",
     ),
 )
@@ -439,8 +470,71 @@ def _validate_required_market_series(frame: pd.DataFrame, *, dsn: str | None = N
     return frame
 
 
-def _assert_complete_regime_inputs(inputs: pd.DataFrame, *, market_series: pd.DataFrame) -> None:
-    complete_rows = inputs["inputs_complete_flag"].fillna(False) if "inputs_complete_flag" in inputs.columns else pd.Series(dtype="bool")
+def _normalize_macro_inputs(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    out["as_of_date"] = pd.to_datetime(out.get("as_of_date"), errors="coerce").dt.date
+    if "rate_2y" not in out.columns:
+        out["rate_2y"] = pd.NA
+    if "rate_10y" not in out.columns:
+        out["rate_10y"] = pd.NA
+    if "curve_2s10s" not in out.columns:
+        out["curve_2s10s"] = pd.NA
+    if "hy_oas" not in out.columns:
+        out["hy_oas"] = pd.NA
+    if "hy_oas_z_20d" not in out.columns:
+        out["hy_oas_z_20d"] = pd.NA
+    if "rates_event_flag" not in out.columns:
+        out["rates_event_flag"] = False
+    if "computed_at" not in out.columns:
+        out["computed_at"] = pd.NaT
+    out = out.dropna(subset=["as_of_date"]).sort_values("as_of_date").drop_duplicates(subset=["as_of_date"], keep="last")
+
+    out["rate_2y"] = pd.to_numeric(out["rate_2y"], errors="coerce")
+    out["rate_10y"] = pd.to_numeric(out["rate_10y"], errors="coerce")
+    out["curve_2s10s"] = pd.to_numeric(out["curve_2s10s"], errors="coerce")
+    out["hy_oas"] = pd.to_numeric(out["hy_oas"], errors="coerce")
+    out["hy_oas_z_20d"] = pd.to_numeric(out["hy_oas_z_20d"], errors="coerce")
+    out["rates_event_flag"] = out["rates_event_flag"].fillna(False).astype(bool)
+    out["computed_at"] = pd.to_datetime(out["computed_at"], utc=True, errors="coerce")
+    out["curve_2s10s"] = out["curve_2s10s"].where(out["curve_2s10s"].notna(), out["rate_10y"] - out["rate_2y"])
+    if out["hy_oas"].notna().any() and not out["hy_oas_z_20d"].notna().any():
+        hy_mean_20 = out["hy_oas"].rolling(window=20, min_periods=20).mean()
+        hy_std_20 = out["hy_oas"].rolling(window=20, min_periods=20).std(ddof=1)
+        out["hy_oas_z_20d"] = (out["hy_oas"] - hy_mean_20) / hy_std_20.replace(0.0, pd.NA)
+    return out[list(_MACRO_INPUTS_COLUMNS)].reset_index(drop=True)
+
+
+def _summarize_macro_input_coverage(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return "no rows"
+    parsed_dates = pd.to_datetime(frame.get("as_of_date"), errors="coerce").dropna()
+    if parsed_dates.empty:
+        return f"rows={len(frame)} no_valid_dates"
+    required_columns = ("rate_2y", "rate_10y", "curve_2s10s", "hy_oas", "hy_oas_z_20d", "rates_event_flag")
+    present_counts = {
+        column: int(pd.Series(frame.get(column), dtype="object").notna().sum())
+        for column in required_columns
+        if column != "rates_event_flag"
+    }
+    rates_event_count = int(pd.Series(frame.get("rates_event_flag"), dtype="object").fillna(False).astype(bool).sum())
+    metrics = " ".join(f"{column}_nonnull={count}" for column, count in present_counts.items())
+    return (
+        f"{parsed_dates.min().date().isoformat()}..{parsed_dates.max().date().isoformat()} "
+        f"rows={len(frame)} {metrics} rates_event_days={rates_event_count}"
+    )
+
+
+def _assert_complete_regime_inputs(
+    inputs: pd.DataFrame,
+    *,
+    market_series: pd.DataFrame,
+    macro_inputs: pd.DataFrame,
+) -> None:
+    complete_rows = (
+        inputs["inputs_complete_flag"].fillna(False)
+        if "inputs_complete_flag" in inputs.columns
+        else pd.Series(dtype="bool")
+    )
     if bool(complete_rows.any()):
         return
 
@@ -451,15 +545,21 @@ def _assert_complete_regime_inputs(inputs: pd.DataFrame, *, market_series: pd.Da
             inputs_range = f"{parsed_dates.min().date().isoformat()}..{parsed_dates.max().date().isoformat()}"
 
     coverage = _summarize_market_series_coverage(market_series)
+    macro_coverage = _summarize_macro_input_coverage(macro_inputs)
     _fail_fast(
-        "Gold regime fast-fail: gold regime inputs contain no complete SPY/^VIX/^VIX3M rows. "
-        f"inputs_range={inputs_range}. coverage={coverage}. "
-        "Upstream dependency gold-market-job has not produced overlapping index history in Postgres."
+        "Gold regime fast-fail: gold regime inputs contain no complete multi-label regime rows. "
+        f"inputs_range={inputs_range}. market_coverage={coverage}. macro_coverage={macro_coverage}. "
+        "Upstream market and macro dependencies have not produced overlapping regime-monitor inputs in Postgres."
     )
 
 
-def _resolve_publish_window(inputs: pd.DataFrame, *, market_series: pd.DataFrame) -> _RegimePublishWindow:
-    _assert_complete_regime_inputs(inputs, market_series=market_series)
+def _resolve_publish_window(
+    inputs: pd.DataFrame,
+    *,
+    market_series: pd.DataFrame,
+    macro_inputs: pd.DataFrame,
+) -> _RegimePublishWindow:
+    _assert_complete_regime_inputs(inputs, market_series=market_series, macro_inputs=macro_inputs)
     as_of_dates = pd.to_datetime(inputs.get("as_of_date"), errors="coerce")
     complete_rows = (
         inputs["inputs_complete_flag"].fillna(False)
@@ -506,7 +606,18 @@ def _load_market_series(dsn: str) -> pd.DataFrame:
     with connect(dsn) as conn:
         frame = pd.read_sql_query(
             """
-            SELECT symbol, date, close, return_1d, return_20d
+            SELECT
+                symbol,
+                date,
+                close,
+                return_1d,
+                return_20d,
+                sma_200d,
+                atr_14d,
+                gap_atr,
+                bb_width_20d,
+                volume_pct_rank_252d,
+                rsi_14d
             FROM gold.market_data
             WHERE symbol = ANY(%s)
             ORDER BY date ASC, symbol ASC
@@ -516,6 +627,68 @@ def _load_market_series(dsn: str) -> pd.DataFrame:
         )
     normalized = _normalize_market_series(frame)
     return _validate_required_market_series(normalized, dsn=dsn)
+
+
+def _load_macro_inputs(dsn: str) -> pd.DataFrame:
+    with connect(dsn) as conn:
+        macro_frame = pd.read_sql_query(
+            """
+            SELECT
+                as_of_date,
+                rate_2y,
+                rate_10y,
+                curve_2s10s,
+                hy_oas,
+                hy_oas_z_20d,
+                rates_event_flag,
+                computed_at
+            FROM gold.regime_macro_inputs_daily
+            ORDER BY as_of_date ASC
+            """,
+            conn,
+        )
+        try:
+            catalyst_frame = pd.read_sql_query(
+                """
+                SELECT
+                    as_of_date,
+                    BOOL_OR(
+                        COALESCE(rates_event_count, 0) > 0
+                        OR COALESCE(policy_event_count, 0) > 0
+                    ) AS rates_event_flag
+                FROM gold.economic_catalyst_entity_daily
+                GROUP BY as_of_date
+                ORDER BY as_of_date ASC
+                """,
+                conn,
+            )
+        except Exception:
+            catalyst_frame = pd.DataFrame(columns=["as_of_date", "rates_event_flag"])
+
+    macro_inputs = _normalize_macro_inputs(macro_frame)
+    catalyst_inputs = _normalize_macro_inputs(catalyst_frame)
+    if catalyst_inputs.empty:
+        return macro_inputs
+
+    combined = (
+        macro_inputs.drop(columns=["rates_event_flag"], errors="ignore")
+        .merge(
+            catalyst_inputs[["as_of_date", "rates_event_flag"]],
+            on="as_of_date",
+            how="outer",
+            suffixes=("", "_catalyst"),
+        )
+        .merge(
+            macro_inputs[["as_of_date", "rates_event_flag"]],
+            on="as_of_date",
+            how="left",
+            suffixes=("", "_macro"),
+        )
+    )
+    combined["rates_event_flag"] = combined["rates_event_flag_macro"].fillna(combined["rates_event_flag"]).fillna(False)
+    combined = combined.drop(columns=["rates_event_flag_macro"], errors="ignore")
+    combined["computed_at"] = pd.to_datetime(combined.get("computed_at"), utc=True, errors="coerce")
+    return _normalize_macro_inputs(combined)
 
 
 def _compute_vix_streak(values: Sequence[Any], *, threshold: float) -> list[int]:
@@ -531,43 +704,119 @@ def _compute_vix_streak(values: Sequence[Any], *, threshold: float) -> list[int]
     return streak_values
 
 
-def _build_inputs_daily(market_series: pd.DataFrame, *, computed_at: datetime) -> pd.DataFrame:
-    spy = (
-        market_series[market_series["symbol"] == "SPY"][["date", "close", "return_1d", "return_20d"]]
-        .rename(columns={"date": "as_of_date", "close": "spy_close"})
-        .copy()
+def _symbol_slice(
+    market_series: pd.DataFrame,
+    *,
+    symbol: str,
+    keep_columns: Sequence[str],
+    rename_map: dict[str, str],
+) -> pd.DataFrame:
+    selected_columns = ["date", *keep_columns]
+    frame = market_series[market_series["symbol"] == symbol][selected_columns].copy()
+    return frame.rename(columns={"date": "as_of_date", **rename_map})
+
+
+def _build_inputs_daily(
+    market_series: pd.DataFrame,
+    macro_inputs: pd.DataFrame,
+    *,
+    computed_at: datetime,
+) -> pd.DataFrame:
+    spy = _symbol_slice(
+        market_series,
+        symbol="SPY",
+        keep_columns=("close", "return_1d", "return_20d", "sma_200d", "atr_14d", "gap_atr", "bb_width_20d", "rsi_14d", "volume_pct_rank_252d"),
+        rename_map={
+            "close": "spy_close",
+            "sma_200d": "spy_sma_200d",
+        },
     )
-    vix = (
-        market_series[market_series["symbol"] == "^VIX"][["date", "close"]]
-        .rename(columns={"date": "as_of_date", "close": "vix_spot_close"})
-        .copy()
+    qqq = _symbol_slice(
+        market_series,
+        symbol="QQQ",
+        keep_columns=("close", "return_20d", "sma_200d"),
+        rename_map={
+            "close": "qqq_close",
+            "return_20d": "qqq_return_20d",
+            "sma_200d": "qqq_sma_200d",
+        },
     )
-    vix3m = (
-        market_series[market_series["symbol"] == "^VIX3M"][["date", "close"]]
-        .rename(columns={"date": "as_of_date", "close": "vix3m_close"})
-        .copy()
+    iwm = _symbol_slice(
+        market_series,
+        symbol="IWM",
+        keep_columns=("close", "return_20d"),
+        rename_map={
+            "close": "iwm_close",
+            "return_20d": "iwm_return_20d",
+        },
+    )
+    acwi = _symbol_slice(
+        market_series,
+        symbol="ACWI",
+        keep_columns=("close", "return_20d"),
+        rename_map={
+            "close": "acwi_close",
+            "return_20d": "acwi_return_20d",
+        },
+    )
+    vix = _symbol_slice(
+        market_series,
+        symbol="^VIX",
+        keep_columns=("close",),
+        rename_map={"close": "vix_spot_close"},
+    )
+    vix3m = _symbol_slice(
+        market_series,
+        symbol="^VIX3M",
+        keep_columns=("close",),
+        rename_map={"close": "vix3m_close"},
     )
 
-    inputs = spy.merge(vix, on="as_of_date", how="outer").merge(vix3m, on="as_of_date", how="outer")
+    inputs = spy.merge(qqq, on="as_of_date", how="outer")
+    inputs = inputs.merge(iwm, on="as_of_date", how="outer")
+    inputs = inputs.merge(acwi, on="as_of_date", how="outer")
+    inputs = inputs.merge(vix, on="as_of_date", how="outer")
+    inputs = inputs.merge(vix3m, on="as_of_date", how="outer")
+    inputs = inputs.merge(macro_inputs, on="as_of_date", how="outer", suffixes=("", "_macro"))
     inputs = inputs.sort_values("as_of_date").reset_index(drop=True)
-    inputs["vix_slope"] = inputs["vix3m_close"] - inputs["vix_spot_close"]
-    inputs["rvol_10d_ann"] = inputs["return_1d"].rolling(window=10, min_periods=10).std(ddof=1) * sqrt(252.0) * 100.0
 
+    if "computed_at_macro" in inputs.columns:
+        inputs["computed_at"] = pd.to_datetime(inputs["computed_at"], utc=True, errors="coerce").fillna(
+            pd.to_datetime(inputs["computed_at_macro"], utc=True, errors="coerce")
+        )
+        inputs = inputs.drop(columns=["computed_at_macro"], errors="ignore")
+
+    inputs["vix_slope"] = inputs["vix3m_close"] - inputs["vix_spot_close"]
     inputs["vix_gt_32_streak"] = _compute_vix_streak(inputs["vix_spot_close"].tolist(), threshold=32.0)
-    inputs["trend_state"] = inputs["return_20d"].map(lambda value: compute_trend_state(value))
-    inputs["curve_state"] = inputs["vix_slope"].map(lambda value: compute_curve_state(value))
-    inputs["inputs_complete_flag"] = inputs[
-        [
-            "spy_close",
-            "return_1d",
-            "return_20d",
-            "rvol_10d_ann",
-            "vix_spot_close",
-            "vix3m_close",
-            "vix_slope",
-        ]
-    ].notna().all(axis=1)
-    inputs["computed_at"] = pd.Timestamp(computed_at)
+    required_columns = [
+        "spy_close",
+        "qqq_close",
+        "iwm_close",
+        "acwi_close",
+        "return_1d",
+        "return_20d",
+        "qqq_return_20d",
+        "iwm_return_20d",
+        "acwi_return_20d",
+        "spy_sma_200d",
+        "qqq_sma_200d",
+        "atr_14d",
+        "gap_atr",
+        "bb_width_20d",
+        "rsi_14d",
+        "volume_pct_rank_252d",
+        "vix_spot_close",
+        "vix3m_close",
+        "vix_slope",
+        "hy_oas",
+        "hy_oas_z_20d",
+        "rate_2y",
+        "rate_10y",
+        "curve_2s10s",
+        "rates_event_flag",
+    ]
+    inputs["inputs_complete_flag"] = inputs[required_columns].notna().all(axis=1)
+    inputs["computed_at"] = pd.to_datetime(inputs["computed_at"], utc=True, errors="coerce").fillna(pd.Timestamp(computed_at))
     return inputs[list(_INPUTS_COLUMNS)].copy()
 
 
@@ -587,27 +836,13 @@ def _build_revision_inputs(
         revision_inputs["vix_spot_close"].tolist(),
         threshold=float(resolved_config.haltVixThreshold),
     )
-    return (
-        revision_inputs[
-            [
-                "as_of_date",
-                "return_1d",
-                "return_20d",
-                "rvol_10d_ann",
-                "vix_spot_close",
-                "vix3m_close",
-                "vix_slope",
-                "vix_gt_32_streak",
-                "inputs_complete_flag",
-            ]
-        ].copy(),
-        resolved_config,
-    )
+    return revision_inputs.copy(), resolved_config
 
 
 def _replace_postgres_tables(
     dsn: str,
     *,
+    macro_inputs: pd.DataFrame,
     inputs: pd.DataFrame,
     history: pd.DataFrame,
     latest: pd.DataFrame,
@@ -621,24 +856,30 @@ def _replace_postgres_tables(
             _apply_regime_table(
                 cur,
                 config=_REGIME_APPLY_CONFIGS[0],
-                frame=inputs,
+                frame=macro_inputs,
                 active_models_count=len(active_models),
             )
             _apply_regime_table(
                 cur,
                 config=_REGIME_APPLY_CONFIGS[1],
-                frame=history,
+                frame=inputs,
                 active_models_count=len(active_models),
             )
             _apply_regime_table(
                 cur,
                 config=_REGIME_APPLY_CONFIGS[2],
-                frame=latest,
+                frame=history,
                 active_models_count=len(active_models),
             )
             _apply_regime_table(
                 cur,
                 config=_REGIME_APPLY_CONFIGS[3],
+                frame=latest,
+                active_models_count=len(active_models),
+            )
+            _apply_regime_table(
+                cur,
+                config=_REGIME_APPLY_CONFIGS[4],
                 frame=transitions,
                 active_models_count=len(active_models),
             )
@@ -647,6 +888,7 @@ def _replace_postgres_tables(
 def _write_storage_parquet_outputs(
     *,
     gold_container: str,
+    macro_inputs: pd.DataFrame,
     inputs: pd.DataFrame,
     history: pd.DataFrame,
     latest: pd.DataFrame,
@@ -655,6 +897,7 @@ def _write_storage_parquet_outputs(
     client = mdc.get_storage_client(gold_container)
     if client is None:
         raise ValueError(f"Storage client unavailable for container '{gold_container}'.")
+    client.write_parquet("regime/macro_inputs.parquet", macro_inputs)
     client.write_parquet("regime/inputs.parquet", inputs)
     client.write_parquet("regime/history.parquet", history)
     client.write_parquet("regime/latest.parquet", latest)
@@ -670,12 +913,13 @@ def main() -> int:
 
     computed_at = datetime.now(timezone.utc)
     market_series = _load_market_series(dsn)
+    macro_inputs = _load_macro_inputs(dsn)
     repo = RegimeRepository(dsn)
     active_revisions = repo.list_active_regime_model_revisions()
     if not active_revisions:
         raise ValueError("No active regime model revisions found.")
-    inputs = _build_inputs_daily(market_series, computed_at=computed_at)
-    publish_window = _resolve_publish_window(inputs, market_series=market_series)
+    inputs = _build_inputs_daily(market_series, macro_inputs, computed_at=computed_at)
+    publish_window = _resolve_publish_window(inputs, market_series=market_series, macro_inputs=macro_inputs)
     publish_window_metadata = _publish_window_metadata(publish_window)
     publish_window_warnings = _publish_window_warnings(publish_window)
     skipped_dates_for_log = ",".join(publish_window_metadata["skipped_trailing_input_dates"]) or "-"
@@ -722,6 +966,7 @@ def main() -> int:
         return 2
 
     published_inputs = _published_inputs(inputs, window=publish_window)
+    published_macro_inputs = _published_inputs(macro_inputs, window=publish_window)
 
     history_frames: list[pd.DataFrame] = []
     latest_frames: list[pd.DataFrame] = []
@@ -764,6 +1009,7 @@ def main() -> int:
 
     _replace_postgres_tables(
         dsn,
+        macro_inputs=published_macro_inputs,
         inputs=published_inputs,
         history=history,
         latest=latest,
@@ -772,6 +1018,7 @@ def main() -> int:
     )
     _write_storage_parquet_outputs(
         gold_container=gold_container,
+        macro_inputs=published_macro_inputs,
         inputs=published_inputs,
         history=history,
         latest=latest,
@@ -832,6 +1079,7 @@ def main() -> int:
 
     mdc.write_line(
         "Gold regime complete: "
+        f"macro_input_rows={len(macro_inputs)} published_macro_input_rows={len(published_macro_inputs)} "
         f"inputs_rows={len(inputs)} published_inputs_rows={len(published_inputs)} "
         f"history_rows={len(history)} latest_rows={len(latest)} transition_rows={len(transitions)} "
         f"active_models={len(active_models)} published_as_of_date={publish_window_metadata['published_as_of_date']} "
