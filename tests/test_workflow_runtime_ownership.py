@@ -237,12 +237,10 @@ def test_quiver_bronze_manifests_define_mode_and_runtime_envs() -> None:
     for manifest_name in ("job_bronze_quiver_data.yaml", "job_bronze_quiver_backfill.yaml"):
         text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
         for required_name in (
-            "QUIVER_DATA_UNIVERSE_SOURCE",
             "QUIVER_DATA_JOB_MODE",
             "QUIVER_DATA_TICKER_BATCH_SIZE",
             "QUIVER_DATA_HISTORICAL_BATCH_SIZE",
             "QUIVER_DATA_SYMBOL_LIMIT",
-            "QUIVER_DATA_TICKERS",
             "QUIVER_DATA_PAGE_SIZE",
             "QUIVER_DATA_SEC13F_TODAY_ONLY",
         ):

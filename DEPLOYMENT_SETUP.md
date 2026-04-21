@@ -107,16 +107,14 @@ GitHub variables:
 Quiver-specific deploy vars:
 
 - `AZURE_FOLDER_QUIVER=quiver-data`
-- `QUIVER_DATA_UNIVERSE_SOURCE=core_symbols`
 - `QUIVER_DATA_JOB_MODE=incremental`
 - `QUIVER_DATA_TICKER_BATCH_SIZE=50`
 - `QUIVER_DATA_HISTORICAL_BATCH_SIZE=20`
 - `QUIVER_DATA_SYMBOL_LIMIT=500`
 - `QUIVER_DATA_PAGE_SIZE=100`
 - `QUIVER_DATA_SEC13F_TODAY_ONLY=true`
-- `QUIVER_DATA_TICKERS` only for `env_tickers` local or manual runs
 
-Quiver bronze requires `POSTGRES_DSN` when `QUIVER_DATA_UNIVERSE_SOURCE=core_symbols` because the symbol universe is resolved directly from `core.symbols`, not from `/api/data/symbols`.
+Quiver bronze requires `POSTGRES_DSN` because the symbol universe is resolved directly from `core.symbols`, not from `/api/data/symbols`.
 
 Deployment manifest tags are repo-owned defaults, not GitHub variables.
 

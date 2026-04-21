@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Literal
 
 
 def _strip(value: object) -> str:
@@ -31,21 +30,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
-def _csv(raw: str) -> tuple[str, ...]:
-    text = _strip(raw)
-    if not text:
-        return ()
-    return tuple(dict.fromkeys(part.strip().upper() for part in text.split(",") if part.strip()))
-
-
 @dataclass(frozen=True)
 class QuiverDataConfig:
     bronze_container: str
     silver_container: str
     gold_container: str
-    universe_source: Literal["env_tickers", "core_symbols"]
-    job_mode: Literal["incremental", "historical_backfill"]
-    configured_tickers: tuple[str, ...]
+    job_mode: str
     ticker_batch_size: int
     historical_batch_size: int
     symbol_limit: int
@@ -60,10 +50,6 @@ class QuiverDataConfig:
 
     @staticmethod
     def from_env() -> "QuiverDataConfig":
-        universe_source = _env_text("QUIVER_DATA_UNIVERSE_SOURCE", "core_symbols").lower()
-        if universe_source not in {"env_tickers", "core_symbols"}:
-            raise ValueError("QUIVER_DATA_UNIVERSE_SOURCE must be one of: env_tickers, core_symbols.")
-
         job_mode = _env_text("QUIVER_DATA_JOB_MODE", "incremental").lower()
         if job_mode not in {"incremental", "historical_backfill"}:
             raise ValueError("QUIVER_DATA_JOB_MODE must be one of: incremental, historical_backfill.")
@@ -72,9 +58,7 @@ class QuiverDataConfig:
             bronze_container=_env_text("AZURE_CONTAINER_BRONZE", "bronze"),
             silver_container=_env_text("AZURE_CONTAINER_SILVER", "silver"),
             gold_container=_env_text("AZURE_CONTAINER_GOLD", "gold"),
-            universe_source=universe_source,
             job_mode=job_mode,
-            configured_tickers=_csv(os.environ.get("QUIVER_DATA_TICKERS", "")),
             ticker_batch_size=max(1, _env_int("QUIVER_DATA_TICKER_BATCH_SIZE", 50)),
             historical_batch_size=max(1, _env_int("QUIVER_DATA_HISTORICAL_BATCH_SIZE", 20)),
             symbol_limit=max(0, _env_int("QUIVER_DATA_SYMBOL_LIMIT", 500)),

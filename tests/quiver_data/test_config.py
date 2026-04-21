@@ -6,9 +6,7 @@ from tasks.quiver_data.config import QuiverDataConfig
 
 
 def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("QUIVER_DATA_UNIVERSE_SOURCE", raising=False)
     monkeypatch.delenv("QUIVER_DATA_JOB_MODE", raising=False)
-    monkeypatch.delenv("QUIVER_DATA_TICKERS", raising=False)
     monkeypatch.delenv("QUIVER_DATA_TICKER_BATCH_SIZE", raising=False)
     monkeypatch.delenv("QUIVER_DATA_HISTORICAL_BATCH_SIZE", raising=False)
     monkeypatch.delenv("QUIVER_DATA_SYMBOL_LIMIT", raising=False)
@@ -18,7 +16,6 @@ def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.Mo
 
     config = QuiverDataConfig.from_env()
 
-    assert config.universe_source == "core_symbols"
     assert config.job_mode == "incremental"
     assert config.ticker_batch_size == 50
     assert config.historical_batch_size == 20
@@ -26,16 +23,6 @@ def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.Mo
     assert config.page_size == 100
     assert config.sec13f_today_only is True
     assert config.postgres_dsn is None
-
-
-def test_quiver_data_config_keeps_env_ticker_mode_backwards_compatible(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("QUIVER_DATA_UNIVERSE_SOURCE", "env_tickers")
-    monkeypatch.setenv("QUIVER_DATA_TICKERS", "aapl, msft, AAPL")
-
-    config = QuiverDataConfig.from_env()
-
-    assert config.universe_source == "env_tickers"
-    assert config.configured_tickers == ("AAPL", "MSFT")
 
 
 @pytest.mark.parametrize(
@@ -57,7 +44,6 @@ def test_quiver_data_config_rejects_invalid_numeric_env(monkeypatch: pytest.Monk
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("QUIVER_DATA_UNIVERSE_SOURCE", "bogus"),
         ("QUIVER_DATA_JOB_MODE", "bogus"),
     ],
 )
