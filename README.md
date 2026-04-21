@@ -44,19 +44,16 @@ Quiver runs as a control-plane-gated Bronze/Silver/Gold pipeline in this repo.
 - Bronze stays API-backed for provider access and supports two modes:
   - `incremental`: hourly weekday schedule for global live feeds plus a rotating ticker slice
   - `historical_backfill`: manual replay for ticker-heavy historical feeds
-- The ticker universe is resolved directly from Postgres when `QUIVER_DATA_UNIVERSE_SOURCE=core_symbols`.
-- Local and manual runs can still use `QUIVER_DATA_TICKERS` by setting `QUIVER_DATA_UNIVERSE_SOURCE=env_tickers`.
+- The ticker universe is resolved directly from Postgres for both scheduled and manual runs.
 - Bronze and Silver persist under `quiver-data/...`; Gold persists under `quiver/...`.
 
 Key Quiver envs:
 
 - `AZURE_FOLDER_QUIVER`
-- `QUIVER_DATA_UNIVERSE_SOURCE`
 - `QUIVER_DATA_JOB_MODE`
 - `QUIVER_DATA_TICKER_BATCH_SIZE`
 - `QUIVER_DATA_HISTORICAL_BATCH_SIZE`
 - `QUIVER_DATA_SYMBOL_LIMIT`
-- `QUIVER_DATA_TICKERS`
 - `QUIVER_DATA_PAGE_SIZE`
 - `QUIVER_DATA_SEC13F_TODAY_ONLY`
 

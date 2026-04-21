@@ -69,12 +69,10 @@ ECONOMIC_CATALYST_BOJ_SCHEDULE_URL,deploy_var,var,deploy_config,true,Bank of Jap
 ECONOMIC_CATALYST_TREASURY_AUCTIONS_URL,deploy_var,var,deploy_config,true,Treasury auction calendar URL.
 ECONOMIC_CATALYST_NASDAQ_TABLES,deploy_var,var,deploy_config,true,JSON table mapping configuration for Nasdaq economic event tables.
 ECONOMIC_CATALYST_HTTP_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,HTTP timeout for economic catalyst source fetches.
-QUIVER_DATA_UNIVERSE_SOURCE,deploy_var,var,deploy_config,true,Quiver symbol-universe source. Use core_symbols in prod and env_tickers for local/manual runs.
 QUIVER_DATA_JOB_MODE,deploy_var,var,deploy_config,true,Quiver bronze mode. Use incremental for the scheduled path and historical_backfill for manual replay.
 QUIVER_DATA_TICKER_BATCH_SIZE,deploy_var,var,deploy_config,true,Rotating ticker batch size for scheduled Quiver incremental bronze runs.
 QUIVER_DATA_HISTORICAL_BATCH_SIZE,deploy_var,var,deploy_config,true,Rotating ticker batch size for manual Quiver historical backfill runs.
 QUIVER_DATA_SYMBOL_LIMIT,deploy_var,var,deploy_config,true,Cap on the resolved Quiver symbol universe during rollout and soak testing.
-QUIVER_DATA_TICKERS,deploy_var,var,deploy_config,true,Comma-separated manual Quiver ticker list when QUIVER_DATA_UNIVERSE_SOURCE=env_tickers.
 QUIVER_DATA_PAGE_SIZE,deploy_var,var,deploy_config,true,Quiver page size for paginated live and historical pulls.
 QUIVER_DATA_SEC13F_TODAY_ONLY,deploy_var,var,deploy_config,true,Whether Quiver sec13f incremental pulls should restrict to the current day.
 ASSET_ALLOCATION_API_BASE_URL,secret,secret,secret_store,true,Control-plane base URL used by jobs HTTP clients. Default to the internal ACA service URL http://asset-allocation-api-vnet; do not use a public ACA ingress FQDN in prod.

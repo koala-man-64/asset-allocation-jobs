@@ -21,6 +21,7 @@ from tasks.quiver_data.transform import bucket_rows
 from tasks.quiver_data.universe import resolve_symbol_universe
 
 _CURSOR_KEY_PREFIX = "quiver_bronze_cursor"
+_UNIVERSE_SOURCE = "core_symbols"
 
 
 @dataclass(frozen=True)
@@ -230,13 +231,11 @@ def main() -> int:
         "domain": constants.domain_slug_for_layer("bronze"),
         "jobName": job_name,
         "jobMode": config.job_mode,
-        "universeSource": config.universe_source,
+        "universeSource": _UNIVERSE_SOURCE,
         "updatedAt": computed_at_iso(),
         "batchPaths": batch_paths,
         "warnings": warnings,
         "failures": failures,
-        "configuredTickers": list(config.configured_tickers),
-        "historicalTickers": list(config.configured_tickers),
         "selectedSymbols": list(symbol_batch_plan.selected_symbols),
         "universeSymbolCount": len(symbol_batch_plan.universe_symbols),
         "symbolBatchSize": symbol_batch_plan.batch_size,
@@ -262,7 +261,7 @@ def main() -> int:
             "run_id": run_id,
             "status": status,
             "job_mode": config.job_mode,
-            "universe_source": config.universe_source,
+            "universe_source": _UNIVERSE_SOURCE,
             "batch_count": len(batch_paths),
             "selected_symbols": list(symbol_batch_plan.selected_symbols),
             "universe_symbol_count": len(symbol_batch_plan.universe_symbols),

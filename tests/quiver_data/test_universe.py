@@ -43,9 +43,7 @@ def _config(**overrides) -> QuiverDataConfig:
         "bronze_container": "bronze",
         "silver_container": "silver",
         "gold_container": "gold",
-        "universe_source": "core_symbols",
         "job_mode": "incremental",
-        "configured_tickers": (),
         "ticker_batch_size": 50,
         "historical_batch_size": 20,
         "symbol_limit": 500,
@@ -86,12 +84,6 @@ def test_load_core_symbols_applies_symbol_limit(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("tasks.quiver_data.universe.connect", lambda dsn: _FakeConnection(rows))
 
     symbols = load_core_symbols(dsn="postgresql://example", symbol_limit=2)
-
-    assert symbols == ("AAPL", "MSFT")
-
-
-def test_resolve_symbol_universe_uses_env_tickers_when_configured() -> None:
-    symbols = resolve_symbol_universe(_config(universe_source="env_tickers", configured_tickers=("AAPL", "MSFT")))
 
     assert symbols == ("AAPL", "MSFT")
 

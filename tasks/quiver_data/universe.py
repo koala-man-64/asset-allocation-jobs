@@ -83,10 +83,7 @@ def load_core_symbols(*, dsn: str, symbol_limit: int = 0) -> tuple[str, ...]:
 
 
 def resolve_symbol_universe(config: QuiverDataConfig) -> tuple[str, ...]:
-    if config.universe_source == "env_tickers":
-        return config.configured_tickers
-
     dsn = str(config.postgres_dsn or "").strip()
     if not dsn:
-        raise ValueError("POSTGRES_DSN is required when QUIVER_DATA_UNIVERSE_SOURCE=core_symbols.")
+        raise ValueError("POSTGRES_DSN is required for the Quiver symbol universe.")
     return load_core_symbols(dsn=dsn, symbol_limit=config.symbol_limit)
