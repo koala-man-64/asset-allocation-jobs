@@ -240,7 +240,6 @@ def test_regime_context_surfaces_primary_regime_and_signals_observationally() ->
             "regimePolicy": {
                 "modelName": "default-regime",
                 "mode": "observe_only",
-                "mode": "observe_only",
             },
             "exits": [],
         }
