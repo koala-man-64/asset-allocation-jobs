@@ -14,7 +14,6 @@ from core.backtest_runtime import (
     _build_intraday_frames_by_timestamp,
     _build_snapshot_symbol_index,
     _prepare_slow_snapshot_frames,
-    _resolve_regime_revision,
     _snapshot_for_timestamp,
     execute_backtest_run,
     _market_row,
@@ -28,11 +27,12 @@ from core.backtest_runtime import (
     validate_backtest_submission,
 )
 from asset_allocation_runtime_common import BACKTEST_RESULTS_SCHEMA_VERSION
-from asset_allocation_runtime_common import BACKTEST_RESULTS_SCHEMA_VERSION
 from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
-from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
 from asset_allocation_runtime_common.strategy_engine.position_state import PositionState
+from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
 from asset_allocation_runtime_common.strategy_engine import universe as universe_service
+
+
 def _sample_universe() -> SimpleNamespace:
     return SimpleNamespace(
         source="postgres_gold",
