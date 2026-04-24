@@ -19,13 +19,15 @@ def main() -> int:
     dry_run = _env_flag("RESULTS_RECONCILE_DRY_RUN", default=False)
     result = ResultsRepository().reconcile(dry_run=dry_run)
     logger.info(
-        "results_reconcile dry_run=%s ranking_dirty=%s ranking_noop=%s canonical_enqueued=%s canonical_up_to_date=%s canonical_skipped=%s error_count=%s",
+        "results_reconcile dry_run=%s ranking_dirty=%s ranking_noop=%s canonical_enqueued=%s canonical_up_to_date=%s canonical_skipped=%s publication_signals_processed=%s publication_signals_error=%s error_count=%s",
         dry_run,
         result.get("rankingDirtyCount"),
         result.get("rankingNoopCount"),
         result.get("canonicalEnqueuedCount"),
         result.get("canonicalUpToDateCount"),
         result.get("canonicalSkippedCount"),
+        result.get("publicationSignalsProcessedCount"),
+        result.get("publicationSignalsErrorCount"),
         result.get("errorCount"),
     )
     return 1 if int(result.get("errorCount") or 0) > 0 else 0

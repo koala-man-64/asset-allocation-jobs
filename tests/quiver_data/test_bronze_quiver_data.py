@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tasks.quiver_data import constants
 from tasks.quiver_data.bronze_quiver_data import _build_requests, plan_symbol_batch
 from tasks.quiver_data.config import QuiverDataConfig
 
@@ -24,6 +25,12 @@ class _FakeClient:
         return []
 
     def get_live_congress_holdings(self):
+        return []
+
+    def get_live_wall_street_bets(self, **_kwargs):
+        return []
+
+    def get_live_patents(self):
         return []
 
     def get_historical_congress_trading(self, *, ticker):
@@ -56,6 +63,12 @@ class _FakeClient:
     def get_live_etf_holdings(self, **_kwargs):
         return []
 
+    def get_historical_wall_street_bets(self, *, ticker):
+        return [{"Ticker": ticker}]
+
+    def get_historical_patents(self, *, ticker):
+        return [{"Ticker": ticker}]
+
 
 def _config(**overrides) -> QuiverDataConfig:
     base = {
@@ -81,6 +94,9 @@ def test_build_requests_incremental_includes_global_and_rotating_ticker_feeds() 
     assert ("congress_trading_live", None) in ids
     assert ("government_contracts_live", None) in ids
     assert ("congress_holdings_live", None) in ids
+    assert ("insiders_live_all", None) in ids
+    assert ("wall_street_bets_live", None) in ids
+    assert ("patents_live", None) in ids
     assert ("insiders_live", "AAPL") in ids
     assert ("sec13fchanges_live", "MSFT") in ids
     assert ("etf_holdings_live", "MSFT") in ids
@@ -95,11 +111,21 @@ def test_build_requests_historical_backfill_only_includes_historical_ticker_feed
     )
 
     ids = [(dataset, ticker) for dataset, _family, ticker, _callback in requests]
+    assert ("wall_street_bets_historical_all", None) in ids
     assert ("congress_trading_historical", "AAPL") in ids
     assert ("government_contracts_all_historical", "MSFT") in ids
     assert ("lobbying_historical", "MSFT") in ids
+    assert ("wall_street_bets_historical", "AAPL") in ids
+    assert ("patents_historical", "MSFT") in ids
     assert ("congress_trading_live", None) not in ids
     assert ("insiders_live", "AAPL") not in ids
+
+
+def test_wall_street_bets_global_and_ticker_sources_use_distinct_raw_paths() -> None:
+    global_path = constants.bronze_raw_path("run-1", "wall_street_bets_historical_all", "A")
+    ticker_path = constants.bronze_raw_path("run-1", "wall_street_bets_historical", "A")
+
+    assert global_path != ticker_path
 
 
 def test_plan_symbol_batch_rotates_and_wraps_from_saved_cursor() -> None:

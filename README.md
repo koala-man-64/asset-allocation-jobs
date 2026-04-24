@@ -10,8 +10,8 @@ Runtime-owned jobs repository for:
 Local development installs versioned shared packages rather than sibling repos:
 
 ```powershell
-python -m pip install asset-allocation-contracts==3.2.0
-python -m pip install asset-allocation-runtime-common==3.3.0
+python -m pip install asset-allocation-contracts==3.3.0
+python -m pip install asset-allocation-runtime-common==3.4.1
 python scripts/run_quality_gate.py check-fast
 ```
 
@@ -44,6 +44,7 @@ Quiver runs as a control-plane-gated Bronze/Silver/Gold pipeline in this repo.
 - Bronze stays API-backed for provider access and supports two modes:
   - `incremental`: hourly weekday schedule for global live feeds plus a rotating ticker slice
   - `historical_backfill`: manual replay for ticker-heavy historical feeds
+- Quiver feed coverage includes live/global insider trading, Wall Street Bets, and patents, plus ticker-rotated historical Wall Street Bets and patents during manual backfills.
 - The ticker universe is resolved directly from Postgres for both scheduled and manual runs.
 - Bronze and Silver persist under `quiver-data/...`; Gold persists under `quiver/...`.
 

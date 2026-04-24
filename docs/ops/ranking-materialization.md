@@ -61,6 +61,15 @@ Worker entrypoint:
 
 - `python -m tasks.ranking.platinum_rankings`
 
+ACA workflow metadata:
+
+- `jobCategory=strategy-compute`
+- `jobKey=rankings`
+- `jobRole=materialize`
+- `triggerOwner=control-plane`
+
+This job writes platinum outputs, but it is not classified as a platinum medallion pipeline stage. See `docs/ops/strategy-compute-jobs.md`.
+
 Relevant environment variables:
 
 - `POSTGRES_DSN`

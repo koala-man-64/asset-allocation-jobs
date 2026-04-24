@@ -341,3 +341,26 @@ def test_default_regime_multilabel_cutover_migration_normalizes_tables_and_polic
     assert "'default-regime'," in text
     assert "'Default multi-label observational regime monitor model'" in text
     assert "'migration-0040'" in text
+
+
+def test_strategy_publication_reconcile_migration_creates_idempotent_signal_table() -> None:
+    repo_root = _repo_root()
+    migration = (
+        repo_root
+        / "deploy"
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0041_strategy_publication_reconcile.sql"
+    )
+    text = migration.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS core.strategy_publication_reconcile_signals" in text
+    assert "PRIMARY KEY (job_key, source_fingerprint)" in text
+    assert "CHECK (status IN ('pending', 'processed', 'error'))" in text
+    assert "claim_token TEXT" in text
+    assert "attempt_count INTEGER NOT NULL DEFAULT 0" in text
+    assert "idx_core_strategy_publication_reconcile_pending" in text
+    assert "idx_core_strategy_publication_reconcile_claims" in text
+    assert "GRANT USAGE ON SCHEMA core" in text
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE core.strategy_publication_reconcile_signals" in text

@@ -76,6 +76,26 @@ def test_pin_contracts_version_updates_dependency_manifests(tmp_path: Path) -> N
     assert "asset-allocation-contracts==9.9.9" in (tmp_path / "requirements.lock.txt").read_text(encoding="utf-8")
 
 
+def test_render_and_apply_job_manifests_blocks_invalid_metadata() -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    rendered = """
+location: East US
+name: gold-regime-job
+type: Microsoft.App/jobs
+tags:
+  job-category: data-pipeline
+  job-key: regime
+  job-role: publish
+  trigger-owner: schedule
+"""
+
+    with pytest.raises(SystemExit, match="invalid job metadata tags"):
+        module.ensure_manifest_metadata_valid(
+            manifest_path=Path("deploy/job_gold_regime_data.yaml"),
+            rendered_text=rendered,
+        )
+
+
 def test_validate_repo_shared_dependency_compatibility_uses_pyproject_pins(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -340,8 +360,14 @@ def test_render_and_apply_manifests_renders_env_and_uses_update_or_create(
     deploy_dir = tmp_path / "deploy"
     deploy_dir.mkdir()
     rendered_dir = tmp_path / "rendered"
-    (deploy_dir / "job_existing.yaml").write_text("name: existing-job\nimage: ${JOB_IMAGE}\n", encoding="utf-8")
-    (deploy_dir / "job_new.yaml").write_text("name: new-job\nimage: ${JOB_IMAGE}\n", encoding="utf-8")
+    (deploy_dir / "job_existing.yaml").write_text(
+        "name: bronze-market-job\ntags:\n  job-category: data-pipeline\n  job-key: market\n  job-role: load\n  trigger-owner: schedule\nimage: ${JOB_IMAGE}\n",
+        encoding="utf-8",
+    )
+    (deploy_dir / "job_new.yaml").write_text(
+        "name: silver-market-job\ntags:\n  job-category: data-pipeline\n  job-key: market\n  job-role: transform\n  trigger-owner: pipeline-chain\nimage: ${JOB_IMAGE}\n",
+        encoding="utf-8",
+    )
 
     exists_results = iter([True, False])
     commands: list[list[str]] = []
@@ -370,12 +396,16 @@ def test_render_and_apply_manifests_supplies_repo_tag_defaults(
     (deploy_dir / "job_tagged.yaml").write_text(
         "\n".join(
             [
-                "name: tagged-job",
+                "name: bronze-market-job",
                 "tags:",
                 "  owner: ${RESOURCE_TAG_OWNER}",
                 "  cost-center: ${RESOURCE_TAG_COST_CENTER}",
                 "  workload: ${RESOURCE_TAG_WORKLOAD}",
                 "  environment: ${RESOURCE_TAG_ENVIRONMENT}",
+                "  job-category: data-pipeline",
+                "  job-key: market",
+                "  job-role: load",
+                "  trigger-owner: schedule",
                 "image: ${JOB_IMAGE}",
                 "",
             ]
@@ -429,7 +459,12 @@ def test_render_and_apply_manifests_uses_env_template_defaults_when_env_is_blank
     (deploy_dir / "job_defaults.yaml").write_text(
         "\n".join(
             [
-                "name: defaults-job",
+                "name: silver-economic-catalyst-job",
+                "tags:",
+                "  job-category: data-pipeline",
+                "  job-key: economic-catalyst",
+                "  job-role: transform",
+                "  trigger-owner: pipeline-chain",
                 "folder: ${AZURE_FOLDER_ECONOMIC_CATALYST}",
                 "nextJob: ${SILVER_ECONOMIC_CATALYST_JOB}",
                 "image: ${JOB_IMAGE}",
