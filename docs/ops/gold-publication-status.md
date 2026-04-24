@@ -68,7 +68,8 @@ Shared regime publish-state fields:
 - Treat root `domain.json` as final domain state only. It should not appear mid-run anymore.
 - During a live run, bucket artifacts plus the gold symbol index remain the interim source of truth.
 - For root-cause analysis, use the final publication log to classify the failure, then inspect earlier per-bucket logs to find the specific failing symbol or bucket.
-- For `regime`, stale end-of-day inputs fail closed. The job emits `artifact_publication_status ... status=retry_pending reason=stale_eod_input` and does not advance success metadata or downstream work.
+- For `regime`, stale end-of-day inputs fail closed. The job emits `artifact_publication_status ... status=retry_pending reason=stale_eod_input` and does not advance success metadata or publication signals.
+- `regime` is `strategy-compute`, not a gold medallion pipeline stage. After successful publication, it records a durable reconcile signal keyed by `regime + sourceFingerprint`; `results-reconcile-job` sweeps those signals as `operational-support`.
 
 ## Example
 
@@ -85,6 +86,8 @@ Interpretation:
 ## Rollback Note
 
 This change does not require a storage migration.
+
+The strategy-compute rollout adds a Postgres signal table, but rollback does not require data rollback. Leave `core.strategy_publication_reconcile_signals` in place and run `results-reconcile-job` manually if pending rows need repair.
 
 Rollback is limited to:
 

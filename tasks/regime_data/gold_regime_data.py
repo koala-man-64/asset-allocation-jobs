@@ -13,9 +13,10 @@ from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.foundation.postgres import connect, copy_rows
 from asset_allocation_runtime_common.domain.regime import build_regime_outputs
 from asset_allocation_runtime_common.regime_repository import RegimeRepository
+from asset_allocation_runtime_common.strategy_publication_repository import StrategyPublicationRepository
 from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from asset_allocation_runtime_common.market_data.gold_sync_contracts import load_domain_sync_state
-from tasks.common.job_trigger import ensure_api_awake_from_env, trigger_next_job_from_env
+from tasks.common.job_trigger import ensure_api_awake_from_env
 from tasks.common.regime_publication import (
     build_regime_publish_state,
     finalize_regime_publication,
@@ -904,6 +905,53 @@ def _write_storage_parquet_outputs(
     client.write_parquet("regime/transitions.parquet", transitions)
 
 
+def _record_regime_reconcile_signal(
+    *,
+    publish_state: dict[str, Any],
+    source_fingerprint: str | None,
+    domain_artifact_path: str | None,
+) -> None:
+    source_fingerprint = str(source_fingerprint or "").strip()
+    if not source_fingerprint:
+        raise RuntimeError("Regime publication finalization did not produce a source fingerprint.")
+    response = StrategyPublicationRepository().record_reconcile_signal(
+        job_key="regime",
+        source_fingerprint=source_fingerprint,
+        metadata={
+            "publishedAsOfDate": publish_state.get("published_as_of_date"),
+            "inputAsOfDate": publish_state.get("input_as_of_date"),
+            "historyRows": publish_state.get("history_rows"),
+            "latestRows": publish_state.get("latest_rows"),
+            "transitionRows": publish_state.get("transition_rows"),
+            "activeModels": publish_state.get("active_models") or [],
+            "domainArtifactPath": domain_artifact_path,
+            "producerJobName": JOB_NAME,
+        },
+    )
+    if response.status == "error":
+        raise RuntimeError(
+            "Gold regime reconcile signal is still in error state: "
+            f"source_fingerprint={response.sourceFingerprint}"
+        )
+    mdc.write_line(
+        "Gold regime reconcile signal recorded: "
+        f"job_key={response.jobKey} source_fingerprint={response.sourceFingerprint} "
+        f"status={response.status} created={str(response.created).lower()}"
+    )
+
+
+def _record_regime_reconcile_signal_after_artifact(
+    artifact_payload: dict[str, Any],
+    published: dict[str, Any],
+) -> None:
+    _record_regime_reconcile_signal(
+        publish_state=artifact_payload,
+        source_fingerprint=str(artifact_payload.get("sourceCommit") or "") or None,
+        domain_artifact_path=str((published or {}).get("artifactPath") or artifact_payload.get("artifactPath") or "")
+        or None,
+    )
+
+
 def main() -> int:
     mdc.log_environment_diagnostics()
     dsn = _require_postgres_dsn()
@@ -1024,31 +1072,6 @@ def main() -> int:
         latest=latest,
         transitions=transitions,
     )
-    downstream_jobs_configured = bool(str(os.environ.get("TRIGGER_NEXT_JOB_NAME") or "").strip())
-    if downstream_jobs_configured:
-        try:
-            trigger_next_job_from_env()
-        except Exception as exc:
-            blocked_state = build_regime_publish_state(
-                published_as_of_date=publish_window_metadata["published_as_of_date"],
-                input_as_of_date=publish_window_metadata["input_as_of_date"],
-                history_rows=int(len(history)),
-                latest_rows=int(len(latest)),
-                transition_rows=int(len(transitions)),
-                active_models=[
-                    {"model_name": model_name, "model_version": model_version}
-                    for model_name, model_version in active_models
-                ],
-                downstream_triggered=False,
-                warnings=publish_window_warnings,
-                status="blocked",
-                reason="downstream_trigger_failed",
-                failure_mode="finalization",
-            )
-            log_regime_publication_status(blocked_state, failed_finalization=1)
-            mdc.write_error(f"Gold regime downstream trigger failed: {type(exc).__name__}: {exc}")
-            return 1
-
     publish_state = build_regime_publish_state(
         published_as_of_date=publish_window_metadata["published_as_of_date"],
         input_as_of_date=publish_window_metadata["input_as_of_date"],
@@ -1059,7 +1082,7 @@ def main() -> int:
             {"model_name": model_name, "model_version": model_version}
             for model_name, model_version in active_models
         ],
-        downstream_triggered=downstream_jobs_configured,
+        downstream_triggered=False,
         warnings=publish_window_warnings,
     )
     finalization = finalize_regime_publication(
@@ -1073,6 +1096,7 @@ def main() -> int:
         job_name=JOB_NAME,
         watermark_key=WATERMARK_KEY,
         when=computed_at,
+        after_artifact_published_fn=_record_regime_reconcile_signal_after_artifact,
     )
     if finalization.status != "published":
         return 1
@@ -1085,7 +1109,7 @@ def main() -> int:
         f"active_models={len(active_models)} published_as_of_date={publish_window_metadata['published_as_of_date']} "
         f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
         f"skipped_trailing_count={len(publish_window.skipped_trailing_input_dates)} "
-        f"downstream_triggered={str(downstream_jobs_configured).lower()}"
+        "downstream_triggered=false"
     )
     return 0
 

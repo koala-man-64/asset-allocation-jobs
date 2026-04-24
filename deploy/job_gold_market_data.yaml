@@ -6,6 +6,10 @@ tags:
   cost-center: ${RESOURCE_TAG_COST_CENTER}
   workload: ${RESOURCE_TAG_WORKLOAD}
   environment: ${RESOURCE_TAG_ENVIRONMENT}
+  job-category: data-pipeline
+  job-key: market
+  job-role: publish
+  trigger-owner: pipeline-chain
 identity:
   type: UserAssigned
   userAssignedIdentities:

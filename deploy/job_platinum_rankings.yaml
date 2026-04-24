@@ -6,6 +6,10 @@ tags:
   cost-center: ${RESOURCE_TAG_COST_CENTER}
   workload: ${RESOURCE_TAG_WORKLOAD}
   environment: ${RESOURCE_TAG_ENVIRONMENT}
+  job-category: strategy-compute
+  job-key: rankings
+  job-role: materialize
+  trigger-owner: control-plane
 identity:
   type: UserAssigned
   userAssignedIdentities:

@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from asset_allocation_contracts.strategy_publication import StrategyPublicationReconcileSignalResponse
 from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from tasks.regime_data import gold_regime_data as regime_job
 
@@ -107,6 +108,63 @@ def test_validate_required_market_series_reports_missing_symbols() -> None:
     assert "missing required regime symbols" in message
     assert "IWM" in message
     assert "ACWI" in message
+
+
+def test_record_regime_reconcile_signal_posts_durable_publication_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    messages: list[str] = []
+
+    class _FakeStrategyPublicationRepository:
+        def record_reconcile_signal(self, *, job_key: str, source_fingerprint: str, metadata: dict[str, Any]):
+            calls.append(
+                {
+                    "job_key": job_key,
+                    "source_fingerprint": source_fingerprint,
+                    "metadata": dict(metadata),
+                }
+            )
+            return StrategyPublicationReconcileSignalResponse(
+                jobKey=job_key,
+                sourceFingerprint=source_fingerprint,
+                status="pending",
+                created=True,
+                createdAt="2026-04-23T21:00:00Z",
+                updatedAt="2026-04-23T21:00:00Z",
+            )
+
+    monkeypatch.setattr(regime_job, "StrategyPublicationRepository", _FakeStrategyPublicationRepository)
+    monkeypatch.setattr(regime_job.mdc, "write_line", lambda msg: messages.append(str(msg)))
+
+    regime_job._record_regime_reconcile_signal(
+        publish_state={
+            "published_as_of_date": "2026-03-20",
+            "input_as_of_date": "2026-03-20",
+            "history_rows": 3,
+            "latest_rows": 2,
+            "transition_rows": 1,
+            "active_models": [{"model_name": "default-regime", "model_version": 3}],
+        },
+        source_fingerprint="fp-123",
+        domain_artifact_path="regime/_metadata/domain.json",
+    )
+
+    assert calls == [
+        {
+            "job_key": "regime",
+            "source_fingerprint": "fp-123",
+            "metadata": {
+                "publishedAsOfDate": "2026-03-20",
+                "inputAsOfDate": "2026-03-20",
+                "historyRows": 3,
+                "latestRows": 2,
+                "transitionRows": 1,
+                "activeModels": [{"model_name": "default-regime", "model_version": 3}],
+                "domainArtifactPath": "regime/_metadata/domain.json",
+                "producerJobName": "gold-regime-job",
+            },
+        }
+    ]
+    assert any("Gold regime reconcile signal recorded" in message for message in messages)
 
 
 def test_build_inputs_daily_joins_market_and_macro_inputs_and_marks_complete_rows() -> None:
