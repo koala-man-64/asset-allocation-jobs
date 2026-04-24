@@ -1,5 +1,11 @@
 # Backtesting Runtime Remediation Ledger
 
+## Strategy Compute Classification
+
+`backtests-job` is classified as `strategy-compute` with `jobKey=backtests`, `jobRole=execute`, and `triggerOwner=control-plane`. `backtests-reconcile-job` is separate `operational-support` infrastructure with `jobKey=backtests` and `jobRole=reconcile`.
+
+System health and the UI must use the API metadata fields, not the job name or medallion layer, when grouping these jobs.
+
 ## Purpose
 - Single source of truth for decisions, actions, PRs, validation evidence, and rollout notes for the backtesting runtime v2-to-v4 remediation.
 - Canonical file path: `C:/Users/rdpro/Projects/asset-allocation-jobs/docs/architecture/backtesting-runtime-remediation-ledger.md`.

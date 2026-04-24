@@ -6,6 +6,10 @@ tags:
   cost-center: ${RESOURCE_TAG_COST_CENTER}
   workload: ${RESOURCE_TAG_WORKLOAD}
   environment: ${RESOURCE_TAG_ENVIRONMENT}
+  job-category: operational-support
+  job-key: backtests
+  job-role: reconcile
+  trigger-owner: reconciler
 identity:
   type: UserAssigned
   userAssignedIdentities:

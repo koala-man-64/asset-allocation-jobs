@@ -6,6 +6,9 @@ from pathlib import Path
 import re
 import subprocess
 
+import yaml
+from asset_allocation_runtime_common.job_metadata import validate_job_metadata_tags
+
 
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 SECRET_VALUE_PLACEHOLDER_PATTERN = re.compile(r"^\s*value:\s*\$\{([A-Z][A-Z0-9_]*)\}\s*$")
@@ -118,6 +121,18 @@ def ensure_manifest_fully_rendered(*, manifest_path: Path, rendered_text: str) -
     )
 
 
+def ensure_manifest_metadata_valid(*, manifest_path: Path, rendered_text: str) -> None:
+    payload = yaml.safe_load(rendered_text)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"Manifest {manifest_path} did not render to a YAML object.")
+    job_name = str(payload.get("name") or "").strip()
+    tags = payload.get("tags") if isinstance(payload.get("tags"), dict) else {}
+    try:
+        validate_job_metadata_tags(job_name, tags)
+    except ValueError as exc:
+        raise SystemExit(f"Manifest {manifest_path} has invalid job metadata tags: {exc}") from exc
+
+
 def ensure_required_secrets_present(
     *,
     manifest_path: Path,
@@ -169,6 +184,7 @@ def render_and_apply_manifests(*, deploy_dir: Path, rendered_dir: Path, resource
         )
         rendered = render_manifest(template_text, resolved_environment)
         ensure_manifest_fully_rendered(manifest_path=manifest, rendered_text=rendered)
+        ensure_manifest_metadata_valid(manifest_path=manifest, rendered_text=rendered)
         rendered_path = rendered_dir / manifest.name
         rendered_path.write_text(rendered, encoding="utf-8")
 

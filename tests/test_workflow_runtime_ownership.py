@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+from asset_allocation_runtime_common.job_metadata import expected_job_metadata, validate_job_metadata_tags
+
 
 STALE_RUNTIME_PATHS = (
     "api",
@@ -58,6 +61,36 @@ QUIVER_PIPELINE_JOB_MANIFESTS = (
     "job_silver_quiver_data.yaml",
     "job_gold_quiver_data.yaml",
 )
+
+EXPECTED_JOB_RESOURCE_NAMES = {
+    "job_backtests.yaml": "backtests-job",
+    "job_backtests_reconcile.yaml": "backtests-reconcile-job",
+    "job_bronze_earnings_data.yaml": "bronze-earnings-job",
+    "job_bronze_economic_catalyst_data.yaml": "bronze-economic-catalyst-job",
+    "job_bronze_finance_data.yaml": "bronze-finance-job",
+    "job_bronze_market_data.yaml": "bronze-market-job",
+    "job_bronze_price_target_data.yaml": "bronze-price-target-job",
+    "job_bronze_quiver_backfill.yaml": "bronze-quiver-backfill-job",
+    "job_bronze_quiver_data.yaml": "bronze-quiver-data-job",
+    "job_gold_earnings_data.yaml": "gold-earnings-job",
+    "job_gold_economic_catalyst_data.yaml": "gold-economic-catalyst-job",
+    "job_gold_finance_data.yaml": "gold-finance-job",
+    "job_gold_market_data.yaml": "gold-market-job",
+    "job_gold_price_target_data.yaml": "gold-price-target-job",
+    "job_gold_quiver_data.yaml": "gold-quiver-data-job",
+    "job_gold_regime_data.yaml": "gold-regime-job",
+    "job_intraday_market_refresh.yaml": "intraday-market-refresh-job",
+    "job_intraday_monitor.yaml": "intraday-monitor-job",
+    "job_platinum_rankings.yaml": "platinum-rankings-job",
+    "job_results_reconcile.yaml": "results-reconcile-job",
+    "job_silver_earnings_data.yaml": "silver-earnings-job",
+    "job_silver_economic_catalyst_data.yaml": "silver-economic-catalyst-job",
+    "job_silver_finance_data.yaml": "silver-finance-job",
+    "job_silver_market_data.yaml": "silver-market-job",
+    "job_silver_price_target_data.yaml": "silver-price-target-job",
+    "job_silver_quiver_data.yaml": "silver-quiver-data-job",
+    "job_symbol_cleanup.yaml": "symbol-cleanup-job",
+}
 
 
 def repo_root() -> Path:
@@ -118,6 +151,51 @@ def test_api_backed_manual_jobs_define_control_plane_env_vars() -> None:
         assert "value: ${ASSET_ALLOCATION_API_BASE_URL}" in text, manifest_name
         assert "name: ASSET_ALLOCATION_API_SCOPE" in text, manifest_name
         assert "value: ${ASSET_ALLOCATION_API_SCOPE}" in text, manifest_name
+
+
+def test_job_manifests_define_valid_metadata_without_renaming_aca_jobs() -> None:
+    deploy_dir = repo_root() / "deploy"
+    manifests = sorted(deploy_dir.glob("job_*.yaml"))
+    assert {path.name for path in manifests} == set(EXPECTED_JOB_RESOURCE_NAMES)
+
+    for manifest in manifests:
+        payload = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        assert isinstance(payload, dict), manifest.name
+        job_name = str(payload.get("name") or "")
+        assert job_name == EXPECTED_JOB_RESOURCE_NAMES[manifest.name]
+
+        metadata = validate_job_metadata_tags(job_name, payload.get("tags") or {})
+        expected = expected_job_metadata(job_name)
+        assert expected is not None, manifest.name
+        assert metadata.jobCategory == expected.jobCategory
+        assert metadata.jobKey == expected.jobKey
+        assert metadata.jobRole == expected.jobRole
+        assert metadata.triggerOwner == expected.triggerOwner
+
+
+def test_job_manifests_are_utf8_without_bom() -> None:
+    for manifest in sorted((repo_root() / "deploy").glob("job_*.yaml")):
+        assert not manifest.read_bytes().startswith(b"\xef\xbb\xbf"), manifest.name
+
+
+def test_strategy_compute_target_jobs_have_required_classifications() -> None:
+    deploy_dir = repo_root() / "deploy"
+    expected = {
+        "job_gold_regime_data.yaml": ("strategy-compute", "regime", "publish", "schedule"),
+        "job_platinum_rankings.yaml": ("strategy-compute", "rankings", "materialize", "control-plane"),
+        "job_backtests.yaml": ("strategy-compute", "backtests", "execute", "control-plane"),
+        "job_backtests_reconcile.yaml": ("operational-support", "backtests", "reconcile", "reconciler"),
+        "job_results_reconcile.yaml": ("operational-support", "results-reconcile", "reconcile", "reconciler"),
+    }
+    for manifest_name, classification in expected.items():
+        payload = yaml.safe_load((deploy_dir / manifest_name).read_text(encoding="utf-8"))
+        metadata = validate_job_metadata_tags(str(payload["name"]), payload["tags"])
+        assert (
+            metadata.jobCategory,
+            metadata.jobKey,
+            metadata.jobRole,
+            metadata.triggerOwner,
+        ) == classification
 
 
 def test_quiver_job_manifests_define_control_plane_env_vars() -> None:
@@ -271,11 +349,12 @@ def test_contributor_and_security_docs_reference_live_jobs_assets_only() -> None
             assert stale_reference not in text, f"{path} still references stale asset: {stale_reference}"
 
 
-def test_results_reconcile_job_is_manual_and_not_dry_run() -> None:
+def test_results_reconcile_job_is_scheduled_reconciler_and_not_dry_run() -> None:
     text = (repo_root() / "deploy" / "job_results_reconcile.yaml").read_text(encoding="utf-8")
-    assert "triggerType: Manual" in text
-    assert "manualTriggerConfig:" in text
-    assert "triggerType: Schedule" not in text
+    assert "triggerType: Schedule" in text
+    assert "scheduleTriggerConfig:" in text
+    assert 'cronExpression: "*/30 * * * *"' in text
+    assert "manualTriggerConfig:" not in text
     assert "RESULTS_RECONCILE_DRY_RUN" not in text
 
 

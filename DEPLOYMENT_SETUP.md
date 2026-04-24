@@ -35,9 +35,8 @@ Use only these workflow entry points:
 
 `deploy-prod.yml` applies only `deploy/job_*.yaml`.
 
-Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for manual job starts, including `results-reconcile` after gold-stage repairs or backfills.
 The intraday workers are normally schedule-driven; if you need to repair them manually, start `intraday-monitor-job` or `intraday-market-refresh-job` directly with Azure CLI.
-The intraday workers are normally schedule-driven; if you need to repair them manually, start `intraday-monitor-job` or `intraday-market-refresh-job` directly with Azure CLI.
+Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for ad hoc starts, including `results-reconcile` after repair or replay workflows.
 
 ## Operate
 
@@ -46,7 +45,8 @@ The intraday workers are normally schedule-driven; if you need to repair them ma
 - Run `integration.yml` whenever the control-plane or runtime-common release dispatches their compatibility events, or when validating an explicit dependency ref manually.
 - Use `integration.yml` to pin a released `asset-allocation-contracts` version into repo manifests.
 - Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for ad hoc operator-driven starts after deployment.
-- Treat `results-reconcile-job` as trigger-driven. Gold jobs invoke it automatically, and operators start it manually only for repair or replay workflows.
+- Treat `gold-regime-job`, `platinum-rankings-job`, and `backtests-job` as `strategy-compute`; see `docs/ops/strategy-compute-jobs.md`.
+- Treat `results-reconcile-job` as an `operational-support` scheduled reconciler. It sweeps durable publication signals every 30 minutes and operators can still start it manually for repair or replay workflows.
 - Treat the intraday pair as queue-driven schedules. `intraday-monitor-job` only claims due watchlists and `intraday-market-refresh-job` only drains queued targeted market refresh batches.
 - Treat `symbol-cleanup-job` as a queue-driven weekday schedule. It runs at `23:00 UTC` (`0 23 * * 1-5`) after Bronze day-end refreshes and drains queued symbol cleanup work in a bounded serial pass; operators can still start it manually for repair or replay workflows.
 - Treat Quiver as a split pipeline:
@@ -151,6 +151,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - Manual `workflow_dispatch` deploys the latest successful `release.yml` artifact for the selected branch.
 - Roll back to an older image by sending a `deploy_runtime` repository dispatch with the previous known-good image digest from `artifacts/previous-job-images.json`.
 - Re-trigger only the affected jobs after rollback, not the whole stack.
+- Strategy-compute rollback preserves ACA job names and operator aliases. The publication signal table is additive and should be left in place unless a database backup/restore is already part of the broader rollback.
 
 ## Troubleshoot
 
@@ -160,7 +161,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - If `deploy-prod.yml` fails during apply, inspect `artifacts/rendered/*` to confirm only `Microsoft.App/jobs` resources were rendered.
 - If `deploy-prod.yml` verifies the wrong image, inspect `artifacts/previous-job-images.json` and the job image queries returned by Azure CLI.
 - If `scripts\ops\trigger_job.py` fails, verify the selected job name exists in `AssetAllocationRG`, `RESOURCE_GROUP` is set, and your Azure CLI session can run `az containerapp job start`.
-- If `results-reconcile-job` does not run after a gold-stage success, verify the upstream gold manifest still defines `TRIGGER_NEXT_JOB_NAME=results-reconcile-job` or start it manually with `python scripts\ops\trigger_job.py --job results-reconcile --resource-group AssetAllocationRG`.
+- If `results-reconcile-job` does not process regime publication signals, verify `job_results_reconcile.yaml` is deployed with the `*/30 * * * *` schedule, check `core.strategy_publication_reconcile_signals` for stale `pending` or `error` rows, and start it manually with `python scripts\ops\trigger_job.py --job results-reconcile --resource-group AssetAllocationRG` for immediate repair.
 - If intraday watchlists stay due but no runs are claimed, verify `job_intraday_monitor.yaml` is deployed, the job schedule is active, and the control plane still allows the `intraday-monitor-job` caller name.
 - If intraday refresh batches accumulate, verify `job_intraday_market_refresh.yaml` is deployed and that the manifest does not define `TRIGGER_NEXT_JOB_NAME`; the refresh worker is expected to run Bronze, Silver, and Gold in-process for the targeted symbols.
 - If symbol cleanup work accumulates, verify `job_symbol_cleanup.yaml` is deployed with the expected `0 23 * * 1-5` UTC schedule, and use `python scripts\ops\trigger_job.py --job symbol-cleanup --resource-group AssetAllocationRG` for an immediate repair run.

@@ -6,6 +6,10 @@ tags:
   cost-center: ${RESOURCE_TAG_COST_CENTER}
   workload: ${RESOURCE_TAG_WORKLOAD}
   environment: ${RESOURCE_TAG_ENVIRONMENT}
+  job-category: strategy-compute
+  job-key: regime
+  job-role: publish
+  trigger-owner: schedule
 identity:
   type: UserAssigned
   userAssignedIdentities:
@@ -38,6 +42,8 @@ properties:
         value: INFO
       - name: DISABLE_DOTENV
         value: "true"
+      - name: CONTAINER_APP_JOB_NAME
+        value: gold-regime-job
       - name: SYSTEM_HEALTH_ARM_SUBSCRIPTION_ID
         value: ${AZURE_SUBSCRIPTION_ID}
       - name: SYSTEM_HEALTH_ARM_RESOURCE_GROUP
@@ -46,8 +52,6 @@ properties:
         value: ${ASSET_ALLOCATION_API_BASE_URL}
       - name: ASSET_ALLOCATION_API_SCOPE
         value: ${ASSET_ALLOCATION_API_SCOPE}
-      - name: TRIGGER_NEXT_JOB_NAME
-        value: results-reconcile-job
       - name: JOB_STARTUP_API_CONTAINER_APPS
         value: ${JOB_STARTUP_API_CONTAINER_APPS}
       - name: AZURE_CLIENT_ID

@@ -23,6 +23,7 @@ class RegimePublicationFinalizationResult:
     domain_artifact_path: str | None
     health_marker_written: bool
     publish_state: dict[str, Any]
+    source_fingerprint: str | None = None
 
 
 def build_regime_publish_state(
@@ -95,7 +96,18 @@ def _build_source_fingerprint(
     *,
     active_models: Sequence[dict[str, Any]],
     date_range: dict[str, Any] | None,
+    inputs: pd.DataFrame,
+    history: pd.DataFrame,
+    latest: pd.DataFrame,
+    transitions: pd.DataFrame,
 ) -> str:
+    def _frame_digest(frame: pd.DataFrame) -> str:
+        if frame.empty:
+            return "empty"
+        ordered = frame.reindex(sorted(frame.columns), axis=1)
+        payload = ordered.to_json(orient="split", date_format="iso", default_handler=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     payload = {
         "activeModels": [
             {
@@ -106,8 +118,14 @@ def _build_source_fingerprint(
             for model in active_models
         ],
         "dateRange": date_range,
+        "content": {
+            "inputs": _frame_digest(inputs),
+            "history": _frame_digest(history),
+            "latest": _frame_digest(latest),
+            "transitions": _frame_digest(transitions),
+        },
     }
-    return hashlib.md5(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _build_domain_artifact_payload(
@@ -124,7 +142,14 @@ def _build_domain_artifact_payload(
     all_columns = sorted(set(inputs.columns) | set(history.columns) | set(latest.columns) | set(transitions.columns))
     now = datetime.now(timezone.utc).isoformat()
     artifact_path = domain_artifacts.domain_artifact_path(layer="gold", domain="regime")
-    source_fingerprint = _build_source_fingerprint(active_models=active_models, date_range=date_range)
+    source_fingerprint = _build_source_fingerprint(
+        active_models=active_models,
+        date_range=date_range,
+        inputs=inputs,
+        history=history,
+        latest=latest,
+        transitions=transitions,
+    )
     return {
         "version": 1,
         "scope": "domain",
@@ -164,6 +189,7 @@ def finalize_regime_publication(
     write_marker_fn: Callable[..., bool] = write_system_health_marker,
     save_watermarks_fn: Callable[[str, dict[str, Any]], None] = save_watermarks,
     save_last_success_fn: Callable[..., None] = save_last_success,
+    after_artifact_published_fn: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
 ) -> RegimePublicationFinalizationResult:
     try:
         client = mdc.get_storage_client(gold_container)
@@ -180,6 +206,8 @@ def finalize_regime_publication(
             job_name=job_name,
         )
         published = domain_artifacts.publish_domain_artifact_payload(payload=artifact_payload, client=client)
+        if after_artifact_published_fn is not None:
+            after_artifact_published_fn(artifact_payload, published or {})
         save_watermarks_fn(watermark_key, dict(publish_state))
         marker_written = write_marker_fn(
             layer="gold",
@@ -199,6 +227,7 @@ def finalize_regime_publication(
             domain_artifact_path=str((published or {}).get("artifactPath") or "") or None,
             health_marker_written=True,
             publish_state=dict(publish_state),
+            source_fingerprint=str(artifact_payload.get("sourceCommit") or "") or None,
         )
     except Exception as exc:
         blocked_state = dict(publish_state)
@@ -216,4 +245,5 @@ def finalize_regime_publication(
             domain_artifact_path=None,
             health_marker_written=False,
             publish_state=blocked_state,
+            source_fingerprint=None,
         )
