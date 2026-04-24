@@ -12,6 +12,7 @@ from tasks.quiver_data import constants
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _RANGE_RE = re.compile(r"\$?\s*([\d,]+)(?:\s*-\s*\$?\s*([\d,]+))?")
+_INTEGER_RE = re.compile(r"^[+-]?\d+$")
 
 
 def normalize_key(value: object) -> str:
@@ -28,12 +29,26 @@ def parse_timestamp(value: object) -> str | None:
     if not text:
         return None
     try:
-        parsed = pd.to_datetime(text, utc=True, errors="raise")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            parsed = _parse_numeric_timestamp(float(value))
+        elif _INTEGER_RE.fullmatch(text):
+            parsed = _parse_numeric_timestamp(float(text))
+        else:
+            parsed = pd.to_datetime(text, utc=True, errors="raise")
     except Exception:
         return None
     if pd.isna(parsed):
         return None
     return parsed.isoformat()
+
+
+def _parse_numeric_timestamp(value: float) -> pd.Timestamp:
+    abs_value = abs(value)
+    if abs_value >= 10_000_000_000:
+        return pd.to_datetime(value, unit="ms", utc=True, errors="raise")
+    if abs_value >= 1_000_000_000:
+        return pd.to_datetime(value, unit="s", utc=True, errors="raise")
+    return pd.to_datetime(value, utc=True, errors="raise")
 
 
 def range_midpoint(value: object) -> float | None:
@@ -67,6 +82,15 @@ def _stable_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
+def _field_value(raw: dict[str, Any], snake: dict[str, Any], field_name: str) -> Any:
+    if not field_name:
+        return None
+    value = raw.get(field_name)
+    if value is not None:
+        return value
+    return snake.get(normalize_key(field_name))
+
+
 def normalize_bronze_batch(batch: dict[str, Any]) -> pd.DataFrame:
     source_dataset = str(batch.get("source_dataset") or "").strip()
     dataset_family = str(batch.get("dataset_family") or "").strip()
@@ -78,6 +102,7 @@ def normalize_bronze_batch(batch: dict[str, Any]) -> pd.DataFrame:
 
     normalized_rows: list[dict[str, Any]] = []
     public_field = constants.public_availability_field(dataset_family)
+    event_field = constants.event_time_field(dataset_family)
 
     for raw in rows:
         if not isinstance(raw, dict):
@@ -85,10 +110,14 @@ def normalize_bronze_batch(batch: dict[str, Any]) -> pd.DataFrame:
         snake = {normalize_key(key): value for key, value in raw.items()}
         symbol = extract_symbol(dataset_family, raw, requested_symbol=requested_symbol)
         bucket = constants.normalize_bucket(symbol)
-        public_value = raw.get(public_field) if public_field else None
-        if public_value is None and public_field:
-            public_value = snake.get(normalize_key(public_field))
-        event_value = raw.get("Date") or raw.get("TransactionDate") or snake.get("date") or snake.get("transaction_date")
+        public_value = _field_value(raw, snake, public_field)
+        event_value = (
+            _field_value(raw, snake, event_field)
+            or raw.get("Date")
+            or raw.get("TransactionDate")
+            or snake.get("date")
+            or snake.get("transaction_date")
+        )
         amount_source = raw.get("Range") or raw.get("Amount") or snake.get("range") or snake.get("amount")
         normalized = {
             "dataset_family": dataset_family,

@@ -8,6 +8,7 @@ from asset_allocation_contracts.paths import DataPaths, bucket_letter
 try:
     from asset_allocation_contracts.quiver_signals import (
         QUIVER_DATASET_FAMILIES,
+        QUIVER_EVENT_TIME_FIELDS,
         QUIVER_FORWARD_LOOKING_COLUMNS,
         QUIVER_GOLD_FEATURE_DATASETS,
         QUIVER_PUBLIC_AVAILABILITY_FIELDS,
@@ -25,6 +26,8 @@ except Exception:
         "lobbying",
         "etf_holdings",
         "congress_holdings",
+        "wall_street_bets",
+        "patents",
     )
     QUIVER_GOLD_FEATURE_DATASETS = (
         "political_trading",
@@ -42,6 +45,21 @@ except Exception:
         "lobbying": "Date",
         "etf_holdings": "",
         "congress_holdings": "",
+        "wall_street_bets": "Time",
+        "patents": "Date",
+    }
+    QUIVER_EVENT_TIME_FIELDS = {
+        "political_trading": "Date",
+        "government_contracts": "Date",
+        "government_contracts_all": "action_date",
+        "insider_trading": "Date",
+        "institutional_holdings": "ReportPeriod",
+        "institutional_holding_changes": "ReportPeriod",
+        "lobbying": "Date",
+        "etf_holdings": "",
+        "congress_holdings": "",
+        "wall_street_bets": "Time",
+        "patents": "Date",
     }
     QUIVER_SYMBOL_FIELD_HINTS = {
         "political_trading": ("Ticker",),
@@ -53,11 +71,39 @@ except Exception:
         "lobbying": ("Ticker",),
         "etf_holdings": ("Holding Symbol", "ETF Symbol"),
         "congress_holdings": (),
+        "wall_street_bets": ("Ticker",),
+        "patents": ("Ticker",),
     }
     QUIVER_FORWARD_LOOKING_COLUMNS = frozenset({"ExcessReturn", "PriceChange", "SPYChange", "excess_return", "price_change", "spy_change"})
 
     def normalize_quiver_dataset(dataset: str) -> str:
         return str(dataset or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+_LOCAL_QUIVER_DATASET_FAMILIES: Final[tuple[str, ...]] = ("wall_street_bets", "patents")
+QUIVER_DATASET_FAMILIES = tuple(dict.fromkeys((*QUIVER_DATASET_FAMILIES, *_LOCAL_QUIVER_DATASET_FAMILIES)))
+QUIVER_PUBLIC_AVAILABILITY_FIELDS = {
+    **QUIVER_PUBLIC_AVAILABILITY_FIELDS,
+    "wall_street_bets": "Time",
+    "patents": "Date",
+}
+QUIVER_EVENT_TIME_FIELDS = {
+    **QUIVER_EVENT_TIME_FIELDS,
+    "wall_street_bets": "Time",
+    "patents": "Date",
+}
+QUIVER_SYMBOL_FIELD_HINTS = {
+    **QUIVER_SYMBOL_FIELD_HINTS,
+    "wall_street_bets": ("Ticker",),
+    "patents": ("Ticker",),
+}
+
+
+def normalize_quiver_dataset(dataset: str) -> str:
+    key = str(dataset or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if key not in QUIVER_DATASET_FAMILIES:
+        raise ValueError(f"Unsupported Quiver dataset family: {dataset!r}.")
+    return key
 
 
 BRONZE_DOMAIN_SLUG: Final[str] = str(os.environ.get("AZURE_FOLDER_QUIVER") or "quiver-data").strip()
@@ -83,7 +129,13 @@ SOURCE_DATASETS: Final[tuple[tuple[str, str], ...]] = (
     ("government_contracts_historical", "government_contracts"),
     ("government_contracts_all_live", "government_contracts_all"),
     ("government_contracts_all_historical", "government_contracts_all"),
+    ("insiders_live_all", "insider_trading"),
     ("insiders_live", "insider_trading"),
+    ("wall_street_bets_live", "wall_street_bets"),
+    ("wall_street_bets_historical_all", "wall_street_bets"),
+    ("wall_street_bets_historical", "wall_street_bets"),
+    ("patents_live", "patents"),
+    ("patents_historical", "patents"),
     ("sec13f_live", "institutional_holdings"),
     ("sec13fchanges_live", "institutional_holding_changes"),
     ("lobbying_live", "lobbying"),
@@ -150,6 +202,10 @@ def symbol_field_hints(dataset_family: str) -> tuple[str, ...]:
 
 def public_availability_field(dataset_family: str) -> str:
     return str(QUIVER_PUBLIC_AVAILABILITY_FIELDS.get(normalize_quiver_dataset(dataset_family), "") or "")
+
+
+def event_time_field(dataset_family: str) -> str:
+    return str(QUIVER_EVENT_TIME_FIELDS.get(normalize_quiver_dataset(dataset_family), "") or "")
 
 
 def normalize_bucket(symbol: str | None) -> str:

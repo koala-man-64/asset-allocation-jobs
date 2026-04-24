@@ -128,6 +128,9 @@ def _build_incremental_live_requests(client: Any, config: QuiverDataConfig) -> l
         ("government_contracts_all_live", "government_contracts_all", None, lambda: client.get_live_gov_contracts_all(page=1, page_size=config.page_size)),
         ("lobbying_live", "lobbying", None, lambda: client.get_live_lobbying(page=1, page_size=config.page_size)),
         ("congress_holdings_live", "congress_holdings", None, lambda: client.get_live_congress_holdings()),
+        ("insiders_live_all", "insider_trading", None, lambda: client.get_live_insiders(page=1, page_size=config.page_size)),
+        ("wall_street_bets_live", "wall_street_bets", None, lambda: client.get_live_wall_street_bets()),
+        ("patents_live", "patents", None, lambda: client.get_live_patents()),
     ]
 
 
@@ -156,7 +159,9 @@ def _build_historical_backfill_requests(
     selected_symbols: tuple[str, ...],
     config: QuiverDataConfig,
 ) -> list[tuple[str, str, str | None, Callable[[], Any]]]:
-    requests: list[tuple[str, str, str | None, Callable[[], Any]]] = []
+    requests: list[tuple[str, str, str | None, Callable[[], Any]]] = [
+        ("wall_street_bets_historical_all", "wall_street_bets", None, lambda: client.get_live_wall_street_bets(count_all=True)),
+    ]
     for ticker in selected_symbols:
         requests.extend(
             [
@@ -166,6 +171,8 @@ def _build_historical_backfill_requests(
                 ("government_contracts_historical", "government_contracts", ticker, lambda ticker=ticker: client.get_historical_gov_contracts(ticker=ticker)),
                 ("government_contracts_all_historical", "government_contracts_all", ticker, lambda ticker=ticker: client.get_historical_gov_contracts_all(ticker=ticker)),
                 ("lobbying_historical", "lobbying", ticker, lambda ticker=ticker: client.get_historical_lobbying(ticker=ticker, page=1, page_size=config.page_size)),
+                ("wall_street_bets_historical", "wall_street_bets", ticker, lambda ticker=ticker: client.get_historical_wall_street_bets(ticker=ticker)),
+                ("patents_historical", "patents", ticker, lambda ticker=ticker: client.get_historical_patents(ticker=ticker)),
             ]
         )
     return requests
