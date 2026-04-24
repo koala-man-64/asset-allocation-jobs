@@ -52,6 +52,41 @@ def test_normalize_bronze_batch_uses_public_availability_rules_and_snake_case() 
     assert row["transaction"] == "Purchase"
 
 
+def test_normalize_bronze_batch_parses_wall_street_bets_epoch_milliseconds() -> None:
+    event_ms = int(pd.Timestamp("2026-04-01T12:00:00Z").timestamp() * 1000)
+    frame = normalize_bronze_batch(
+        {
+            "source_dataset": "wall_street_bets_live",
+            "dataset_family": "wall_street_bets",
+            "ingested_at": "2026-04-01T12:05:00Z",
+            "rows": [{"Ticker": "TSLA", "Time": event_ms, "Mentions": 42}],
+        }
+    )
+
+    row = frame.iloc[0]
+    assert row["symbol"] == "TSLA"
+    assert row["vendor_event_time"].startswith("2026-04-01T12:00:00")
+    assert row["public_availability_time"].startswith("2026-04-01T12:00:00")
+    assert row["mentions"] == 42
+
+
+def test_normalize_bronze_batch_uses_patent_date_and_symbol_rules() -> None:
+    frame = normalize_bronze_batch(
+        {
+            "source_dataset": "patents_live",
+            "dataset_family": "patents",
+            "ingested_at": "2026-04-02T12:00:00Z",
+            "rows": [{"Ticker": "IBM", "Date": "2026-03-29T00:00:00Z", "Patent": "Example"}],
+        }
+    )
+
+    row = frame.iloc[0]
+    assert row["symbol"] == "IBM"
+    assert row["public_availability_time"].startswith("2026-03-29")
+    assert row["vendor_event_time"].startswith("2026-03-29")
+    assert row["patent"] == "Example"
+
+
 def test_feature_safe_frame_drops_forward_looking_columns() -> None:
     safe = feature_safe_frame(pd.DataFrame([{"symbol": "AAPL", "price_change": 0.2, "net_signal": 1.0}]))
     assert list(safe.columns) == ["symbol", "net_signal"]

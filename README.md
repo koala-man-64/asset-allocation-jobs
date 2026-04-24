@@ -44,6 +44,7 @@ Quiver runs as a control-plane-gated Bronze/Silver/Gold pipeline in this repo.
 - Bronze stays API-backed for provider access and supports two modes:
   - `incremental`: hourly weekday schedule for global live feeds plus a rotating ticker slice
   - `historical_backfill`: manual replay for ticker-heavy historical feeds
+- Quiver feed coverage includes live/global insider trading, Wall Street Bets, and patents, plus ticker-rotated historical Wall Street Bets and patents during manual backfills.
 - The ticker universe is resolved directly from Postgres for both scheduled and manual runs.
 - Bronze and Silver persist under `quiver-data/...`; Gold persists under `quiver/...`.
 
