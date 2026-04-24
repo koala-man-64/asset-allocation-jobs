@@ -29,9 +29,8 @@ Jobs now own only jobs-side runtime assets.
 Use only these workflow entry points:
 
 1. `.github/workflows/quality.yml`
-2. `.github/workflows/integration.yml`
-3. `.github/workflows/release.yml`
-4. `.github/workflows/deploy-prod.yml`
+2. `.github/workflows/release.yml`
+3. `.github/workflows/deploy-prod.yml`
 
 `deploy-prod.yml` applies only `deploy/job_*.yaml`.
 
@@ -41,9 +40,9 @@ Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAll
 ## Operate
 
 - Build exactly one jobs image digest with `release.yml`.
+- Let successful `quality.yml` runs on `main` trigger `release.yml`; use manual `release.yml` dispatch only for operator-approved rebuilds.
 - Deploy the latest successful `release.yml` artifact for the selected branch with `deploy-prod.yml`.
-- Run `integration.yml` whenever the control-plane or runtime-common release dispatches their compatibility events, or when validating an explicit dependency ref manually.
-- Use `integration.yml` to pin a released `asset-allocation-contracts` version into repo manifests.
+- Adopt released shared package versions by bumping repo-local dependency manifests in a PR and validating through `quality.yml`.
 - Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAllocationRG` for ad hoc operator-driven starts after deployment.
 - Treat `gold-regime-job`, `platinum-rankings-job`, and `backtests-job` as `strategy-compute`; see `docs/ops/strategy-compute-jobs.md`.
 - Treat `results-reconcile-job` as an `operational-support` scheduled reconciler. It sweeps durable publication signals every 30 minutes and operators can still start it manually for repair or replay workflows.
@@ -156,7 +155,6 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 ## Troubleshoot
 
 - If `quality.yml` fails, verify `ASSET_ALLOCATION_API_BASE_URL` is still set to the internal target `http://asset-allocation-api-vnet`, `ASSET_ALLOCATION_API_SCOPE` is present for the HTTP client tests, and any private package indexes are configured in GitHub secrets.
-- If `integration.yml` fails during compatibility validation, verify the target control-plane or runtime-common ref exists and that the workflow can install the published shared packages required by the jobs repo.
 - If `release.yml` fails to build the image, verify Docker is building with repo-local context `asset-allocation-jobs` and that shared package versions resolve cleanly from `pyproject.toml`.
 - If `deploy-prod.yml` fails during apply, inspect `artifacts/rendered/*` to confirm only `Microsoft.App/jobs` resources were rendered.
 - If `deploy-prod.yml` verifies the wrong image, inspect `artifacts/previous-job-images.json` and the job image queries returned by Azure CLI.
@@ -175,7 +173,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 
 ## Dependencies
 
-- Sibling contracts repo for CI and release builds
+- Published contracts and runtime-common packages for CI and release builds
 - Control-plane API contract compatibility
 - Azure OIDC credentials in GitHub variables
 - `prod` GitHub environment for the deploy workflow
@@ -192,7 +190,6 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 ## Evidence
 
 - `.github/workflows/deploy-prod.yml`
-- `.github/workflows/integration.yml`
 - `deploy/job_backtests.yaml`
 - `deploy/job_intraday_monitor.yaml`
 - `deploy/job_intraday_market_refresh.yaml`

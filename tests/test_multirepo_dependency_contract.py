@@ -90,24 +90,25 @@ def test_quality_and_release_workflows_do_not_checkout_sibling_repos() -> None:
         assert '${{ steps.shared.outputs.runtime_common_version }}' in text
 
 
-def test_release_workflow_runs_from_successful_mainline_integration_or_manual_dispatch() -> None:
+def test_release_workflow_runs_from_successful_mainline_quality_or_manual_dispatch() -> None:
     release = (repo_root() / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert "\n  workflow_run:\n" in release
-    assert "\n      - Jobs Integration\n" in release
+    assert "\n      - Jobs Quality\n" in release
     assert "github.event.workflow_run.conclusion == 'success'" in release
+    assert "github.event.workflow_run.event == 'push'" in release
     assert "github.event.workflow_run.head_branch == github.event.repository.default_branch" in release
     assert "github.event.workflow_run.head_sha" in release
     assert "steps.source.outputs.release_git_sha" in release
     assert "\n  push:\n" not in release
 
 
-def test_integration_workflow_is_the_only_place_cross_repo_checkout_and_contract_adoption_are_allowed() -> None:
-    integration = (repo_root() / ".github" / "workflows" / "integration.yml").read_text(encoding="utf-8")
-    assert "Checkout control-plane repository" in integration
-    assert "Checkout runtime-common repository" in integration
-    assert "contracts_released" in integration
-    assert "Validate shared dependency compatibility" in integration
-    assert "scripts/workflows/validate_shared_dependency_compatibility.py" in integration
-    assert "contents: write" in integration
-    assert "requirements.lock.txt" in integration
-    assert "git push origin HEAD:${{ steps.inputs.outputs.target_branch }}" in integration
+def test_integration_workflow_has_been_retired() -> None:
+    workflow_dir = repo_root() / ".github" / "workflows"
+    assert not (workflow_dir / "integration.yml").exists()
+    for workflow in workflow_dir.glob("*.yml"):
+        text = workflow.read_text(encoding="utf-8")
+        assert "Checkout control-plane repository" not in text
+        assert "Checkout runtime-common repository" not in text
+        assert "contracts_released" not in text
+        assert "runtime_common_released" not in text
+        assert "git push origin HEAD:${{ steps.inputs.outputs.target_branch }}" not in text

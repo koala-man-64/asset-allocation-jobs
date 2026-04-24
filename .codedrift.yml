@@ -96,7 +96,8 @@ risk_controls:
     - "deploy/sql/postgres/migrations/**"
     - "infra/**"
     - ".github/workflows/deploy-prod.yml"
-    - ".github/workflows/integration.yml"
+    - ".github/workflows/quality.yml"
+    - ".github/workflows/release.yml"
   require_tests_passing_before_automerge: true
 
 reporting:

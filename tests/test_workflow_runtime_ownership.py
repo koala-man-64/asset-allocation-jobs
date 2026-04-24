@@ -101,7 +101,6 @@ def test_jobs_has_only_current_runtime_workflows() -> None:
     workflow_dir = repo_root() / ".github" / "workflows"
     expected = {
         "deploy-prod.yml",
-        "integration.yml",
         "quality.yml",
         "release.yml",
     }
@@ -123,7 +122,7 @@ def test_jobs_bootstrap_defaults_internal_control_plane_target() -> None:
     readme_text = (repo_root() / "README.md").read_text(encoding="utf-8")
     assert "http://asset-allocation-api-vnet" in readme_text
 
-    for workflow_name in ("quality.yml", "integration.yml"):
+    for workflow_name in ("quality.yml",):
         workflow_text = (repo_root() / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
         assert "ASSET_ALLOCATION_API_BASE_URL: http://asset-allocation-api-vnet" in workflow_text, workflow_name
         assert "https://control-plane.example" not in workflow_text, workflow_name

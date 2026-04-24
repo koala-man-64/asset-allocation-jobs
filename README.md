@@ -63,8 +63,7 @@ Key Quiver envs:
 Canonical workflows live under `.github/workflows/`.
 
 - `quality.yml` is the required validation path for PRs and `main`, and it also runs scheduled dependency audits and governance checks.
-- `integration.yml` owns cross-repo compatibility validation and contracts adoption.
-- `release.yml` builds the jobs image and writes `release-manifest.json`.
+- `release.yml` builds the jobs image and writes `release-manifest.json` after successful `quality.yml` runs on `main`, with manual dispatch retained for operator-approved rebuilds.
 - `deploy-prod.yml` is the only workflow allowed to apply `deploy/job_*.yaml`.
 - `scripts/ops/trigger_job.py` is the approved manual ACA job trigger entrypoint.
 - `scripts/setup-env.ps1` builds repo-local `.env.web` using Azure and git discovery where possible.
