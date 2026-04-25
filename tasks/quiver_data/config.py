@@ -40,6 +40,7 @@ class QuiverDataConfig:
     historical_batch_size: int
     symbol_limit: int
     page_size: int
+    max_pages_per_request: int
     sec13f_today_only: bool
     postgres_dsn: str | None
 
@@ -63,6 +64,7 @@ class QuiverDataConfig:
             historical_batch_size=max(1, _env_int("QUIVER_DATA_HISTORICAL_BATCH_SIZE", 20)),
             symbol_limit=max(0, _env_int("QUIVER_DATA_SYMBOL_LIMIT", 500)),
             page_size=max(1, min(500, _env_int("QUIVER_DATA_PAGE_SIZE", 100))),
+            max_pages_per_request=max(0, _env_int("QUIVER_DATA_MAX_PAGES_PER_REQUEST", 0)),
             sec13f_today_only=_env_bool("QUIVER_DATA_SEC13F_TODAY_ONLY", True),
             postgres_dsn=_env_text("POSTGRES_DSN") or None,
         )

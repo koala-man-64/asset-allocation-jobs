@@ -84,6 +84,8 @@ properties:
         value: ${QUIVER_DATA_SYMBOL_LIMIT}
       - name: QUIVER_DATA_PAGE_SIZE
         value: ${QUIVER_DATA_PAGE_SIZE}
+      - name: QUIVER_DATA_MAX_PAGES_PER_REQUEST
+        value: ${QUIVER_DATA_MAX_PAGES_PER_REQUEST}
       - name: QUIVER_DATA_SEC13F_TODAY_ONLY
         value: ${QUIVER_DATA_SEC13F_TODAY_ONLY}
       image: ${JOB_IMAGE}

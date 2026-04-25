@@ -319,6 +319,7 @@ def test_quiver_bronze_manifests_define_mode_and_runtime_envs() -> None:
             "QUIVER_DATA_HISTORICAL_BATCH_SIZE",
             "QUIVER_DATA_SYMBOL_LIMIT",
             "QUIVER_DATA_PAGE_SIZE",
+            "QUIVER_DATA_MAX_PAGES_PER_REQUEST",
             "QUIVER_DATA_SEC13F_TODAY_ONLY",
         ):
             assert f"name: {required_name}" in text, f"{manifest_name} missing {required_name}"

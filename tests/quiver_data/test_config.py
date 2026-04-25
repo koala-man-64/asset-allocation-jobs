@@ -11,6 +11,7 @@ def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.Mo
     monkeypatch.delenv("QUIVER_DATA_HISTORICAL_BATCH_SIZE", raising=False)
     monkeypatch.delenv("QUIVER_DATA_SYMBOL_LIMIT", raising=False)
     monkeypatch.delenv("QUIVER_DATA_PAGE_SIZE", raising=False)
+    monkeypatch.delenv("QUIVER_DATA_MAX_PAGES_PER_REQUEST", raising=False)
     monkeypatch.delenv("QUIVER_DATA_SEC13F_TODAY_ONLY", raising=False)
     monkeypatch.delenv("POSTGRES_DSN", raising=False)
 
@@ -21,8 +22,17 @@ def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.Mo
     assert config.historical_batch_size == 20
     assert config.symbol_limit == 500
     assert config.page_size == 100
+    assert config.max_pages_per_request == 0
     assert config.sec13f_today_only is True
     assert config.postgres_dsn is None
+
+
+def test_quiver_data_config_reads_positive_max_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("QUIVER_DATA_MAX_PAGES_PER_REQUEST", "25")
+
+    config = QuiverDataConfig.from_env()
+
+    assert config.max_pages_per_request == 25
 
 
 @pytest.mark.parametrize(
@@ -32,6 +42,7 @@ def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.Mo
         ("QUIVER_DATA_HISTORICAL_BATCH_SIZE", "bad"),
         ("QUIVER_DATA_SYMBOL_LIMIT", "bad"),
         ("QUIVER_DATA_PAGE_SIZE", "bad"),
+        ("QUIVER_DATA_MAX_PAGES_PER_REQUEST", "bad"),
     ],
 )
 def test_quiver_data_config_rejects_invalid_numeric_env(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:

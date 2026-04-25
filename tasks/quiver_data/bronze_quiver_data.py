@@ -35,6 +35,31 @@ class SymbolBatchPlan:
     cursor_next: int
 
 
+@dataclass(frozen=True)
+class RequestFetchResult:
+    rows: list[dict[str, Any]]
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class QuiverSourceRequest:
+    source_dataset: str
+    dataset_family: str
+    requested_symbol: str | None
+    paginated: bool
+    fetch: Callable[[], RequestFetchResult]
+
+
+class QuiverRequestFetchError(RuntimeError):
+    def __init__(self, message: str, *, metadata: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.metadata = metadata
+
+
+class PaginationLimitExceeded(QuiverRequestFetchError):
+    pass
+
+
 def _run_id() -> str:
     execution_name = str(os.environ.get("CONTAINER_APP_JOB_EXECUTION_NAME") or "").strip()
     if execution_name:
@@ -119,18 +144,242 @@ def _persist_symbol_batch_plan(plan: SymbolBatchPlan, *, job_mode: str) -> None:
     )
 
 
-def _build_incremental_live_requests(client: Any, config: QuiverDataConfig) -> list[tuple[str, str, str | None, Callable[[], Any]]]:
+def _payload_rows(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    return [dict(item) for item in payload if isinstance(item, dict)]
+
+
+def _request_metadata(
+    request: QuiverSourceRequest,
+    *,
+    pages_fetched: int,
+    rows_fetched: int,
+    stop_reason: str,
+    cap_hit: bool = False,
+    failed_page: int | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "sourceDataset": request.source_dataset,
+        "datasetFamily": request.dataset_family,
+        "requestedSymbol": request.requested_symbol,
+        "paginated": request.paginated,
+        "pagesFetched": int(pages_fetched),
+        "rowsFetched": int(rows_fetched),
+        "pageSize": None,
+        "maxPages": None,
+        "stopReason": stop_reason,
+        "capHit": bool(cap_hit),
+    }
+    if failed_page is not None:
+        metadata["failedPage"] = int(failed_page)
+    if error_type:
+        metadata["errorType"] = str(error_type)
+    if error_message:
+        metadata["errorMessage"] = str(error_message)[:240]
+    return metadata
+
+
+def _request_metadata_with_config(
+    request: QuiverSourceRequest,
+    config: QuiverDataConfig,
+    *,
+    pages_fetched: int,
+    rows_fetched: int,
+    stop_reason: str,
+    cap_hit: bool = False,
+    failed_page: int | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    metadata = _request_metadata(
+        request,
+        pages_fetched=pages_fetched,
+        rows_fetched=rows_fetched,
+        stop_reason=stop_reason,
+        cap_hit=cap_hit,
+        failed_page=failed_page,
+        error_type=error_type,
+        error_message=error_message,
+    )
+    metadata["pageSize"] = config.page_size if request.paginated else None
+    metadata["maxPages"] = config.max_pages_per_request if request.paginated else None
+    return metadata
+
+
+def _fetch_single_request(request: QuiverSourceRequest, callback: Callable[[], Any]) -> RequestFetchResult:
+    try:
+        rows = _payload_rows(callback())
+    except Exception as exc:
+        metadata = _request_metadata(
+            request,
+            pages_fetched=0,
+            rows_fetched=0,
+            stop_reason="failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        raise QuiverRequestFetchError(f"{request.source_dataset} failed: {type(exc).__name__}: {exc}", metadata=metadata) from exc
+    metadata = _request_metadata(
+        request,
+        pages_fetched=1,
+        rows_fetched=len(rows),
+        stop_reason="single_request",
+    )
+    return RequestFetchResult(rows=rows, metadata=metadata)
+
+
+def _fetch_paginated_request(
+    request: QuiverSourceRequest,
+    config: QuiverDataConfig,
+    page_callback: Callable[[int], Any],
+) -> RequestFetchResult:
+    rows: list[dict[str, Any]] = []
+    pages_fetched = 0
+    page = 1
+    while True:
+        try:
+            payload = page_callback(page)
+        except Exception as exc:
+            metadata = _request_metadata_with_config(
+                request,
+                config,
+                pages_fetched=pages_fetched,
+                rows_fetched=len(rows),
+                stop_reason="failed",
+                failed_page=page,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            raise QuiverRequestFetchError(f"{request.source_dataset} page {page} failed: {type(exc).__name__}: {exc}", metadata=metadata) from exc
+
+        page_rows = _payload_rows(payload)
+        rows.extend(page_rows)
+        pages_fetched += 1
+
+        if not isinstance(payload, list):
+            stop_reason = "non_list_payload"
+            break
+        if not page_rows:
+            stop_reason = "empty_page"
+            break
+        if len(page_rows) < config.page_size:
+            stop_reason = "short_page"
+            break
+        if config.max_pages_per_request > 0 and page >= config.max_pages_per_request:
+            metadata = _request_metadata_with_config(
+                request,
+                config,
+                pages_fetched=pages_fetched,
+                rows_fetched=len(rows),
+                stop_reason="max_pages_reached",
+                cap_hit=True,
+            )
+            raise PaginationLimitExceeded(
+                (
+                    f"{request.source_dataset} ({request.requested_symbol or 'all'}) reached "
+                    f"QUIVER_DATA_MAX_PAGES_PER_REQUEST={config.max_pages_per_request} "
+                    f"with a full page of {config.page_size} rows"
+                ),
+                metadata=metadata,
+            )
+        page += 1
+
+    metadata = _request_metadata_with_config(
+        request,
+        config,
+        pages_fetched=pages_fetched,
+        rows_fetched=len(rows),
+        stop_reason=stop_reason,
+    )
+    return RequestFetchResult(rows=rows, metadata=metadata)
+
+
+def _single_request(
+    source_dataset: str,
+    dataset_family: str,
+    requested_symbol: str | None,
+    callback: Callable[[], Any],
+) -> QuiverSourceRequest:
+    def fetch() -> RequestFetchResult:
+        return _fetch_single_request(request, callback)
+
+    request = QuiverSourceRequest(
+        source_dataset=source_dataset,
+        dataset_family=dataset_family,
+        requested_symbol=requested_symbol,
+        paginated=False,
+        fetch=fetch,
+    )
+    return request
+
+
+def _paginated_request(
+    source_dataset: str,
+    dataset_family: str,
+    requested_symbol: str | None,
+    config: QuiverDataConfig,
+    page_callback: Callable[[int], Any],
+) -> QuiverSourceRequest:
+    def fetch() -> RequestFetchResult:
+        return _fetch_paginated_request(request, config, page_callback)
+
+    request = QuiverSourceRequest(
+        source_dataset=source_dataset,
+        dataset_family=dataset_family,
+        requested_symbol=requested_symbol,
+        paginated=True,
+        fetch=fetch,
+    )
+    return request
+
+
+def _log_request_fetch(metadata: dict[str, Any]) -> None:
+    if not metadata.get("paginated"):
+        return
+    mdc.write_line(
+        "Quiver pagination summary: "
+        f"source_dataset={metadata.get('sourceDataset')} "
+        f"requested_symbol={metadata.get('requestedSymbol') or 'all'} "
+        f"pages_fetched={metadata.get('pagesFetched')} "
+        f"rows_fetched={metadata.get('rowsFetched')} "
+        f"stop_reason={metadata.get('stopReason')} "
+        f"cap_hit={str(metadata.get('capHit')).lower()}"
+    )
+
+
+def _build_incremental_live_requests(client: Any, config: QuiverDataConfig) -> list[QuiverSourceRequest]:
     return [
-        ("congress_trading_live", "political_trading", None, lambda: client.get_live_congress_trading()),
-        ("senate_trading_live", "political_trading", None, lambda: client.get_live_senate_trading()),
-        ("house_trading_live", "political_trading", None, lambda: client.get_live_house_trading()),
-        ("government_contracts_live", "government_contracts", None, lambda: client.get_live_gov_contracts()),
-        ("government_contracts_all_live", "government_contracts_all", None, lambda: client.get_live_gov_contracts_all(page=1, page_size=config.page_size)),
-        ("lobbying_live", "lobbying", None, lambda: client.get_live_lobbying(page=1, page_size=config.page_size)),
-        ("congress_holdings_live", "congress_holdings", None, lambda: client.get_live_congress_holdings()),
-        ("insiders_live_all", "insider_trading", None, lambda: client.get_live_insiders(page=1, page_size=config.page_size)),
-        ("wall_street_bets_live", "wall_street_bets", None, lambda: client.get_live_wall_street_bets()),
-        ("patents_live", "patents", None, lambda: client.get_live_patents()),
+        _single_request("congress_trading_live", "political_trading", None, lambda: client.get_live_congress_trading()),
+        _single_request("senate_trading_live", "political_trading", None, lambda: client.get_live_senate_trading()),
+        _single_request("house_trading_live", "political_trading", None, lambda: client.get_live_house_trading()),
+        _single_request("government_contracts_live", "government_contracts", None, lambda: client.get_live_gov_contracts()),
+        _paginated_request(
+            "government_contracts_all_live",
+            "government_contracts_all",
+            None,
+            config,
+            lambda page: client.get_live_gov_contracts_all(page=page, page_size=config.page_size),
+        ),
+        _paginated_request(
+            "lobbying_live",
+            "lobbying",
+            None,
+            config,
+            lambda page: client.get_live_lobbying(page=page, page_size=config.page_size),
+        ),
+        _single_request("congress_holdings_live", "congress_holdings", None, lambda: client.get_live_congress_holdings()),
+        _paginated_request(
+            "insiders_live_all",
+            "insider_trading",
+            None,
+            config,
+            lambda page: client.get_live_insiders(page=page, page_size=config.page_size),
+        ),
+        _single_request("wall_street_bets_live", "wall_street_bets", None, lambda: client.get_live_wall_street_bets()),
+        _single_request("patents_live", "patents", None, lambda: client.get_live_patents()),
     ]
 
 
@@ -139,15 +388,47 @@ def _build_incremental_ticker_requests(
     config: QuiverDataConfig,
     *,
     selected_symbols: tuple[str, ...],
-) -> list[tuple[str, str, str | None, Callable[[], Any]]]:
-    requests: list[tuple[str, str, str | None, Callable[[], Any]]] = []
+) -> list[QuiverSourceRequest]:
+    requests: list[QuiverSourceRequest] = []
     for ticker in selected_symbols:
         requests.extend(
             [
-                ("insiders_live", "insider_trading", ticker, lambda ticker=ticker: client.get_live_insiders(ticker=ticker, page=1, page_size=config.page_size)),
-                ("sec13f_live", "institutional_holdings", ticker, lambda ticker=ticker: client.get_live_sec13f(ticker=ticker, today=config.sec13f_today_only, page=1, page_size=config.page_size)),
-                ("sec13fchanges_live", "institutional_holding_changes", ticker, lambda ticker=ticker: client.get_live_sec13f_changes(ticker=ticker, today=config.sec13f_today_only, page=1, page_size=config.page_size)),
-                ("etf_holdings_live", "etf_holdings", ticker, lambda ticker=ticker: client.get_live_etf_holdings(ticker=ticker)),
+                _paginated_request(
+                    "insiders_live",
+                    "insider_trading",
+                    ticker,
+                    config,
+                    lambda page, ticker=ticker: client.get_live_insiders(
+                        ticker=ticker,
+                        page=page,
+                        page_size=config.page_size,
+                    ),
+                ),
+                _paginated_request(
+                    "sec13f_live",
+                    "institutional_holdings",
+                    ticker,
+                    config,
+                    lambda page, ticker=ticker: client.get_live_sec13f(
+                        ticker=ticker,
+                        today=config.sec13f_today_only,
+                        page=page,
+                        page_size=config.page_size,
+                    ),
+                ),
+                _paginated_request(
+                    "sec13fchanges_live",
+                    "institutional_holding_changes",
+                    ticker,
+                    config,
+                    lambda page, ticker=ticker: client.get_live_sec13f_changes(
+                        ticker=ticker,
+                        today=config.sec13f_today_only,
+                        page=page,
+                        page_size=config.page_size,
+                    ),
+                ),
+                _single_request("etf_holdings_live", "etf_holdings", ticker, lambda ticker=ticker: client.get_live_etf_holdings(ticker=ticker)),
             ]
         )
     return requests
@@ -158,21 +439,61 @@ def _build_historical_backfill_requests(
     *,
     selected_symbols: tuple[str, ...],
     config: QuiverDataConfig,
-) -> list[tuple[str, str, str | None, Callable[[], Any]]]:
-    requests: list[tuple[str, str, str | None, Callable[[], Any]]] = [
-        ("wall_street_bets_historical_all", "wall_street_bets", None, lambda: client.get_live_wall_street_bets(count_all=True)),
+) -> list[QuiverSourceRequest]:
+    requests: list[QuiverSourceRequest] = [
+        _single_request("wall_street_bets_historical_all", "wall_street_bets", None, lambda: client.get_live_wall_street_bets(count_all=True)),
     ]
     for ticker in selected_symbols:
         requests.extend(
             [
-                ("congress_trading_historical", "political_trading", ticker, lambda ticker=ticker: client.get_historical_congress_trading(ticker=ticker)),
-                ("senate_trading_historical", "political_trading", ticker, lambda ticker=ticker: client.get_historical_senate_trading(ticker=ticker)),
-                ("house_trading_historical", "political_trading", ticker, lambda ticker=ticker: client.get_historical_house_trading(ticker=ticker)),
-                ("government_contracts_historical", "government_contracts", ticker, lambda ticker=ticker: client.get_historical_gov_contracts(ticker=ticker)),
-                ("government_contracts_all_historical", "government_contracts_all", ticker, lambda ticker=ticker: client.get_historical_gov_contracts_all(ticker=ticker)),
-                ("lobbying_historical", "lobbying", ticker, lambda ticker=ticker: client.get_historical_lobbying(ticker=ticker, page=1, page_size=config.page_size)),
-                ("wall_street_bets_historical", "wall_street_bets", ticker, lambda ticker=ticker: client.get_historical_wall_street_bets(ticker=ticker)),
-                ("patents_historical", "patents", ticker, lambda ticker=ticker: client.get_historical_patents(ticker=ticker)),
+                _single_request(
+                    "congress_trading_historical",
+                    "political_trading",
+                    ticker,
+                    lambda ticker=ticker: client.get_historical_congress_trading(ticker=ticker),
+                ),
+                _single_request(
+                    "senate_trading_historical",
+                    "political_trading",
+                    ticker,
+                    lambda ticker=ticker: client.get_historical_senate_trading(ticker=ticker),
+                ),
+                _single_request(
+                    "house_trading_historical",
+                    "political_trading",
+                    ticker,
+                    lambda ticker=ticker: client.get_historical_house_trading(ticker=ticker),
+                ),
+                _single_request(
+                    "government_contracts_historical",
+                    "government_contracts",
+                    ticker,
+                    lambda ticker=ticker: client.get_historical_gov_contracts(ticker=ticker),
+                ),
+                _single_request(
+                    "government_contracts_all_historical",
+                    "government_contracts_all",
+                    ticker,
+                    lambda ticker=ticker: client.get_historical_gov_contracts_all(ticker=ticker),
+                ),
+                _paginated_request(
+                    "lobbying_historical",
+                    "lobbying",
+                    ticker,
+                    config,
+                    lambda page, ticker=ticker: client.get_historical_lobbying(
+                        ticker=ticker,
+                        page=page,
+                        page_size=config.page_size,
+                    ),
+                ),
+                _single_request(
+                    "wall_street_bets_historical",
+                    "wall_street_bets",
+                    ticker,
+                    lambda ticker=ticker: client.get_historical_wall_street_bets(ticker=ticker),
+                ),
+                _single_request("patents_historical", "patents", ticker, lambda ticker=ticker: client.get_historical_patents(ticker=ticker)),
             ]
         )
     return requests
@@ -183,7 +504,7 @@ def _build_requests(
     config: QuiverDataConfig,
     *,
     selected_symbols: tuple[str, ...] | None = None,
-) -> list[tuple[str, str, str | None, Callable[[], Any]]]:
+) -> list[QuiverSourceRequest]:
     symbols = tuple(selected_symbols or ())
     if config.job_mode == "historical_backfill":
         return _build_historical_backfill_requests(client, selected_symbols=symbols, config=config)
@@ -207,25 +528,49 @@ def main() -> int:
     )
     symbol_batch_plan = _load_symbol_batch_plan(config)
     batch_paths: list[str] = []
+    request_fetches: list[dict[str, Any]] = []
     warnings: list[str] = []
     failures: list[str] = []
 
     try:
-        for source_dataset, dataset_family, requested_symbol, callback in _build_requests(
+        for request in _build_requests(
             gateway_client,
             config,
             selected_symbols=symbol_batch_plan.selected_symbols,
         ):
             try:
-                payload = callback()
-                rows = payload if isinstance(payload, list) else []
-                batches = bucket_rows(source_dataset, dataset_family, rows, requested_symbol=requested_symbol)
+                result = request.fetch()
+                request_fetches.append(result.metadata)
+                _log_request_fetch(result.metadata)
+                batches = bucket_rows(
+                    request.source_dataset,
+                    request.dataset_family,
+                    result.rows,
+                    requested_symbol=request.requested_symbol,
+                )
                 for bucket, batch in batches.items():
-                    path = constants.bronze_raw_path(run_id, source_dataset, bucket)
+                    path = constants.bronze_raw_path(run_id, request.source_dataset, bucket)
                     mdc.save_json_content(batch, path, client=bronze_client)
                     batch_paths.append(path)
+            except QuiverRequestFetchError as exc:
+                request_fetches.append(dict(exc.metadata))
+                _log_request_fetch(exc.metadata)
+                message = f"{request.source_dataset} ({request.requested_symbol or 'all'}) failed: {type(exc).__name__}: {exc}"
+                mdc.write_warning(message)
+                failures.append(message)
             except Exception as exc:
-                message = f"{source_dataset} ({requested_symbol or 'all'}) failed: {type(exc).__name__}: {exc}"
+                metadata = _request_metadata_with_config(
+                    request,
+                    config,
+                    pages_fetched=0,
+                    rows_fetched=0,
+                    stop_reason="failed",
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
+                request_fetches.append(metadata)
+                _log_request_fetch(metadata)
+                message = f"{request.source_dataset} ({request.requested_symbol or 'all'}) failed: {type(exc).__name__}: {exc}"
                 mdc.write_warning(message)
                 failures.append(message)
     finally:
@@ -243,6 +588,7 @@ def main() -> int:
         "batchPaths": batch_paths,
         "warnings": warnings,
         "failures": failures,
+        "requestFetches": request_fetches,
         "selectedSymbols": list(symbol_batch_plan.selected_symbols),
         "universeSymbolCount": len(symbol_batch_plan.universe_symbols),
         "symbolBatchSize": symbol_batch_plan.batch_size,

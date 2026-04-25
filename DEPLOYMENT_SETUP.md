@@ -111,6 +111,7 @@ Quiver-specific deploy vars:
 - `QUIVER_DATA_HISTORICAL_BATCH_SIZE=20`
 - `QUIVER_DATA_SYMBOL_LIMIT=500`
 - `QUIVER_DATA_PAGE_SIZE=100`
+- `QUIVER_DATA_MAX_PAGES_PER_REQUEST=0`
 - `QUIVER_DATA_SEC13F_TODAY_ONLY=true`
 
 Quiver bronze requires `POSTGRES_DSN` because the symbol universe is resolved directly from `core.symbols`, not from `/api/data/symbols`.
