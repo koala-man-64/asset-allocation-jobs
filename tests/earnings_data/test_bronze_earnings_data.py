@@ -495,7 +495,7 @@ def test_main_async_logs_invalid_payload_preview(unique_ticker):
 
             exit_code = await bronze.main_async()
 
-        assert exit_code == 0
+        assert exit_code == 1
         assert mock_record_invalid.call_count == 1
         assert mock_record_invalid.call_args.kwargs["symbol"] == symbol
         mock_list_manager.add_to_blacklist.assert_not_called()
@@ -697,7 +697,7 @@ def test_main_async_promoted_reprobe_still_invalid_updates_marker(unique_ticker)
 
             exit_code = await bronze.main_async()
 
-        assert exit_code == 0
+        assert exit_code == 1
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["outcome"] == "still_invalid_symbol"
         mock_clear.assert_not_called()
@@ -906,7 +906,7 @@ def test_main_async_logs_invalid_payload_detail_preview_when_payload_missing(uni
 
             exit_code = await bronze.main_async()
 
-        assert exit_code == 0
+        assert exit_code == 1
         mock_record_invalid.assert_called_once()
         mock_list_manager.add_to_blacklist.assert_not_called()
         warning_messages = [call.args[0] for call in mock_write_warning.call_args_list if call.args]
@@ -986,6 +986,151 @@ def test_main_async_transient_gateway_errors_do_not_record_invalid_candidates(un
         assert exit_code == 1
         mock_record_invalid.assert_not_called()
         mock_list_manager.add_to_blacklist.assert_not_called()
+
+    asyncio.run(run_test())
+
+
+def test_main_async_empty_listing_status_fails_without_active_publish():
+    async def run_test():
+        with patch(
+            "tasks.earnings_data.bronze_earnings_data._validate_environment"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": []}),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.AlphaVantageGatewayClient.from_env"
+        ) as mock_from_env, patch(
+            "tasks.earnings_data.bronze_earnings_data._write_alpha26_earnings_buckets"
+        ) as mock_write, patch(
+            "tasks.earnings_data.bronze_earnings_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_error"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_line"
+        ):
+            mock_list_manager.is_blacklisted.return_value = False
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 1
+        mock_from_env.assert_not_called()
+        mock_write.assert_not_called()
+
+    asyncio.run(run_test())
+
+
+def test_main_async_calendar_failure_degrades_when_historical_output_is_complete(unique_ticker):
+    symbol = unique_ticker
+    mock_av = MagicMock()
+    mock_av.get_earnings_calendar_csv.side_effect = bronze.AlphaVantageGatewayError(
+        "calendar unavailable",
+        status_code=503,
+        payload={"path": "/api/providers/alpha-vantage/earnings-calendar"},
+    )
+
+    async def run_test():
+        with patch(
+            "tasks.earnings_data.bronze_earnings_data._validate_environment"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.resolve_backfill_start_date",
+            return_value=None,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.AlphaVantageGatewayClient.from_env",
+            return_value=mock_av,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.fetch_and_save_raw",
+            return_value=True,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data._write_alpha26_earnings_buckets",
+            return_value=(1, "earnings-data/buckets/index.parquet"),
+        ) as mock_write, patch(
+            "tasks.earnings_data.bronze_earnings_data._delete_flat_symbol_blobs",
+            return_value=0,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_warning"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_line"
+        ):
+            mock_list_manager.is_blacklisted.return_value = False
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        mock_write.assert_called_once()
+
+    asyncio.run(run_test())
+
+
+def test_main_async_calendar_failure_blocks_publish_when_history_is_incomplete(unique_ticker):
+    symbol = unique_ticker
+    mock_av = MagicMock()
+    mock_av.get_earnings_calendar_csv.side_effect = bronze.AlphaVantageGatewayError(
+        "calendar unavailable",
+        status_code=503,
+        payload={"path": "/api/providers/alpha-vantage/earnings-calendar"},
+    )
+
+    async def run_test():
+        with patch(
+            "tasks.earnings_data.bronze_earnings_data._validate_environment"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [symbol]}),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.resolve_backfill_start_date",
+            return_value=None,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.AlphaVantageGatewayClient.from_env",
+            return_value=mock_av,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.fetch_and_save_raw",
+            side_effect=bronze.BronzeCoverageUnavailableError("no_earnings_records"),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data._write_alpha26_earnings_buckets"
+        ) as mock_write, patch(
+            "tasks.earnings_data.bronze_earnings_data._delete_flat_symbol_blobs",
+            return_value=0,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_warning"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_error"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_line"
+        ):
+            mock_list_manager.is_blacklisted.return_value = False
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 1
+        mock_write.assert_not_called()
 
     asyncio.run(run_test())
 

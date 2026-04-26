@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
@@ -40,6 +41,30 @@ class RawSourceBatch:
 
 class SourceFetchError(RuntimeError):
     pass
+
+
+def _sanitize_issue_detail(value: object, *, limit: int = 220) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    if not text:
+        return ""
+    text = re.sub(r"https?://\S+", "<url>", text)
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|apikey|token|secret|password|authorization)=([^\s&]+)",
+        r"\1=<redacted>",
+        text,
+    )
+    text = re.sub(r"(?i)(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 <redacted>", text)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+def _source_failure_message(source_name: str, exc: BaseException) -> str:
+    detail = _sanitize_issue_detail(exc)
+    if detail:
+        return f"{source_name}: {type(exc).__name__}: {detail}"
+    return f"{source_name}: {type(exc).__name__}"
 
 
 def _utc_now(now: datetime | None = None) -> datetime:
@@ -418,7 +443,7 @@ def fetch_requested_sources(
                 f"economic_catalyst_source_fetch source={source_name} status=ok batches={len(source_batches)}"
             )
         except Exception as exc:
-            message = f"{source_name}: {type(exc).__name__}: {exc}"
+            message = _source_failure_message(source_name, exc)
             failures.append(message)
-            mdc.write_error(f"Economic catalyst source fetch failed: {message}")
+            mdc.write_warning(f"Economic catalyst source fetch failed: {message}")
     return batches, warnings, failures

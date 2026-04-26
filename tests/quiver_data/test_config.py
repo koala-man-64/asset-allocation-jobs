@@ -6,6 +6,7 @@ from tasks.quiver_data.config import QuiverDataConfig
 
 
 def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("QUIVER_DATA_ENABLED", raising=False)
     monkeypatch.delenv("QUIVER_DATA_JOB_MODE", raising=False)
     monkeypatch.delenv("QUIVER_DATA_TICKER_BATCH_SIZE", raising=False)
     monkeypatch.delenv("QUIVER_DATA_HISTORICAL_BATCH_SIZE", raising=False)
@@ -17,6 +18,7 @@ def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.Mo
 
     config = QuiverDataConfig.from_env()
 
+    assert config.enabled is False
     assert config.job_mode == "incremental"
     assert config.ticker_batch_size == 50
     assert config.historical_batch_size == 20
@@ -29,9 +31,11 @@ def test_quiver_data_config_defaults_are_rollout_defaults(monkeypatch: pytest.Mo
 
 def test_quiver_data_config_reads_positive_max_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("QUIVER_DATA_MAX_PAGES_PER_REQUEST", "25")
+    monkeypatch.setenv("QUIVER_DATA_ENABLED", "true")
 
     config = QuiverDataConfig.from_env()
 
+    assert config.enabled is True
     assert config.max_pages_per_request == 25
 
 

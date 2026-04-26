@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from tasks.quiver_data import bronze_quiver_data as bronze
 from tasks.quiver_data import constants
 from tasks.quiver_data.bronze_quiver_data import PaginationLimitExceeded, QuiverSourceRequest, _build_requests, plan_symbol_batch
 from tasks.quiver_data.config import QuiverDataConfig
@@ -91,6 +92,7 @@ def _config(**overrides) -> QuiverDataConfig:
         "bronze_container": "bronze",
         "silver_container": "silver",
         "gold_container": "gold",
+        "enabled": True,
         "job_mode": "incremental",
         "ticker_batch_size": 2,
         "historical_batch_size": 1,
@@ -241,3 +243,31 @@ def test_plan_symbol_batch_uses_historical_batch_size_for_backfill_mode() -> Non
 
     assert plan.batch_size == 2
     assert plan.selected_symbols == ("AAPL", "AMZN")
+
+
+def test_main_disabled_quiver_exits_before_client_or_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _config(enabled=False)
+
+    monkeypatch.setattr(bronze.mdc, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(bronze.mdc, "write_line", lambda _message: None)
+    monkeypatch.setattr(
+        bronze.mdc,
+        "get_storage_client",
+        lambda _container: (_ for _ in ()).throw(AssertionError("storage client should not be created")),
+    )
+    monkeypatch.setattr(
+        bronze,
+        "QuiverGatewayClient",
+        type(
+            "ForbiddenClient",
+            (),
+            {"from_env": staticmethod(lambda: (_ for _ in ()).throw(AssertionError("client should not be created")))},
+        ),
+    )
+    monkeypatch.setattr(
+        bronze,
+        "write_domain_artifact",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("domain artifact should not be written")),
+    )
+
+    assert bronze.main(config) == 0
