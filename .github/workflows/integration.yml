@@ -12,15 +12,11 @@ on:
         options:
           - control-plane-compat
           - runtime-common-compat
-          - adopt-contracts
+          - contracts-compat
       ref:
         description: Candidate ref or SHA to validate
         required: false
         default: main
-        type: string
-      contracts_version:
-        description: Contracts package version to pin
-        required: false
         type: string
   repository_dispatch:
     types:
@@ -187,67 +183,70 @@ jobs:
             echo "- Result: passed"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-  adopt-contracts:
-    name: adopt-contracts
-    if: (github.event_name == 'repository_dispatch' && github.event.action == 'contracts_released') || (github.event_name == 'workflow_dispatch' && inputs.operation == 'adopt-contracts')
+  contracts-compat:
+    name: contracts-compat
+    if: (github.event_name == 'repository_dispatch' && github.event.action == 'contracts_released') || (github.event_name == 'workflow_dispatch' && inputs.operation == 'contracts-compat')
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+    env:
+      DISPATCH_CONTRACTS_SHA: ${{ github.event.client_payload.contracts_sha }}
+      DISPATCH_CONTRACTS_REF: ${{ github.event.client_payload.contracts_ref }}
     steps:
-      - name: Resolve adoption inputs
-        id: inputs
+      - name: Resolve contracts ref
+        id: contracts
         shell: bash
         run: |
           set -euo pipefail
-          contracts_version="${{ inputs.contracts_version }}"
-          target_branch="${GITHUB_REF_NAME}"
+          ref="${{ inputs.ref }}"
           if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ]; then
-            contracts_version="${{ github.event.client_payload.contracts_version }}"
-            target_branch="${{ github.event.repository.default_branch }}"
+            ref="${DISPATCH_CONTRACTS_SHA:-${DISPATCH_CONTRACTS_REF}}"
           fi
-          : "${contracts_version:?contracts_version is required either as workflow input or repository_dispatch payload}"
-          {
-            echo "contracts_version=${contracts_version}"
-            echo "target_branch=${target_branch}"
-          } >> "$GITHUB_OUTPUT"
+          ref="${ref:-main}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout jobs repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ steps.inputs.outputs.target_branch }}
-          fetch-depth: 0
+          path: asset-allocation-jobs
+
+      - name: Checkout contracts repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ vars.CONTRACTS_REPOSITORY || format('{0}/asset-allocation-contracts', github.repository_owner) }}
+          ref: ${{ steps.contracts.outputs.ref }}
+          path: asset-allocation-contracts
 
       - name: Set up Python
-        uses: ./.github/actions/setup-python-jobs
+        uses: ./asset-allocation-jobs/.github/actions/setup-python-jobs
         with:
           python-version: "3.14"
+          python-package-index-url: ${{ secrets.PYTHON_PACKAGE_INDEX_URL }}
+          python-package-extra-index-url: ${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}
 
-      - name: Update contracts dependency manifests
+      - name: Install compatibility dependencies
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/workflows/pin_contracts_version.py --contracts-version "${{ steps.inputs.outputs.contracts_version }}"
+          python asset-allocation-jobs/scripts/workflows/install_jobs_dependencies.py \
+            --jobs-path asset-allocation-jobs \
+            --requirements asset-allocation-jobs/requirements.lock.txt \
+            --include-dev-lockfile \
+            --editable asset-allocation-contracts/python \
+            --editable-no-deps asset-allocation-jobs \
+            --shared-dependency-exclude asset-allocation-contracts
 
-      - name: Verify dependency contract tests
+      - name: Run jobs contracts compatibility suite
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install pytest
-          python -m pytest tests/test_multirepo_dependency_contract.py -q
+          cd asset-allocation-jobs
+          python scripts/run_quality_gate.py test-fast
 
-      - name: Commit pinned contracts version
-        env:
-          CONTRACTS_VERSION: ${{ steps.inputs.outputs.contracts_version }}
+      - name: Write compatibility summary
         shell: bash
         run: |
-          set -euo pipefail
-          if git diff --quiet -- pyproject.toml requirements.txt requirements.lock.txt; then
-            echo "Contracts version already pinned to ${CONTRACTS_VERSION}."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml requirements.txt requirements.lock.txt
-          git commit -m "chore: adopt contracts ${CONTRACTS_VERSION}"
-          git push origin HEAD:${{ steps.inputs.outputs.target_branch }}
+          {
+            echo "## Jobs contracts compatibility"
+            echo ""
+            echo "- Contracts ref: \`${{ steps.contracts.outputs.ref }}\`"
+            echo "- Result: passed"
+          } >> "${GITHUB_STEP_SUMMARY}"

@@ -40,17 +40,32 @@ def test_install_jobs_dependencies_excludes_selected_shared_package(tmp_path: Pa
     assert specs == ["asset-allocation-contracts==1.2.3"]
 
 
-def test_pin_contracts_version_updates_dependency_manifests(tmp_path: Path) -> None:
-    module = load_module("scripts/workflows/pin_contracts_version.py", "pin_contracts_version")
-    (tmp_path / "pyproject.toml").write_text('asset-allocation-contracts==0.1.0"\n', encoding="utf-8")
-    (tmp_path / "requirements.txt").write_text("asset-allocation-contracts==0.1.0\n", encoding="utf-8")
-    (tmp_path / "requirements.lock.txt").write_text("asset-allocation-contracts==0.1.0\n", encoding="utf-8")
+def test_resolve_shared_versions_uses_latest_compatible_versions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = load_module("scripts/workflows/resolve_shared_versions.py", "resolve_shared_versions")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "\n".join(
+            [
+                "[project]",
+                'version = "0.2.0"',
+                'dependencies = ["asset-allocation-contracts>=1.1.0,<2.0.0", "asset-allocation-runtime-common==2.0.0"]',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
-    module.pin_contracts_version(repo_root=tmp_path, contracts_version="9.9.9")
+    monkeypatch.setattr(
+        module,
+        "list_published_versions",
+        lambda package_name: ["2.0.0", "1.2.0", "1.1.0"] if package_name == "asset-allocation-contracts" else ["2.0.0"],
+    )
 
-    assert 'asset-allocation-contracts==9.9.9"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert "asset-allocation-contracts==9.9.9" in (tmp_path / "requirements.txt").read_text(encoding="utf-8")
-    assert "asset-allocation-contracts==9.9.9" in (tmp_path / "requirements.lock.txt").read_text(encoding="utf-8")
+    project_version, specs = module.load_shared_dependency_specs(pyproject)
+
+    assert project_version == "0.2.0"
+    assert module.resolve_version(specs["asset-allocation-contracts"], "") == "1.2.0"
+    assert module.resolve_version(specs["asset-allocation-runtime-common"], "") == "2.0.0"
 
 
 def test_write_release_manifest_writes_expected_shape(tmp_path: Path) -> None:

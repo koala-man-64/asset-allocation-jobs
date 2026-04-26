@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tomllib
+from packaging.requirements import Requirement
 
 
 def repo_root() -> Path:
@@ -13,25 +14,23 @@ def shared_dependencies() -> dict[str, str]:
     shared: dict[str, str] = {}
     for dependency in pyproject["project"]["dependencies"]:
         if dependency.startswith("asset-allocation-"):
-            name, version = dependency.split("==", 1)
-            shared[name] = version
+            shared[Requirement(dependency).name] = dependency
     return shared
 
 
-def test_pyproject_pins_shared_packages() -> None:
+def test_pyproject_declares_shared_package_specs() -> None:
     shared = shared_dependencies()
     assert shared["asset-allocation-contracts"]
     assert shared["asset-allocation-runtime-common"]
 
 
-def test_python_dependency_manifests_stay_in_sync() -> None:
-    shared = shared_dependencies()
+def test_runtime_requirement_manifests_exclude_first_party_shared_packages() -> None:
     requirements = (repo_root() / "requirements.txt").read_text(encoding="utf-8")
     lockfile = (repo_root() / "requirements.lock.txt").read_text(encoding="utf-8")
-    assert f"asset-allocation-contracts=={shared['asset-allocation-contracts']}" in requirements
-    assert f"asset-allocation-contracts=={shared['asset-allocation-contracts']}" in lockfile
-    assert f"asset-allocation-runtime-common=={shared['asset-allocation-runtime-common']}" in requirements
-    assert f"asset-allocation-runtime-common=={shared['asset-allocation-runtime-common']}" in lockfile
+    assert "asset-allocation-contracts" not in requirements
+    assert "asset-allocation-contracts" not in lockfile
+    assert "asset-allocation-runtime-common" not in requirements
+    assert "asset-allocation-runtime-common" not in lockfile
 
 
 def test_jobs_dockerfile_does_not_copy_sibling_repos() -> None:
@@ -57,11 +56,12 @@ def test_quality_and_release_workflows_do_not_checkout_sibling_repos() -> None:
         assert '${{ steps.shared.outputs.runtime_common_version }}' in text
 
 
-def test_integration_workflow_is_the_only_place_cross_repo_checkout_and_contract_adoption_are_allowed() -> None:
+def test_integration_workflow_is_the_only_place_cross_repo_checkout_for_contracts_is_allowed() -> None:
     integration = (repo_root() / ".github" / "workflows" / "integration.yml").read_text(encoding="utf-8")
     assert "Checkout control-plane repository" in integration
     assert "Checkout runtime-common repository" in integration
+    assert "Checkout contracts repository" in integration
     assert "contracts_released" in integration
-    assert "contents: write" in integration
     assert "requirements.lock.txt" in integration
-    assert "git push origin HEAD:${{ steps.inputs.outputs.target_branch }}" in integration
+    assert "git push origin HEAD:${{ steps.inputs.outputs.target_branch }}" not in integration
+    assert "contracts-compat" in integration

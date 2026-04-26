@@ -6,6 +6,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      contracts_version_override:
+        description: Optional exact contracts version override
+        required: false
+        type: string
+      runtime_common_version_override:
+        description: Optional exact runtime-common version override
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -46,10 +55,15 @@ jobs:
       - name: Resolve shared package versions
         id: shared
         shell: bash
+        env:
+          PIP_INDEX_URL: ${{ secrets.PYTHON_PACKAGE_INDEX_URL }}
+          PIP_EXTRA_INDEX_URL: ${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}
         run: |
           set -euo pipefail
           cd asset-allocation-jobs
-          python scripts/workflows/resolve_shared_versions.py >> "$GITHUB_OUTPUT"
+          python scripts/workflows/resolve_shared_versions.py \
+            --contracts-override "${{ inputs.contracts_version_override }}" \
+            --runtime-common-override "${{ inputs.runtime_common_version_override }}" >> "$GITHUB_OUTPUT"
 
       - name: Azure login
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2

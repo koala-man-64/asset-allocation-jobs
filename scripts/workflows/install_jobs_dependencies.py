@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tomllib
 
+from packaging.requirements import Requirement
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Install repo and shared-package dependencies for workflow jobs.")
@@ -52,7 +54,7 @@ def shared_dependency_specs(pyproject_path: Path, excluded: set[str] | None = No
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     specs: list[str] = []
     for dependency in pyproject["project"]["dependencies"]:
-        name = dependency.split("==", 1)[0]
+        name = Requirement(dependency).name
         if name.startswith("asset-allocation-") and name not in excluded_names:
             specs.append(dependency)
     return specs
