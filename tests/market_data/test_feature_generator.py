@@ -63,10 +63,31 @@ def test_compute_features_adds_expected_columns():
         "volume_pct_rank_252d",
         "donchian_high_20d",
         "donchian_low_55d",
+        "dist_prev_week_high_atr",
+        "dist_prev_week_low_atr",
+        "dist_prev_month_high_atr",
+        "dist_prev_month_low_atr",
+        "position_in_20d_range",
+        "position_in_55d_range",
         "sr_support_1_mid",
         "sr_resistance_1_mid",
         "fib_swing_direction",
         "fib_level_618",
+        "swept_sr_resistance_1",
+        "swept_sr_support_1",
+        "bearish_sweep_magnitude_atr",
+        "bullish_sweep_magnitude_atr",
+        "bearish_sweep_reclaim_frac",
+        "bullish_sweep_reclaim_frac",
+        "bars_since_bearish_sweep",
+        "bars_since_bullish_sweep",
+        "bearish_confirm_after_sweep",
+        "bullish_confirm_after_sweep",
+        "amihud_20d",
+        "amihud_z_252d",
+        "dollar_volume_20d",
+        "dollar_volume_z_252d",
+        "liquidity_stress_score",
         "pat_doji",
         "atr_14d",
         "ha_open",
@@ -131,3 +152,21 @@ def test_compute_features_does_not_emit_internal_helper_columns():
 def test_compute_features_requires_expected_columns():
     with pytest.raises(ValueError, match="Missing required columns"):
         compute_features(pd.DataFrame({"Date": ["2020-01-01"], "Close": [1.0]}))
+
+
+def test_compute_features_liquidity_features_handle_zero_volume_without_inf() -> None:
+    df = _make_market_df(300)
+    df.loc[280:, "Volume"] = 0.0
+
+    out = compute_features(df)
+
+    assert out.iloc[-1]["dollar_volume_20d"] == pytest.approx(0.0)
+    for column in (
+        "amihud_20d",
+        "amihud_z_252d",
+        "dollar_volume_20d",
+        "dollar_volume_z_252d",
+        "liquidity_stress_score",
+    ):
+        finite = out[column].dropna()
+        assert np.isfinite(finite).all(), f"{column} emitted non-finite values"
