@@ -15,6 +15,7 @@ _PUBLIC_NAMES = (
     "PortfolioAccountListResponse",
     "PortfolioAccountRevision",
     "PortfolioAccountUpsertRequest",
+    "PortfolioAllocationMode",
     "PortfolioAlert",
     "PortfolioAlertListResponse",
     "PortfolioAlertSeverity",
