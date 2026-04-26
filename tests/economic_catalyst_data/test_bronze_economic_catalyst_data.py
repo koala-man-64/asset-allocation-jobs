@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from tasks.economic_catalyst_data.bronze_economic_catalyst_data import _selected_sources
+from tasks.economic_catalyst_data import bronze_economic_catalyst_data as bronze
 from tasks.economic_catalyst_data.config import EconomicCatalystConfig, NasdaqTableConfig
+from tasks.economic_catalyst_data.sources import RawSourceBatch
+
+_selected_sources = bronze._selected_sources
 
 
 def _config() -> EconomicCatalystConfig:
@@ -62,3 +65,93 @@ def test_selected_sources_limits_hot_window_runs_to_fast_sources() -> None:
         "alpaca_news",
         "alpha_vantage_news",
     )
+
+
+def test_source_failure_decision_warns_for_optional_outage_when_source_succeeds() -> None:
+    should_fail, reason, failed, succeeded = bronze._source_failure_decision(
+        selected_sources=("fred_releases", "massive_news", "nasdaq_tables"),
+        failures=["nasdaq_tables: RuntimeError: entitlement denied"],
+    )
+
+    assert should_fail is False
+    assert reason == "partial_source_outage"
+    assert failed == {"nasdaq_tables"}
+    assert succeeded == {"fred_releases", "massive_news"}
+
+
+def test_source_failure_decision_fails_when_required_sources_all_fail() -> None:
+    should_fail, reason, failed, succeeded = bronze._source_failure_decision(
+        selected_sources=("fred_releases", "bls_release_calendar", "massive_news"),
+        failures=[
+            "fred_releases: RuntimeError: outage",
+            "bls_release_calendar: RuntimeError: outage",
+        ],
+    )
+
+    assert should_fail is True
+    assert reason == "all_required_sources_failed"
+    assert failed == {"fred_releases", "bls_release_calendar"}
+    assert succeeded == {"massive_news"}
+
+
+def test_main_downgrades_optional_source_failure_and_saves_success(monkeypatch) -> None:
+    config = _config()
+    batch = RawSourceBatch(
+        source_name="massive_news",
+        dataset_name="benzinga_news",
+        fetched_at="2026-04-18T12:00:00Z",
+        request_url="https://api.massive.com/benzinga/v2/news",
+        payload_format="json",
+        payload={"results": []},
+        metadata={},
+    )
+    manifest_payloads: list[dict[str, object]] = []
+    saved_success: list[dict[str, object]] = []
+
+    monkeypatch.setattr(bronze.mdc, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(bronze.mdc, "get_storage_client", lambda _container: object())
+    monkeypatch.setattr(bronze.mdc, "write_error", lambda _message: None)
+    monkeypatch.setattr(bronze.mdc, "write_warning", lambda _message: None)
+    monkeypatch.setattr(bronze.mdc, "write_line", lambda _message: None)
+    monkeypatch.setattr(bronze.EconomicCatalystConfig, "from_env", staticmethod(lambda: config))
+    monkeypatch.setattr(
+        bronze,
+        "fetch_requested_sources",
+        lambda *_args, **_kwargs: ([batch], [], ["nasdaq_tables: RuntimeError: entitlement denied"]),
+    )
+    monkeypatch.setattr(bronze, "_persist_source_batches", lambda **_kwargs: ["economic-catalyst/raw.json"])
+    monkeypatch.setattr(
+        bronze,
+        "_persist_manifest",
+        lambda **kwargs: manifest_payloads.append({"warnings": kwargs["warnings"], "failures": kwargs["failures"]})
+        or {"manifest": "ok"},
+    )
+    monkeypatch.setattr(bronze, "write_domain_artifact", lambda **_kwargs: None)
+    monkeypatch.setattr(bronze, "save_last_success", lambda _key, metadata: saved_success.append(dict(metadata)))
+
+    assert bronze.main() == 0
+    assert manifest_payloads[0]["failures"] == []
+    assert "optional_source_outage: nasdaq_tables: RuntimeError: entitlement denied" in manifest_payloads[0]["warnings"]
+    assert saved_success and saved_success[0]["status"] == "succeededWithWarnings"
+
+
+def test_main_does_not_save_last_success_on_failed_source_run(monkeypatch) -> None:
+    config = EconomicCatalystConfig(
+        **{**_config().__dict__, "official_sources": (), "vendor_sources": ()}
+    )
+    saved_success: list[dict[str, object]] = []
+
+    monkeypatch.setattr(bronze.mdc, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(bronze.mdc, "get_storage_client", lambda _container: object())
+    monkeypatch.setattr(bronze.mdc, "write_error", lambda _message: None)
+    monkeypatch.setattr(bronze.mdc, "write_warning", lambda _message: None)
+    monkeypatch.setattr(bronze.mdc, "write_line", lambda _message: None)
+    monkeypatch.setattr(bronze.EconomicCatalystConfig, "from_env", staticmethod(lambda: config))
+    monkeypatch.setattr(bronze, "fetch_requested_sources", lambda *_args, **_kwargs: ([], [], []))
+    monkeypatch.setattr(bronze, "_persist_source_batches", lambda **_kwargs: [])
+    monkeypatch.setattr(bronze, "_persist_manifest", lambda **_kwargs: {})
+    monkeypatch.setattr(bronze, "write_domain_artifact", lambda **_kwargs: None)
+    monkeypatch.setattr(bronze, "save_last_success", lambda _key, metadata: saved_success.append(dict(metadata)))
+
+    assert bronze.main() == 1
+    assert saved_success == []

@@ -30,9 +30,8 @@ def test_normalize_bucket_frames_preserves_nonempty_frame_identity() -> None:
     assert list(normalized["B"].columns) == list(frame.columns)
 
 
-def test_write_alpha26_bronze_bucket_writes_bucket_artifact_immediately(monkeypatch) -> None:
+def test_write_alpha26_bronze_bucket_defers_active_bucket_artifact_until_finalize(monkeypatch) -> None:
     stored_bytes: dict[str, bytes] = {}
-    artifact_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(
         publish.mdc,
@@ -43,8 +42,7 @@ def test_write_alpha26_bronze_bucket_writes_bucket_artifact_immediately(monkeypa
     monkeypatch.setattr(
         publish.domain_artifacts,
         "write_bucket_artifact",
-        lambda **kwargs: artifact_calls.append(dict(kwargs))
-        or {"artifactPath": f"metadata/{kwargs['bucket']}.json", "bucket": kwargs["bucket"]},
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("bucket artifact must be deferred")),
     )
 
     frame = _market_bucket_frame()
@@ -68,7 +66,7 @@ def test_write_alpha26_bronze_bucket_writes_bucket_artifact_immediately(monkeypa
     assert entry["bucket"] == "A"
     assert entry["size"] > 0
     assert len(stored_bytes) == 1
-    assert artifact_calls and artifact_calls[0]["df"] is frame
+    assert session.bucket_artifacts["A"]["dataPath"] == "market-data/runs/run-123/buckets/A.parquet"
     assert session.symbol_to_bucket == {"AAPL": "A"}
     assert session.total_bytes == entry["size"]
 
@@ -86,9 +84,10 @@ def test_finalize_alpha26_bronze_publish_returns_publish_result_contract(monkeyp
     )
     monkeypatch.setattr(
         publish.domain_artifacts,
-        "write_bucket_artifact",
-        lambda **kwargs: {"artifactPath": f"metadata/{kwargs['bucket']}.json", "bucket": kwargs["bucket"]},
+        "bucket_artifact_path",
+        lambda **kwargs: f"metadata/{kwargs['bucket']}.json",
     )
+    monkeypatch.setattr(publish.domain_artifacts, "root_prefix", lambda **_kwargs: "market-data")
     monkeypatch.setattr(
         publish.domain_artifacts,
         "write_domain_artifact",
@@ -152,9 +151,10 @@ def test_publish_alpha26_bronze_domain_wrapper_remains_compatible(monkeypatch) -
     )
     monkeypatch.setattr(
         publish.domain_artifacts,
-        "write_bucket_artifact",
-        lambda **kwargs: {"artifactPath": f"metadata/{kwargs['bucket']}.json", "bucket": kwargs["bucket"]},
+        "bucket_artifact_path",
+        lambda **kwargs: f"metadata/{kwargs['bucket']}.json",
     )
+    monkeypatch.setattr(publish.domain_artifacts, "root_prefix", lambda **_kwargs: "market-data")
     monkeypatch.setattr(
         publish.domain_artifacts,
         "write_domain_artifact",

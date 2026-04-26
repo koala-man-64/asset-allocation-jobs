@@ -53,6 +53,7 @@ ALPHA_VANTAGE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Alpha Vantage ti
 MASSIVE_FINANCE_FRESH_DAYS,deploy_var,var,deploy_config,true,Massive finance freshness window.
 MASSIVE_MAX_WORKERS,deploy_var,var,deploy_config,true,Massive worker concurrency.
 MASSIVE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Massive timeout.
+BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED,deploy_var,var,deploy_config,true,Opt-in flag for Alpha Vantage corporate-action enrichment in bronze market runs. Default false keeps scheduled runs Massive-only.
 ECONOMIC_CATALYST_OFFICIAL_SOURCES,deploy_var,var,deploy_config,true,Comma-separated official-source fetchers for the economic catalyst bronze job.
 ECONOMIC_CATALYST_VENDOR_SOURCES,deploy_var,var,deploy_config,true,Comma-separated vendor-source fetchers for the economic catalyst bronze job.
 ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS,deploy_var,var,deploy_config,true,Rolling structured-event replay window for economic catalyst ingestion.
@@ -69,6 +70,7 @@ ECONOMIC_CATALYST_BOJ_SCHEDULE_URL,deploy_var,var,deploy_config,true,Bank of Jap
 ECONOMIC_CATALYST_TREASURY_AUCTIONS_URL,deploy_var,var,deploy_config,true,Treasury auction calendar URL.
 ECONOMIC_CATALYST_NASDAQ_TABLES,deploy_var,var,deploy_config,true,JSON table mapping configuration for Nasdaq economic event tables.
 ECONOMIC_CATALYST_HTTP_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,HTTP timeout for economic catalyst source fetches.
+QUIVER_DATA_ENABLED,deploy_var,var,deploy_config,true,Master enable flag for Quiver bronze client and publication. Default false disables scheduled and manual bronze Quiver runs without downstream callbacks.
 QUIVER_DATA_JOB_MODE,deploy_var,var,deploy_config,true,Quiver bronze mode. Use incremental for the scheduled path and historical_backfill for manual replay.
 QUIVER_DATA_TICKER_BATCH_SIZE,deploy_var,var,deploy_config,true,Rotating ticker batch size for scheduled Quiver incremental bronze runs.
 QUIVER_DATA_HISTORICAL_BATCH_SIZE,deploy_var,var,deploy_config,true,Rotating ticker batch size for manual Quiver historical backfill runs.

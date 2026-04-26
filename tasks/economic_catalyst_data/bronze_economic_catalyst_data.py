@@ -75,6 +75,30 @@ def _selected_sources(config: EconomicCatalystConfig, *, now: datetime) -> tuple
     return "hot_window", hot_sources or enabled_sources
 
 
+def _failure_source_name(message: str) -> str:
+    return str(message or "").split(":", 1)[0].strip()
+
+
+def _source_failure_decision(
+    *,
+    selected_sources: tuple[str, ...],
+    failures: list[str],
+) -> tuple[bool, str, set[str], set[str]]:
+    selected = {str(source or "").strip() for source in selected_sources if str(source or "").strip()}
+    failed = {_failure_source_name(message) for message in failures}
+    failed.discard("")
+    succeeded = selected - failed
+    required = selected & set(constants.OFFICIAL_SOURCES)
+
+    if not selected:
+        return True, "no_enabled_sources", failed, succeeded
+    if selected and not succeeded:
+        return True, "all_selected_sources_failed", failed, succeeded
+    if required and not (required - failed):
+        return True, "all_required_sources_failed", failed, succeeded
+    return False, "partial_source_outage", failed, succeeded
+
+
 def main() -> int:
     mdc.log_environment_diagnostics()
     config = EconomicCatalystConfig.from_env()
@@ -85,7 +109,23 @@ def main() -> int:
     run_id = _run_id()
     now = datetime.now(timezone.utc)
     poll_mode, selected_sources = _selected_sources(config, now=now)
-    batches, warnings, failures = fetch_requested_sources(config, now=now, source_names=selected_sources)
+    batches, warnings, source_failures = fetch_requested_sources(config, now=now, source_names=selected_sources)
+    hard_source_failure, failure_reason, failed_sources, succeeded_sources = _source_failure_decision(
+        selected_sources=selected_sources,
+        failures=source_failures,
+    )
+    failures = list(source_failures)
+    if source_failures and not hard_source_failure:
+        warnings.extend(f"optional_source_outage: {failure}" for failure in source_failures)
+        failures = []
+    elif hard_source_failure:
+        failures.append(f"source_run: {failure_reason}")
+        mdc.write_error(
+            "Economic catalyst source failure threshold reached: "
+            f"reason={failure_reason} selected_sources={','.join(selected_sources) or 'none'} "
+            f"failed_sources={','.join(sorted(failed_sources)) or 'none'} "
+            f"succeeded_sources={','.join(sorted(succeeded_sources)) or 'none'}"
+        )
     batch_paths = _persist_source_batches(client=bronze_client, run_id=run_id, batches=batches)
     manifest = _persist_manifest(
         client=bronze_client,
@@ -123,19 +163,25 @@ def main() -> int:
                 mdc.write_warning(f"Failed to update economic catalyst source_state for {batch.source_name}: {exc}")
 
     status, exit_code = resolve_job_run_status(failed_count=len(failures), warning_count=len(warnings))
-    save_last_success(
-        "bronze_economic_catalyst_data",
-        metadata={
-            "run_id": run_id,
-            "status": status,
-            "poll_mode": poll_mode,
-            "batch_count": len(batches),
-            "enabled_sources": list(selected_sources),
-            "warnings": warnings,
-            "failures": failures,
-            "batch_paths": batch_paths,
-        },
-    )
+    if exit_code == 0:
+        save_last_success(
+            "bronze_economic_catalyst_data",
+            metadata={
+                "run_id": run_id,
+                "status": status,
+                "poll_mode": poll_mode,
+                "batch_count": len(batches),
+                "enabled_sources": list(selected_sources),
+                "warnings": warnings,
+                "failures": failures,
+                "batch_paths": batch_paths,
+            },
+        )
+    else:
+        mdc.write_warning(
+            "Economic catalyst bronze last_success not updated because run failed: "
+            f"run_id={run_id} status={status} failures={len(failures)}"
+        )
     mdc.write_line(
         "Economic catalyst bronze complete: "
         f"run_id={run_id} poll_mode={poll_mode} batches={len(batches)} warnings={len(warnings)} "

@@ -86,6 +86,8 @@ properties:
         value: ${MASSIVE_MAX_WORKERS}
       - name: MASSIVE_FINANCE_FRESH_DAYS
         value: ${MASSIVE_FINANCE_FRESH_DAYS}
+      - name: BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED
+        value: ${BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED}
       - name: NASDAQ_API_KEY
         secretRef: nasdaq-api-key
       - name: POSTGRES_DSN

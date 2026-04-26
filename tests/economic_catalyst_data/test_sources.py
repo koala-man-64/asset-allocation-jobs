@@ -72,6 +72,7 @@ def test_fetch_requested_sources_respects_selected_sources_and_reports_missing_c
     monkeypatch.setitem(source_module._FETCHERS, "nasdaq_tables", _failing_fetcher)
     monkeypatch.setattr(source_module.mdc, "write_line", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(source_module.mdc, "write_error", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(source_module.mdc, "write_warning", lambda *_args, **_kwargs: None)
 
     batches, warnings, failures = fetch_requested_sources(
         _config(fred_api_key=""),
@@ -83,3 +84,20 @@ def test_fetch_requested_sources_respects_selected_sources_and_reports_missing_c
     assert any("fred_releases: FRED_API_KEY is not configured." in warning for warning in warnings)
     assert failures == ["nasdaq_tables: RuntimeError: entitlement denied"]
     assert called == ["massive_news", "nasdaq_tables"]
+
+
+def test_fetch_requested_sources_sanitizes_failure_details(monkeypatch) -> None:
+    def _failing_fetcher(config: EconomicCatalystConfig, now: datetime) -> list[RawSourceBatch]:
+        raise RuntimeError("GET https://example.com/feed?api_key=secret-token failed with Bearer abc123")
+
+    monkeypatch.setitem(source_module._FETCHERS, "massive_news", _failing_fetcher)
+    monkeypatch.setattr(source_module.mdc, "write_warning", lambda *_args, **_kwargs: None)
+
+    _, _, failures = fetch_requested_sources(
+        _config(),
+        now=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+        source_names=("massive_news",),
+    )
+
+    assert failures == ["massive_news: RuntimeError: GET <url> failed with Bearer <redacted>"]
+    assert "secret-token" not in failures[0]
