@@ -48,6 +48,7 @@ def _config(**overrides) -> QuiverDataConfig:
         "historical_batch_size": 20,
         "symbol_limit": 500,
         "page_size": 100,
+        "max_pages_per_request": 0,
         "sec13f_today_only": True,
         "postgres_dsn": "postgresql://example",
     }

@@ -567,6 +567,30 @@ def test_render_and_apply_manifests_fails_on_blank_secret_values(
     assert not (rendered_dir / "job_secret.yaml").exists()
 
 
+def test_render_and_apply_manifests_blocks_public_prod_control_plane_url() -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+
+    with pytest.raises(SystemExit, match="public Azure Container Apps ingress host"):
+        module.ensure_control_plane_base_url_policy(
+            {
+                "RESOURCE_TAG_ENVIRONMENT": "prod",
+                "ASSET_ALLOCATION_API_BASE_URL": "https://asset-allocation-api.example.azurecontainerapps.io",
+            }
+        )
+
+
+def test_render_and_apply_manifests_allows_public_control_plane_url_only_with_override() -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+
+    module.ensure_control_plane_base_url_policy(
+        {
+            "RESOURCE_TAG_ENVIRONMENT": "prod",
+            "ASSET_ALLOCATION_API_BASE_URL": "https://asset-allocation-api.example.azurecontainerapps.io",
+            "ALLOW_PUBLIC_ASSET_ALLOCATION_API_BASE_URL": "true",
+        }
+    )
+
+
 def test_deploy_prod_workflow_does_not_define_ranking_override_env_vars() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
@@ -591,6 +615,16 @@ def test_deploy_prod_workflow_exports_economic_catalyst_secret_vars() -> None:
     assert "ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}" in workflow_text
 
 
+def test_deploy_prod_workflow_exports_bronze_runtime_safety_vars() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert "BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED: ${{ vars.BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED || 'false' }}" in workflow_text
+    assert "ECONOMIC_CATALYST_VENDOR_SOURCES: ${{ vars.ECONOMIC_CATALYST_VENDOR_SOURCES || 'nasdaq_tables' }}" in workflow_text
+    assert "ECONOMIC_CATALYST_GENERAL_POLL_MINUTES: ${{ vars.ECONOMIC_CATALYST_GENERAL_POLL_MINUTES || '30' }}" in workflow_text
+    assert "QUIVER_DATA_ENABLED: ${{ vars.QUIVER_DATA_ENABLED || 'false' }}" in workflow_text
+    assert "python scripts/workflows/verify_deployed_job_runtime.py" in workflow_text
+
+
 def test_verify_deployed_job_images_detects_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = load_module("scripts/workflows/verify_deployed_job_images.py", "verify_deployed_job_images")
     rendered_dir = tmp_path / "rendered"
@@ -605,6 +639,118 @@ def test_verify_deployed_job_images_detects_mismatch(monkeypatch: pytest.MonkeyP
             resource_group="rg",
             expected_image="registry/image@sha256:expected",
         )
+
+
+def _runtime_manifest(*, image: str = "registry/image@sha256:expected") -> str:
+    return f"""
+location: East US
+name: bronze-example-job
+type: Microsoft.App/jobs
+properties:
+  configuration:
+    triggerType: Schedule
+    scheduleTriggerConfig:
+      cronExpression: "*/30 * * * 1-5"
+    replicaRetryLimit: 0
+    replicaTimeout: 1800
+    secrets:
+    - name: pg-dsn
+      value: rendered-secret-value
+  template:
+    containers:
+    - image: {image}
+      name: bronze-example-job
+      env:
+      - name: ASSET_ALLOCATION_API_BASE_URL
+        value: http://asset-allocation-api-vnet
+      - name: SAFE_FLAG
+        value: "false"
+      - name: SENSITIVE_LITERAL
+        value: rendered-secret-like-value
+      - name: POSTGRES_DSN
+        secretRef: pg-dsn
+"""
+
+
+def _matching_live_runtime() -> dict:
+    return {
+        "properties": {
+            "configuration": {
+                "triggerType": "Schedule",
+                "scheduleTriggerConfig": {"cronExpression": "*/30 * * * 1-5"},
+                "replicaRetryLimit": 0,
+                "replicaTimeout": 1800,
+                "secrets": [{"name": "pg-dsn"}],
+            },
+            "template": {
+                "containers": [
+                    {
+                        "image": "registry/image@sha256:expected",
+                        "env": [
+                            {"name": "ASSET_ALLOCATION_API_BASE_URL", "value": "http://asset-allocation-api-vnet"},
+                            {"name": "SAFE_FLAG", "value": "false"},
+                            {"name": "SENSITIVE_LITERAL", "value": "rendered-secret-like-value"},
+                            {"name": "POSTGRES_DSN", "secretRef": "pg-dsn"},
+                        ],
+                    }
+                ]
+            },
+        }
+    }
+
+
+def test_verify_deployed_job_runtime_accepts_matching_live_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/verify_deployed_job_runtime.py", "verify_deployed_job_runtime")
+    rendered_dir = tmp_path / "rendered"
+    rendered_dir.mkdir()
+    (rendered_dir / "job_example.yaml").write_text(_runtime_manifest(), encoding="utf-8")
+    monkeypatch.setattr(module, "query_job_runtime", lambda **_: _matching_live_runtime())
+
+    module.verify_deployed_job_runtime(
+        rendered_dir=rendered_dir,
+        resource_group="rg",
+        expected_image="registry/image@sha256:expected",
+    )
+
+
+def test_verify_deployed_job_runtime_detects_drift_without_printing_env_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/verify_deployed_job_runtime.py", "verify_deployed_job_runtime")
+    rendered_dir = tmp_path / "rendered"
+    rendered_dir.mkdir()
+    (rendered_dir / "job_example.yaml").write_text(_runtime_manifest(), encoding="utf-8")
+    live = _matching_live_runtime()
+    live["properties"]["configuration"]["scheduleTriggerConfig"]["cronExpression"] = "*/5 * * * *"
+    live["properties"]["configuration"]["replicaRetryLimit"] = 1
+    live["properties"]["template"]["containers"][0]["image"] = "registry/image@sha256:wrong"
+    live["properties"]["template"]["containers"][0]["env"] = [
+        {"name": "ASSET_ALLOCATION_API_BASE_URL", "value": "https://public.example.azurecontainerapps.io"},
+        {"name": "SAFE_FLAG", "value": "true"},
+        {"name": "SENSITIVE_LITERAL", "value": "actual-secret-like-value"},
+        {"name": "POSTGRES_DSN", "secretRef": "wrong-dsn"},
+    ]
+    monkeypatch.setattr(module, "query_job_runtime", lambda **_: live)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.verify_deployed_job_runtime(
+            rendered_dir=rendered_dir,
+            resource_group="rg",
+            expected_image="registry/image@sha256:expected",
+        )
+
+    message = str(exc_info.value)
+    assert "cronExpression mismatch" in message
+    assert "replicaRetryLimit mismatch" in message
+    assert "image mismatch" in message
+    assert "env ASSET_ALLOCATION_API_BASE_URL value mismatch" in message
+    assert "env SAFE_FLAG value mismatch" in message
+    assert "env POSTGRES_DSN secretRef mismatch" in message
+    assert "rendered-secret-like-value" not in message
+    assert "actual-secret-like-value" not in message
+    assert "https://public.example.azurecontainerapps.io" not in message
 
 
 def test_run_security_governance_invokes_expected_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

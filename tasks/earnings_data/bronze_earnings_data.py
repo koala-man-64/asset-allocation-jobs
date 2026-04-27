@@ -802,7 +802,15 @@ async def main_async() -> int:
         f"inserted_count={sync_result.inserted_count} disabled_count={sync_result.disabled_count} "
         f"duration_ms={sync_result.duration_ms} lock_wait_ms={sync_result.lock_wait_ms}"
     )
-    df_symbols = symbol_availability.get_domain_symbols("earnings").dropna(subset=["Symbol"]).copy()
+    df_symbols_raw = symbol_availability.get_domain_symbols("earnings")
+    if "Symbol" not in df_symbols_raw.columns or df_symbols_raw["Symbol"].dropna().empty:
+        mdc.write_error(
+            "Bronze earnings provider unavailable: listing status returned no symbols; "
+            "withholding active alpha26 publish."
+        )
+        return 1
+
+    df_symbols = df_symbols_raw.dropna(subset=["Symbol"]).copy()
     provider_available_count = int(len(df_symbols))
     provider_symbols = _normalize_earnings_provider_symbols(df_symbols)
     symbols = []
@@ -830,6 +838,12 @@ async def main_async() -> int:
     reprobe_symbol_set = set(reprobe_symbols)
     execution_symbols = reprobe_symbols + [symbol for symbol in symbols if symbol not in reprobe_symbol_set]
 
+    if not execution_symbols:
+        mdc.write_error(
+            "Bronze earnings has no execution symbols after filters; withholding active alpha26 publish."
+        )
+        return 1
+
     mdc.write_line(
         "Bronze earnings symbol selection: "
         f"provider_available_count={provider_available_count} "
@@ -842,9 +856,28 @@ async def main_async() -> int:
     bronze_bucketing.bronze_layout_mode()
     mdc.write_line(f"Starting Alpha Vantage Bronze Earnings Ingestion for {len(execution_symbols)} symbols...")
 
+    calendar_degraded = False
     av = AlphaVantageGatewayClient.from_env()
     try:
-        calendar_rows_by_symbol, calendar_summary = _fetch_earnings_calendar_by_symbol(av=av, symbols=execution_symbols)
+        try:
+            calendar_rows_by_symbol, calendar_summary = _fetch_earnings_calendar_by_symbol(av=av, symbols=execution_symbols)
+        except Exception as exc:
+            calendar_degraded = True
+            calendar_rows_by_symbol = {}
+            calendar_summary = {
+                "calendar_horizon": _normalize_calendar_horizon(
+                    getattr(cfg, "ALPHA_VANTAGE_EARNINGS_CALENDAR_HORIZON", "12month")
+                ),
+                "calendar_rows_fetched": 0,
+                "calendar_symbols_matched": 0,
+                "calendar_symbols_ignored": 0,
+                "calendar_max_report_date": None,
+                "calendar_degraded": True,
+            }
+            mdc.write_warning(
+                "Bronze AV earnings calendar unavailable; continuing with historical earnings only. "
+                f"detail={_format_failure_reason(exc)}"
+            )
     finally:
         _safe_close_alpha_vantage_client(av)
     backfill_start = resolve_backfill_start_date()
@@ -1082,22 +1115,39 @@ async def main_async() -> int:
         except Exception:
             pass
 
-    try:
-        written_symbols, index_path = _write_alpha26_earnings_buckets(collected_symbol_frames, run_id=run_id)
-        flat_deleted = _delete_flat_symbol_blobs()
-        mdc.write_line(
-            "Bronze earnings alpha26 buckets written: "
-            f"symbols={written_symbols} index={index_path or 'n/a'} flat_deleted={flat_deleted}"
-        )
-        try:
-            list_manager.flush()
-        except Exception as exc:
-            mdc.write_warning(f"Failed to flush whitelist/blacklist updates: {exc}")
-        else:
-            log_bronze_success(domain="earnings", operation="list_flush")
-    except Exception as exc:
+    publish_block_reason: str | None = None
+    if progress["failed"] > 0:
+        publish_block_reason = "symbol_failures"
+    elif progress["written"] <= 0:
+        publish_block_reason = "empty_output"
+    elif calendar_degraded and (progress["unavailable"] > 0 or progress["invalid_candidates"] > 0):
+        publish_block_reason = "calendar_degraded_incomplete_history"
+
+    if publish_block_reason:
         progress["failed"] += 1
-        mdc.write_error(f"Bronze earnings alpha26 bucket write failed: {exc}")
+        mdc.write_error(
+            "Bronze earnings alpha26 publish withheld: "
+            f"reason={publish_block_reason} calendar_degraded={str(calendar_degraded).lower()} "
+            f"written={progress['written']} skipped={progress['skipped']} unavailable={progress['unavailable']} "
+            f"invalid_candidates={progress['invalid_candidates']}"
+        )
+    else:
+        try:
+            written_symbols, index_path = _write_alpha26_earnings_buckets(collected_symbol_frames, run_id=run_id)
+            flat_deleted = _delete_flat_symbol_blobs()
+            mdc.write_line(
+                "Bronze earnings alpha26 buckets written: "
+                f"symbols={written_symbols} index={index_path or 'n/a'} flat_deleted={flat_deleted}"
+            )
+            try:
+                list_manager.flush()
+            except Exception as exc:
+                mdc.write_warning(f"Failed to flush whitelist/blacklist updates: {exc}")
+            else:
+                log_bronze_success(domain="earnings", operation="list_flush")
+        except Exception as exc:
+            progress["failed"] += 1
+            mdc.write_error(f"Bronze earnings alpha26 bucket write failed: {exc}")
 
     if failure_counts:
         ordered = sorted(failure_counts.items(), key=lambda item: item[1], reverse=True)
@@ -1110,7 +1160,7 @@ async def main_async() -> int:
 
     job_status, exit_code = resolve_job_run_status(
         failed_count=progress["failed"],
-        warning_count=progress["invalid_candidates"],
+        warning_count=progress["invalid_candidates"] + (1 if calendar_degraded else 0),
     )
     mdc.write_line(
         "Bronze AV earnings ingest complete: processed={processed} written={written} skipped={skipped} "

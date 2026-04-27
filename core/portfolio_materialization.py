@@ -309,6 +309,112 @@ class PortfolioMaterializationResult:
     dependency_state: dict[str, Any]
 
 
+def _allocation_mode(value: object) -> str:
+    return _normalize_text(getattr(value, "allocationMode", "percent") or "percent") or "percent"
+
+
+def _enabled_allocations(portfolio_revision: Any) -> tuple[Any, ...]:
+    return tuple(
+        allocation
+        for allocation in getattr(portfolio_revision, "allocations", ())
+        if getattr(allocation, "enabled", True)
+    )
+
+
+def _sleeve_label(allocation: Any) -> str:
+    return _normalize_text(getattr(allocation, "sleeveId", "")) or "-"
+
+
+def _portfolio_allocatable_capital(portfolio_revision: Any) -> float:
+    value = getattr(portfolio_revision, "allocatableCapital", None)
+    if value is None:
+        raise PortfolioMaterializationError(
+            "Notional portfolio materialization requires allocatableCapital on the portfolio revision."
+        )
+    capital = float(value)
+    if capital <= 0:
+        raise PortfolioMaterializationError(
+            "Notional portfolio materialization requires allocatableCapital greater than zero."
+        )
+    return capital
+
+
+def _percent_target_weight(allocation: Any) -> float:
+    value = getattr(allocation, "targetWeight", None)
+    if value is None:
+        raise PortfolioMaterializationError(
+            f"Percent allocation '{_sleeve_label(allocation)}' requires targetWeight."
+        )
+    return float(value)
+
+
+def _notional_target(allocation: Any) -> float:
+    value = getattr(allocation, "targetNotionalBaseCcy", None)
+    if value is None:
+        raise PortfolioMaterializationError(
+            f"Notional allocation '{_sleeve_label(allocation)}' requires targetNotionalBaseCcy."
+        )
+    target = float(value)
+    if target <= 0:
+        raise PortfolioMaterializationError(
+            f"Notional allocation '{_sleeve_label(allocation)}' requires targetNotionalBaseCcy greater than zero."
+        )
+    return target
+
+
+def _allocation_target_weight_for_dependency(*, allocation: Any, portfolio_revision: Any) -> float:
+    revision_mode = _allocation_mode(portfolio_revision)
+    allocation_mode = _allocation_mode(allocation)
+    if allocation_mode != revision_mode:
+        raise PortfolioMaterializationError(
+            f"Allocation '{_sleeve_label(allocation)}' mode {allocation_mode!r} does not match "
+            f"portfolio revision mode {revision_mode!r}."
+        )
+    if revision_mode == "percent":
+        return _percent_target_weight(allocation)
+    if revision_mode == "notional_base_ccy":
+        return _notional_target(allocation) / _portfolio_allocatable_capital(portfolio_revision)
+    raise PortfolioMaterializationError(f"Unsupported portfolio allocationMode {revision_mode!r}.")
+
+
+def _target_weights_by_sleeve(*, portfolio_revision: Any, seed_nav: float) -> dict[str, float]:
+    revision_mode = _allocation_mode(portfolio_revision)
+    weights: dict[str, float] = {}
+    if revision_mode == "percent":
+        for allocation in _enabled_allocations(portfolio_revision):
+            weights[allocation.sleeveId] = _percent_target_weight(allocation)
+        return weights
+
+    if revision_mode != "notional_base_ccy":
+        raise PortfolioMaterializationError(f"Unsupported portfolio allocationMode {revision_mode!r}.")
+
+    if seed_nav <= 0:
+        raise PortfolioMaterializationError(
+            "Notional portfolio materialization requires positive seed capital."
+        )
+
+    allocated = 0.0
+    for allocation in _enabled_allocations(portfolio_revision):
+        target_notional = _notional_target(allocation)
+        allocated += target_notional
+        weights[allocation.sleeveId] = target_notional / seed_nav
+
+    if allocated - seed_nav > 0.01:
+        raise PortfolioMaterializationError(
+            f"Notional portfolio allocations total {allocated:.2f}, exceeding seed capital {seed_nav:.2f}."
+        )
+    return weights
+
+
+def _residual_cash(*, seed_nav: float, target_weights: Mapping[str, float]) -> float:
+    allocated = sum(seed_nav * float(weight or 0.0) for weight in target_weights.values())
+    if allocated - seed_nav > 0.01:
+        raise PortfolioMaterializationError(
+            f"Portfolio allocations require {allocated:.2f}, exceeding seed capital {seed_nav:.2f}."
+        )
+    return max(seed_nav - allocated, 0.0)
+
+
 def _ensure_connection_is_writable(cur: Any) -> None:
     cur.execute("SHOW transaction_read_only")
     row = cur.fetchone()
@@ -765,7 +871,10 @@ def _resolve_strategy_dependencies(
                         sleeve_id=allocation.sleeveId,
                         strategy_name=allocation.strategy.strategyName,
                         strategy_version=int(allocation.strategy.strategyVersion),
-                        target_weight=float(allocation.targetWeight),
+                        target_weight=_allocation_target_weight_for_dependency(
+                            allocation=allocation,
+                            portfolio_revision=portfolio_revision,
+                        ),
                         required_as_of=bundle.as_of,
                     )
                 )
@@ -796,13 +905,15 @@ def _seed_capital(
         return float(net_cash)
     if bundle.portfolio_revision is None or not dependencies:
         return max(float(net_cash), 0.0)
+    if _allocation_mode(bundle.portfolio_revision) == "notional_base_ccy":
+        return _portfolio_allocatable_capital(bundle.portfolio_revision)
     dependency_by_sleeve = {dependency.sleeve_id: dependency for dependency in dependencies}
     weighted_seed = 0.0
     for allocation in bundle.portfolio_revision.allocations:
         dependency = dependency_by_sleeve.get(allocation.sleeveId)
         if dependency is None:
             continue
-        weighted_seed += float(allocation.targetWeight) * max(dependency.initial_portfolio_value, 0.0)
+        weighted_seed += _percent_target_weight(allocation) * max(dependency.initial_portfolio_value, 0.0)
     return float(weighted_seed)
 
 
@@ -864,6 +975,7 @@ def _compute_history(
     dependencies: Sequence[PortfolioStrategyDependency],
     scale_by_sleeve: Mapping[str, float],
     seed_nav: float,
+    residual_cash: float = 0.0,
 ) -> tuple[PortfolioHistoryPoint, ...]:
     if not dependencies:
         return _history_fallback(bundle=bundle, seed_nav=seed_nav)
@@ -905,6 +1017,9 @@ def _compute_history(
             if sleeve_nav > 0 and transaction_cost > 0:
                 weighted_cost_drag += (transaction_cost / sleeve_nav) * 10000.0 * sleeve_nav
                 cost_drag_weight += sleeve_nav
+        if residual_cash > 0:
+            total_nav += residual_cash
+            total_cash += residual_cash
         if math.isclose(total_nav, 0.0, abs_tol=1e-9) and current_date == all_dates[0] and seed_nav > 0:
             total_nav = float(seed_nav)
             total_cash = float(seed_nav)
@@ -1020,6 +1135,7 @@ def _compute_attribution(
     bundle: PortfolioMaterializationBundle,
     dependencies: Sequence[PortfolioStrategyDependency],
     scale_by_sleeve: Mapping[str, float],
+    target_weights_by_sleeve: Mapping[str, float],
     snapshot_nav: float,
     as_of: date,
 ) -> tuple[StrategySliceAttribution, ...]:
@@ -1043,7 +1159,7 @@ def _compute_attribution(
                 sleeveId=allocation.sleeveId,
                 strategyName=allocation.strategy.strategyName,
                 strategyVersion=allocation.strategy.strategyVersion,
-                targetWeight=allocation.targetWeight,
+                targetWeight=float(target_weights_by_sleeve.get(allocation.sleeveId) or 0.0),
                 actualWeight=actual_weight,
                 marketValue=market_value,
                 grossExposure=max(dependency.latest_gross_exposure * actual_weight, 0.0),
@@ -1143,21 +1259,29 @@ def _compute_materialized_surfaces(
     seed_nav = _seed_capital(bundle=bundle, dependencies=dependencies)
     dependency_by_sleeve = {dependency.sleeve_id: dependency for dependency in dependencies}
     scale_by_sleeve: dict[str, float] = {}
+    target_weights_by_sleeve: dict[str, float] = {}
+    residual_cash = 0.0
     if bundle.portfolio_revision is not None:
+        target_weights_by_sleeve = _target_weights_by_sleeve(
+            portfolio_revision=bundle.portfolio_revision,
+            seed_nav=seed_nav,
+        )
         for allocation in bundle.portfolio_revision.allocations:
             dependency = dependency_by_sleeve.get(allocation.sleeveId)
             if dependency is None:
                 continue
-            initial_capital = seed_nav * float(allocation.targetWeight)
+            initial_capital = seed_nav * float(target_weights_by_sleeve.get(allocation.sleeveId) or 0.0)
             if dependency.initial_portfolio_value > 0:
                 scale_by_sleeve[allocation.sleeveId] = initial_capital / dependency.initial_portfolio_value
             else:
                 scale_by_sleeve[allocation.sleeveId] = 0.0
+        residual_cash = _residual_cash(seed_nav=seed_nav, target_weights=target_weights_by_sleeve)
     history = _compute_history(
         bundle=bundle,
         dependencies=dependencies,
         scale_by_sleeve=scale_by_sleeve,
         seed_nav=seed_nav,
+        residual_cash=residual_cash,
     )
     latest_history = history[-1]
     as_of = bundle.as_of or latest_history.asOf or bundle.account.inceptionDate
@@ -1172,6 +1296,7 @@ def _compute_materialized_surfaces(
         bundle=bundle,
         dependencies=dependencies,
         scale_by_sleeve=scale_by_sleeve,
+        target_weights_by_sleeve=target_weights_by_sleeve,
         snapshot_nav=snapshot_nav,
         as_of=as_of,
     )

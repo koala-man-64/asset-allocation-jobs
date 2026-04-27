@@ -18,10 +18,10 @@ properties:
   configuration:
     triggerType: Schedule
     scheduleTriggerConfig:
-      cronExpression: "*/5 * * * *"
+      cronExpression: "*/30 * * * 1-5"
       parallelism: 1
       replicaCompletionCount: 1
-    replicaRetryLimit: 1
+    replicaRetryLimit: 0
     replicaTimeout: 1800
     registries:
     - server: assetallocationacr.azurecr.io

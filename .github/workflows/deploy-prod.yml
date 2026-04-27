@@ -39,6 +39,8 @@ jobs:
       AZURE_FOLDER_FINANCE: ${{ vars.AZURE_FOLDER_FINANCE }}
       AZURE_FOLDER_EARNINGS: ${{ vars.AZURE_FOLDER_EARNINGS }}
       AZURE_FOLDER_TARGETS: ${{ vars.AZURE_FOLDER_TARGETS }}
+      AZURE_FOLDER_ECONOMIC_CATALYST: ${{ vars.AZURE_FOLDER_ECONOMIC_CATALYST || 'economic-catalyst' }}
+      AZURE_FOLDER_QUIVER: ${{ vars.AZURE_FOLDER_QUIVER || 'quiver-data' }}
       ASSET_ALLOCATION_API_BASE_URL: ${{ secrets.ASSET_ALLOCATION_API_BASE_URL }}
       ASSET_ALLOCATION_API_SCOPE: ${{ secrets.ASSET_ALLOCATION_API_SCOPE }}
       ALPHA_VANTAGE_EARNINGS_FRESH_DAYS: ${{ vars.ALPHA_VANTAGE_EARNINGS_FRESH_DAYS }}
@@ -50,15 +52,44 @@ jobs:
       MASSIVE_TIMEOUT_SECONDS: ${{ vars.MASSIVE_TIMEOUT_SECONDS }}
       BACKFILL_START_DATE: ${{ vars.BACKFILL_START_DATE }}
       DEBUG_SYMBOLS: ${{ vars.DEBUG_SYMBOLS }}
+      BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED: ${{ vars.BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED || 'false' }}
+      ECONOMIC_CATALYST_OFFICIAL_SOURCES: ${{ vars.ECONOMIC_CATALYST_OFFICIAL_SOURCES }}
+      ECONOMIC_CATALYST_VENDOR_SOURCES: ${{ vars.ECONOMIC_CATALYST_VENDOR_SOURCES || 'nasdaq_tables' }}
+      ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS: ${{ vars.ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS || '90' }}
+      ECONOMIC_CATALYST_HEADLINE_CORRECTION_LOOKBACK_DAYS: ${{ vars.ECONOMIC_CATALYST_HEADLINE_CORRECTION_LOOKBACK_DAYS || '14' }}
+      ECONOMIC_CATALYST_FUTURE_SCHEDULE_DAYS: ${{ vars.ECONOMIC_CATALYST_FUTURE_SCHEDULE_DAYS || '180' }}
+      ECONOMIC_CATALYST_GENERAL_POLL_MINUTES: ${{ vars.ECONOMIC_CATALYST_GENERAL_POLL_MINUTES || '30' }}
+      ECONOMIC_CATALYST_ALPHA_VANTAGE_TOPICS: ${{ vars.ECONOMIC_CATALYST_ALPHA_VANTAGE_TOPICS }}
+      ECONOMIC_CATALYST_FOMC_SCHEDULE_URLS: ${{ vars.ECONOMIC_CATALYST_FOMC_SCHEDULE_URLS }}
+      ECONOMIC_CATALYST_BLS_ICS_URL: ${{ vars.ECONOMIC_CATALYST_BLS_ICS_URL }}
+      ECONOMIC_CATALYST_BEA_SCHEDULE_URL: ${{ vars.ECONOMIC_CATALYST_BEA_SCHEDULE_URL }}
+      ECONOMIC_CATALYST_ECB_CALENDAR_URL: ${{ vars.ECONOMIC_CATALYST_ECB_CALENDAR_URL }}
+      ECONOMIC_CATALYST_BOE_CALENDAR_URL: ${{ vars.ECONOMIC_CATALYST_BOE_CALENDAR_URL }}
+      ECONOMIC_CATALYST_BOJ_SCHEDULE_URL: ${{ vars.ECONOMIC_CATALYST_BOJ_SCHEDULE_URL }}
+      ECONOMIC_CATALYST_TREASURY_AUCTIONS_URL: ${{ vars.ECONOMIC_CATALYST_TREASURY_AUCTIONS_URL }}
+      ECONOMIC_CATALYST_NASDAQ_TABLES: ${{ vars.ECONOMIC_CATALYST_NASDAQ_TABLES || '[]' }}
+      ECONOMIC_CATALYST_HTTP_TIMEOUT_SECONDS: ${{ vars.ECONOMIC_CATALYST_HTTP_TIMEOUT_SECONDS || '30' }}
+      QUIVER_DATA_ENABLED: ${{ vars.QUIVER_DATA_ENABLED || 'false' }}
+      QUIVER_DATA_JOB_MODE: ${{ vars.QUIVER_DATA_JOB_MODE || 'incremental' }}
+      QUIVER_DATA_TICKER_BATCH_SIZE: ${{ vars.QUIVER_DATA_TICKER_BATCH_SIZE || '50' }}
+      QUIVER_DATA_HISTORICAL_BATCH_SIZE: ${{ vars.QUIVER_DATA_HISTORICAL_BATCH_SIZE || '20' }}
+      QUIVER_DATA_SYMBOL_LIMIT: ${{ vars.QUIVER_DATA_SYMBOL_LIMIT || '500' }}
+      QUIVER_DATA_PAGE_SIZE: ${{ vars.QUIVER_DATA_PAGE_SIZE || '100' }}
+      QUIVER_DATA_MAX_PAGES_PER_REQUEST: ${{ vars.QUIVER_DATA_MAX_PAGES_PER_REQUEST || '0' }}
+      QUIVER_DATA_SEC13F_TODAY_ONLY: ${{ vars.QUIVER_DATA_SEC13F_TODAY_ONLY || 'true' }}
       JOB_STARTUP_API_CONTAINER_APPS: ${{ vars.JOB_STARTUP_API_CONTAINER_APPS }}
       SILVER_MARKET_JOB: ${{ vars.SILVER_MARKET_JOB || 'silver-market-job' }}
       SILVER_FINANCE_JOB: ${{ vars.SILVER_FINANCE_JOB || 'silver-finance-job' }}
       SILVER_PRICE_TARGET_JOB: ${{ vars.SILVER_PRICE_TARGET_JOB || 'silver-price-target-job' }}
       SILVER_EARNINGS_JOB: ${{ vars.SILVER_EARNINGS_JOB || 'silver-earnings-job' }}
+      SILVER_ECONOMIC_CATALYST_JOB: ${{ vars.SILVER_ECONOMIC_CATALYST_JOB || 'silver-economic-catalyst-job' }}
+      SILVER_QUIVER_JOB: ${{ vars.SILVER_QUIVER_JOB || 'silver-quiver-data-job' }}
       GOLD_MARKET_JOB: ${{ vars.GOLD_MARKET_JOB || 'gold-market-job' }}
       GOLD_FINANCE_JOB: ${{ vars.GOLD_FINANCE_JOB || 'gold-finance-job' }}
       GOLD_PRICE_TARGET_JOB: ${{ vars.GOLD_PRICE_TARGET_JOB || 'gold-price-target-job' }}
       GOLD_EARNINGS_JOB: ${{ vars.GOLD_EARNINGS_JOB || 'gold-earnings-job' }}
+      GOLD_ECONOMIC_CATALYST_JOB: ${{ vars.GOLD_ECONOMIC_CATALYST_JOB || 'gold-economic-catalyst-job' }}
+      GOLD_QUIVER_JOB: ${{ vars.GOLD_QUIVER_JOB || 'gold-quiver-data-job' }}
       AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       NASDAQ_API_KEY: ${{ secrets.NASDAQ_API_KEY }}
@@ -142,6 +173,15 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/workflows/verify_deployed_job_images.py \
+            --rendered-dir artifacts/rendered \
+            --resource-group "${RESOURCE_GROUP}" \
+            --expected-image "${{ steps.image.outputs.image_digest }}"
+
+      - name: Verify deployed job runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/workflows/verify_deployed_job_runtime.py \
             --rendered-dir artifacts/rendered \
             --resource-group "${RESOURCE_GROUP}" \
             --expected-image "${{ steps.image.outputs.image_digest }}"

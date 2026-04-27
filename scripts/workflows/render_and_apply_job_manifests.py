@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+from urllib.parse import urlparse
 
 import yaml
 from asset_allocation_runtime_common.job_metadata import validate_job_metadata_tags
@@ -13,6 +14,7 @@ from asset_allocation_runtime_common.job_metadata import validate_job_metadata_t
 PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 SECRET_VALUE_PLACEHOLDER_PATTERN = re.compile(r"^\s*value:\s*\$\{([A-Z][A-Z0-9_]*)\}\s*$")
 DEFAULT_ENV_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / ".env.template"
+PUBLIC_CONTROL_PLANE_OVERRIDE_ENV = "ALLOW_PUBLIC_ASSET_ALLOCATION_API_BASE_URL"
 DEFAULT_REPOSITORY_TAGS = {
     "RESOURCE_TAG_COST_CENTER": "asset-allocation",
     "RESOURCE_TAG_WORKLOAD": "asset-allocation-jobs",
@@ -77,6 +79,34 @@ def render_environment(environment: dict[str, str]) -> dict[str, str]:
         resolved["RESOURCE_TAG_OWNER"] = owner or "asset-allocation"
 
     return resolved
+
+
+def _is_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def ensure_control_plane_base_url_policy(environment: dict[str, str]) -> None:
+    runtime_environment = str(environment.get("RESOURCE_TAG_ENVIRONMENT") or "").strip().lower()
+    if runtime_environment and runtime_environment != "prod":
+        return
+
+    base_url = str(environment.get("ASSET_ALLOCATION_API_BASE_URL") or "").strip()
+    if not base_url:
+        return
+
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or base_url).lower()
+    if ".azurecontainerapps.io" not in host:
+        return
+
+    if _is_truthy(environment.get(PUBLIC_CONTROL_PLANE_OVERRIDE_ENV)):
+        return
+
+    raise SystemExit(
+        "ASSET_ALLOCATION_API_BASE_URL resolved to a public Azure Container Apps ingress host for prod. "
+        "Set ASSET_ALLOCATION_API_BASE_URL to http://asset-allocation-api-vnet, or set "
+        f"{PUBLIC_CONTROL_PLANE_OVERRIDE_ENV}=true only for an explicitly approved emergency rollback."
+    )
 
 
 def unresolved_placeholders(text: str) -> list[str]:
@@ -174,6 +204,7 @@ def manifest_exists(*, job_name: str, resource_group: str) -> bool:
 
 def render_and_apply_manifests(*, deploy_dir: Path, rendered_dir: Path, resource_group: str, environment: dict[str, str]) -> None:
     resolved_environment = render_environment(environment)
+    ensure_control_plane_base_url_policy(resolved_environment)
     rendered_dir.mkdir(parents=True, exist_ok=True)
     for manifest in sorted(deploy_dir.glob("job_*.yaml")):
         template_text = manifest.read_text(encoding="utf-8")

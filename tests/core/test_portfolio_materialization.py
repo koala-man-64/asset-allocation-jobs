@@ -7,9 +7,11 @@ import pytest
 
 from core.portfolio_contracts import (
     PortfolioAccount,
+    PortfolioAllocationMode,
     PortfolioAlert,
     PortfolioAssignment,
     PortfolioHistoryPoint,
+    PortfolioLedgerEvent,
     PortfolioPosition,
     PortfolioPositionContributor,
     PortfolioRevision,
@@ -19,11 +21,13 @@ from core.portfolio_contracts import (
     StrategyVersionReference,
 )
 from core.portfolio_materialization import (
+    PortfolioMaterializationError,
     PortfolioMaterializationStaleDependencyError,
     PortfolioMaterializedSurfaces,
     PortfolioServingRepository,
     PortfolioStrategyDependency,
     PortfolioStrategyHistorySample,
+    _compute_materialized_surfaces,
     _persist_materialization,
     materialize_portfolio_bundle,
 )
@@ -303,7 +307,18 @@ def _build_bundle(*, dependency_fingerprint: str | None = None, dependency_state
     )
 
 
-def _dependency(run_id: str = "run-1") -> PortfolioStrategyDependency:
+def _dependency(
+    run_id: str = "run-1",
+    *,
+    sleeve_id: str = "sleeve-1",
+    strategy_name: str = "alpha",
+    strategy_version: int = 3,
+    target_weight: float = 1.0,
+    latest_portfolio_value: float = 110.0,
+    latest_period_return: float = 0.1,
+    latest_cumulative_return: float = 0.1,
+    latest_drawdown: float = -0.02,
+) -> PortfolioStrategyDependency:
     history = (
         PortfolioStrategyHistorySample(
             as_of=date(2026, 4, 18),
@@ -320,39 +335,79 @@ def _dependency(run_id: str = "run-1") -> PortfolioStrategyDependency:
         ),
         PortfolioStrategyHistorySample(
             as_of=date(2026, 4, 19),
-            portfolio_value=110.0,
+            portfolio_value=latest_portfolio_value,
             cash=10.0,
             gross_exposure=0.9,
             net_exposure=0.8,
-            period_return=0.1,
-            cumulative_return=0.1,
-            drawdown=-0.02,
+            period_return=latest_period_return,
+            cumulative_return=latest_cumulative_return,
+            drawdown=latest_drawdown,
             turnover=0.01,
             commission=0.0,
             slippage_cost=0.0,
         ),
     )
     return PortfolioStrategyDependency(
-        sleeve_id="sleeve-1",
-        strategy_name="alpha",
-        strategy_version=3,
-        target_weight=1.0,
+        sleeve_id=sleeve_id,
+        strategy_name=strategy_name,
+        strategy_version=strategy_version,
+        target_weight=target_weight,
         run_id=run_id,
         canonical_target_id="target-1",
         canonical_fingerprint="canonical-fp-1",
         completed_at=datetime(2026, 4, 19, 12, 0, tzinfo=timezone.utc),
         latest_as_of=date(2026, 4, 19),
         initial_portfolio_value=100.0,
-        latest_portfolio_value=110.0,
+        latest_portfolio_value=latest_portfolio_value,
         latest_cash=10.0,
         latest_gross_exposure=0.9,
         latest_net_exposure=0.8,
-        latest_drawdown=-0.02,
-        latest_period_return=0.1,
-        latest_cumulative_return=0.1,
+        latest_drawdown=latest_drawdown,
+        latest_period_return=latest_period_return,
+        latest_cumulative_return=latest_cumulative_return,
         latest_turnover=0.01,
         history=history,
         positions=(),
+    )
+
+
+def _build_notional_bundle(*, ledger_events: tuple[PortfolioLedgerEvent, ...] = ()) -> PortfolioMaterializationBundle:
+    base = _build_bundle()
+    return PortfolioMaterializationBundle(
+        account=base.account,
+        account_revision=base.account_revision,
+        active_assignment=base.active_assignment,
+        portfolio=base.portfolio,
+        portfolio_revision=PortfolioRevision.model_validate(
+            {
+                "portfolioName": "Core Model",
+                "version": 1,
+                "allocationMode": "notional_base_ccy",
+                "allocatableCapital": 200.0,
+                "allocations": [
+                    {
+                        "sleeveId": "sleeve-1",
+                        "sleeveName": "Alpha",
+                        "strategy": {"strategyName": "alpha", "strategyVersion": 3},
+                        "allocationMode": "notional_base_ccy",
+                        "targetNotionalBaseCcy": 60.0,
+                    },
+                    {
+                        "sleeveId": "sleeve-2",
+                        "sleeveName": "Defensive",
+                        "strategy": {"strategyName": "defensive", "strategyVersion": 2},
+                        "allocationMode": "notional_base_ccy",
+                        "targetNotionalBaseCcy": 40.0,
+                    },
+                ],
+            }
+        ),
+        ledger_events=ledger_events,
+        alerts=base.alerts,
+        freshness=base.freshness,
+        dependency_fingerprint=base.dependency_fingerprint,
+        dependency_state=base.dependency_state,
+        as_of=base.as_of,
     )
 
 
@@ -458,6 +513,68 @@ def _surfaces() -> PortfolioMaterializedSurfaces:
             ),
         ),
     )
+
+
+def test_portfolio_contracts_wrapper_exports_allocation_mode() -> None:
+    assert set(PortfolioAllocationMode.__args__) == {"percent", "notional_base_ccy"}
+
+
+def test_notional_allocations_materialize_to_effective_weights_and_residual_cash() -> None:
+    result = _compute_materialized_surfaces(
+        bundle=_build_notional_bundle(),
+        dependencies=(
+            _dependency(),
+            _dependency(
+                "run-2",
+                sleeve_id="sleeve-2",
+                strategy_name="defensive",
+                strategy_version=2,
+                target_weight=0.2,
+                latest_portfolio_value=90.0,
+                latest_period_return=-0.1,
+                latest_cumulative_return=-0.1,
+                latest_drawdown=-0.1,
+            ),
+        ),
+    )
+
+    assert result.snapshot.nav == pytest.approx(202.0)
+    assert result.snapshot.cash == pytest.approx(110.0)
+    assert result.history[-1].cumulativePnl == pytest.approx(2.0)
+    assert result.history[-1].cumulativeReturn == pytest.approx(0.01)
+
+    attribution_by_sleeve = {item.sleeveId: item for item in result.attribution}
+    assert attribution_by_sleeve["sleeve-1"].targetWeight == pytest.approx(0.3)
+    assert attribution_by_sleeve["sleeve-1"].marketValue == pytest.approx(66.0)
+    assert attribution_by_sleeve["sleeve-2"].targetWeight == pytest.approx(0.2)
+    assert attribution_by_sleeve["sleeve-2"].marketValue == pytest.approx(36.0)
+
+
+def test_notional_allocations_fail_when_seed_capital_is_too_small() -> None:
+    ledger_events = (
+        PortfolioLedgerEvent(
+            eventId="cash-1",
+            accountId="acct-core",
+            effectiveAt=datetime(2026, 1, 2, 9, 30, tzinfo=timezone.utc),
+            eventType="opening_balance",
+            cashAmount=75.0,
+        ),
+    )
+
+    with pytest.raises(PortfolioMaterializationError, match="exceeding seed capital 75.00"):
+        _compute_materialized_surfaces(
+            bundle=_build_notional_bundle(ledger_events=ledger_events),
+            dependencies=(
+                _dependency(),
+                _dependency(
+                    "run-2",
+                    sleeve_id="sleeve-2",
+                    strategy_name="defensive",
+                    strategy_version=2,
+                    target_weight=0.2,
+                ),
+            ),
+        )
 
 
 def test_materialize_portfolio_bundle_raises_on_stale_dependency_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -21,6 +21,24 @@ def _stub_symbol_policy_helpers(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bronze, "list_promoted_invalid_candidate_markers", lambda **kwargs: [])
 
 
+def test_alpha_vantage_enrichment_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED", raising=False)
+
+    assert bronze._alpha_vantage_enrichment_enabled() is False
+
+
+def test_alpha_vantage_client_failure_does_not_block_massive_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise_client_error():
+        raise RuntimeError("missing Alpha Vantage key")
+
+    monkeypatch.setattr(bronze.mdc, "write_warning", lambda _message: None)
+    manager = bronze._ThreadLocalAlphaVantageClientManager(factory=_raise_client_error)
+    monkeypatch.setattr(bronze, "_active_alpha_vantage_client_manager", manager)
+
+    assert bronze._get_active_alpha_vantage_client() is None
+    assert bronze._active_alpha_vantage_client_manager is None
+
+
 def _market_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 

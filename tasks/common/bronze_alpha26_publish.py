@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
 
 import pandas as pd
@@ -97,6 +98,48 @@ def _aggregate_finance_subdomains(bucket_summaries: Iterable[dict[str, Any]]) ->
     return out or None
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _bucket_artifact_payload(
+    session: BronzeAlpha26PublishSession,
+    *,
+    bucket: str,
+    summary: dict[str, Any],
+    data_path: str,
+    manifest_path: Optional[str],
+) -> dict[str, Any]:
+    artifact_path = domain_artifacts.bucket_artifact_path(layer="bronze", domain=session.domain, bucket=bucket)
+    now = _utc_now_iso()
+    date_range = summary.get("dateRange") if isinstance(summary, dict) else None
+    affected_start = date_range.get("min") if isinstance(date_range, dict) else None
+    affected_end = date_range.get("max") if isinstance(date_range, dict) else None
+    return {
+        "version": getattr(domain_artifacts, "ARTIFACT_VERSION", 1),
+        "scope": "bucket",
+        "layer": "bronze",
+        "domain": session.domain,
+        "subDomain": None,
+        "bucket": bucket,
+        "rootPath": domain_artifacts.root_prefix(layer="bronze", domain=session.domain),
+        "artifactPath": artifact_path,
+        "updatedAt": now,
+        "computedAt": now,
+        "publishedAt": now,
+        "producerJobName": session.job_name or None,
+        "jobRunId": session.run_id,
+        "runId": session.run_id,
+        "manifestPath": manifest_path,
+        "activeDataPrefix": session.run_prefix,
+        "dataPath": data_path,
+        "sourceCommit": None,
+        "affectedAsOfStart": affected_start,
+        "affectedAsOfEnd": affected_end,
+        **dict(summary or {}),
+    }
+
+
 def start_alpha26_bronze_publish(
     *,
     domain: str,
@@ -161,21 +204,11 @@ def write_alpha26_bronze_bucket(
         domain=session.domain,
         date_column=session.date_column,
     )
-    artifact_payload = domain_artifacts.write_bucket_artifact(
-        layer="bronze",
-        domain=session.domain,
-        bucket=clean_bucket,
-        df=prepared_frame,
-        date_column=session.date_column,
-        client=session.storage_client,
-        job_name=session.job_name,
-        job_run_id=session.run_id,
-        run_id=session.run_id,
-        active_data_prefix=session.run_prefix,
-        data_path=path,
-    )
-    if isinstance(artifact_payload, dict):
-        session.bucket_artifacts[clean_bucket] = artifact_payload
+    session.bucket_artifacts[clean_bucket] = {
+        "bucket": clean_bucket,
+        "summary": summary,
+        "dataPath": path,
+    }
     session.bucket_paths.append(entry)
     session.bucket_summaries.append(summary)
     session.total_bytes += len(payload)
@@ -228,14 +261,24 @@ def finalize_alpha26_bronze_publish(session: BronzeAlpha26PublishSession) -> Pub
     )
     manifest_path = str((manifest_result or {}).get("manifestPath") or "").strip() or None
 
-    if manifest_path:
-        for artifact_payload in session.bucket_artifacts.values():
-            artifact_path = str(artifact_payload.get("artifactPath") or "").strip()
-            if not artifact_path:
-                continue
-            refreshed_payload = dict(artifact_payload)
-            refreshed_payload["manifestPath"] = manifest_path
-            mdc.save_json_content(refreshed_payload, artifact_path, client=session.storage_client)
+    published_bucket_artifacts: dict[str, dict[str, Any]] = {}
+    for bucket in bronze_bucketing.ALPHABET_BUCKETS:
+        pending = session.bucket_artifacts.get(bucket)
+        if not isinstance(pending, dict):
+            continue
+        artifact_payload = _bucket_artifact_payload(
+            session,
+            bucket=bucket,
+            summary=dict(pending.get("summary") or {}),
+            data_path=str(pending.get("dataPath") or "").strip(),
+            manifest_path=manifest_path,
+        )
+        artifact_path = str(artifact_payload.get("artifactPath") or "").strip()
+        if not artifact_path:
+            continue
+        mdc.save_json_content(artifact_payload, artifact_path, client=session.storage_client)
+        published_bucket_artifacts[bucket] = artifact_payload
+    session.bucket_artifacts = published_bucket_artifacts
 
     domain_artifacts.write_domain_artifact(
         layer="bronze",

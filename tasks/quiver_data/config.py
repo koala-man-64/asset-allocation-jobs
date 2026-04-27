@@ -40,8 +40,10 @@ class QuiverDataConfig:
     historical_batch_size: int
     symbol_limit: int
     page_size: int
+    max_pages_per_request: int
     sec13f_today_only: bool
     postgres_dsn: str | None
+    enabled: bool = False
 
     def symbol_batch_size(self) -> int:
         if self.job_mode == "historical_backfill":
@@ -58,11 +60,13 @@ class QuiverDataConfig:
             bronze_container=_env_text("AZURE_CONTAINER_BRONZE", "bronze"),
             silver_container=_env_text("AZURE_CONTAINER_SILVER", "silver"),
             gold_container=_env_text("AZURE_CONTAINER_GOLD", "gold"),
+            enabled=_env_bool("QUIVER_DATA_ENABLED", False),
             job_mode=job_mode,
             ticker_batch_size=max(1, _env_int("QUIVER_DATA_TICKER_BATCH_SIZE", 50)),
             historical_batch_size=max(1, _env_int("QUIVER_DATA_HISTORICAL_BATCH_SIZE", 20)),
             symbol_limit=max(0, _env_int("QUIVER_DATA_SYMBOL_LIMIT", 500)),
             page_size=max(1, min(500, _env_int("QUIVER_DATA_PAGE_SIZE", 100))),
+            max_pages_per_request=max(0, _env_int("QUIVER_DATA_MAX_PAGES_PER_REQUEST", 0)),
             sec13f_today_only=_env_bool("QUIVER_DATA_SEC13F_TODAY_ONLY", True),
             postgres_dsn=_env_text("POSTGRES_DSN") or None,
         )

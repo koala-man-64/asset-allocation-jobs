@@ -246,6 +246,8 @@ def test_market_job_manifests_keep_folder_envs_aligned_to_contract_names() -> No
             "value: ${AZURE_FOLDER_FINANCE}",
             "value: ${AZURE_FOLDER_EARNINGS}",
             "value: ${AZURE_FOLDER_TARGETS}",
+            "name: BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED",
+            "value: ${BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED}",
         ),
         "job_silver_market_data.yaml": (
             "value: ${AZURE_FOLDER_MARKET}",
@@ -314,16 +316,26 @@ def test_quiver_bronze_manifests_define_mode_and_runtime_envs() -> None:
     for manifest_name in ("job_bronze_quiver_data.yaml", "job_bronze_quiver_backfill.yaml"):
         text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
         for required_name in (
+            "QUIVER_DATA_ENABLED",
             "QUIVER_DATA_JOB_MODE",
             "QUIVER_DATA_TICKER_BATCH_SIZE",
             "QUIVER_DATA_HISTORICAL_BATCH_SIZE",
             "QUIVER_DATA_SYMBOL_LIMIT",
             "QUIVER_DATA_PAGE_SIZE",
+            "QUIVER_DATA_MAX_PAGES_PER_REQUEST",
             "QUIVER_DATA_SEC13F_TODAY_ONLY",
         ):
             assert f"name: {required_name}" in text, f"{manifest_name} missing {required_name}"
         assert 'name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS' in text, manifest_name
         assert 'value: "120"' in text, manifest_name
+
+
+def test_economic_catalyst_bronze_manifest_runs_weekdays_every_30_minutes_without_retries() -> None:
+    text = (repo_root() / "deploy" / "job_bronze_economic_catalyst_data.yaml").read_text(encoding="utf-8")
+
+    assert "triggerType: Schedule" in text
+    assert 'cronExpression: "*/30 * * * 1-5"' in text
+    assert "replicaRetryLimit: 0" in text
 
 
 def test_platinum_rankings_job_does_not_define_deploy_time_ranking_overrides() -> None:

@@ -92,6 +92,7 @@ _PROMOTED_REPROBE_LIMIT = 25
 _DOMAIN = "market"
 _PROVIDER = "massive"
 _NO_MARKET_HISTORY_REASON_CODE = "provider_no_market_history"
+_ALPHA_VANTAGE_ENRICHMENT_ENV = "BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED"
 _DEFAULT_DIVIDEND_AMOUNT = 0.0
 _DEFAULT_SPLIT_COEFFICIENT = 1.0
 _active_alpha_vantage_client_manager: "_ThreadLocalAlphaVantageClientManager | None" = None
@@ -99,6 +100,10 @@ _active_alpha_vantage_client_manager: "_ThreadLocalAlphaVantageClientManager | N
 
 def _is_truthy(raw: str | None) -> bool:
     return (raw or "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _alpha_vantage_enrichment_enabled() -> bool:
+    return _is_truthy(os.environ.get(_ALPHA_VANTAGE_ENRICHMENT_ENV))
 
 
 def _is_regime_required_market_symbol(symbol: object) -> bool:
@@ -1200,10 +1205,22 @@ class _ThreadLocalAlphaVantageClientManager:
 
 
 def _get_active_alpha_vantage_client() -> AlphaVantageGatewayClient | None:
+    global _active_alpha_vantage_client_manager
+
     manager = _active_alpha_vantage_client_manager
     if manager is None:
         return None
-    return manager.get_client()
+    try:
+        return manager.get_client()
+    except Exception as exc:
+        _active_alpha_vantage_client_manager = None
+        mdc.write_warning(
+            "Alpha Vantage market corporate-action enrichment disabled for remainder of run; "
+            "continuing Massive bronze ingestion without enrichment. detail={detail}".format(
+                detail=_truncate_trace_text(f"{type(exc).__name__}: {exc}", limit=260),
+            )
+        )
+        return None
 
 
 def _is_recoverable_massive_error(exc: Exception) -> bool:
@@ -1503,8 +1520,14 @@ async def main_async() -> int:
         f"Bronze market alpha26 bucket plan: buckets_with_symbols={buckets_with_symbols} total_buckets={len(bronze_bucketing.ALPHABET_BUCKETS)}"
     )
 
+    alpha_vantage_enabled = _alpha_vantage_enrichment_enabled()
+    mdc.write_line(
+        "Bronze market Alpha Vantage enrichment: "
+        f"enabled={str(alpha_vantage_enabled).lower()} env={_ALPHA_VANTAGE_ENRICHMENT_ENV}"
+    )
+
     client_manager = _ThreadLocalMassiveClientManager()
-    alpha_vantage_client_manager = _ThreadLocalAlphaVantageClientManager()
+    alpha_vantage_client_manager = _ThreadLocalAlphaVantageClientManager() if alpha_vantage_enabled else None
     publish_session = start_alpha26_bronze_publish(
         domain="market",
         root_prefix="market-data",
@@ -1846,7 +1869,8 @@ async def main_async() -> int:
         except Exception:
             pass
         try:
-            alpha_vantage_client_manager.close_all()
+            if alpha_vantage_client_manager is not None:
+                alpha_vantage_client_manager.close_all()
         except Exception:
             pass
 

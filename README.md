@@ -10,7 +10,7 @@ Runtime-owned jobs repository for:
 Local development installs versioned shared packages rather than sibling repos:
 
 ```powershell
-python -m pip install asset-allocation-contracts==3.3.0
+python -m pip install asset-allocation-contracts==3.5.0
 python -m pip install asset-allocation-runtime-common==3.4.3
 python scripts/run_quality_gate.py check-fast
 ```
@@ -44,6 +44,7 @@ Quiver runs as a control-plane-gated Bronze/Silver/Gold pipeline in this repo.
 - Bronze stays API-backed for provider access and supports two modes:
   - `incremental`: hourly weekday schedule for global live feeds plus a rotating ticker slice
   - `historical_backfill`: manual replay for ticker-heavy historical feeds
+- Bronze is disabled by default with `QUIVER_DATA_ENABLED=false`. A disabled run exits `0` before creating a Quiver client, writing artifacts, health markers, or triggering Silver.
 - Quiver feed coverage includes live/global insider trading, Wall Street Bets, and patents, plus ticker-rotated historical Wall Street Bets and patents during manual backfills.
 - The ticker universe is resolved directly from Postgres for both scheduled and manual runs.
 - Bronze and Silver persist under `quiver-data/...`; Gold persists under `quiver/...`.
@@ -51,11 +52,13 @@ Quiver runs as a control-plane-gated Bronze/Silver/Gold pipeline in this repo.
 Key Quiver envs:
 
 - `AZURE_FOLDER_QUIVER`
+- `QUIVER_DATA_ENABLED`
 - `QUIVER_DATA_JOB_MODE`
 - `QUIVER_DATA_TICKER_BATCH_SIZE`
 - `QUIVER_DATA_HISTORICAL_BATCH_SIZE`
 - `QUIVER_DATA_SYMBOL_LIMIT`
 - `QUIVER_DATA_PAGE_SIZE`
+- `QUIVER_DATA_MAX_PAGES_PER_REQUEST`
 - `QUIVER_DATA_SEC13F_TODAY_ONLY`
 
 ## Operations
@@ -69,6 +72,7 @@ Canonical workflows live under `.github/workflows/`.
 - `scripts/setup-env.ps1` builds repo-local `.env.web` using Azure and git discovery where possible.
 - `scripts/sync-all-to-github.ps1` syncs the `.env.web` surface into repo vars and secrets.
 - `DEPLOYMENT_SETUP.md` is the canonical deploy, operate, and rollback runbook.
+- `docs/ops/bronze-runtime-hardening.md` documents the Bronze deployment drift checks, safe defaults, canary order, and Log Analytics alert queries.
 - `docs/ops/networking-audit-2026-04-18.md` captures the live Azure networking posture observed on April 18, 2026 and the prioritized hardening backlog.
 - `docs/ops/economic-catalyst-data.md` documents the economic catalyst Bronze/Silver/Gold pipeline, Postgres serving tables, source precedence, and replay expectations.
 

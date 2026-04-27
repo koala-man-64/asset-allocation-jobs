@@ -149,7 +149,7 @@ class EconomicCatalystConfig:
         )
         vendor_sources = _csv_or_default(
             os.environ.get("ECONOMIC_CATALYST_VENDOR_SOURCES", ""),
-            ("nasdaq_tables", "massive_news", "alpaca_news", "alpha_vantage_news"),
+            ("nasdaq_tables",),
         )
         nasdaq_table_configs = tuple(
             NasdaqTableConfig.from_dict(item)

@@ -73,6 +73,8 @@ properties:
         value: ${ASSET_ALLOCATION_API_SCOPE}
       - name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS
         value: "120"
+      - name: QUIVER_DATA_ENABLED
+        value: ${QUIVER_DATA_ENABLED}
       - name: QUIVER_DATA_JOB_MODE
         value: historical_backfill
       - name: QUIVER_DATA_TICKER_BATCH_SIZE
@@ -83,6 +85,8 @@ properties:
         value: ${QUIVER_DATA_SYMBOL_LIMIT}
       - name: QUIVER_DATA_PAGE_SIZE
         value: ${QUIVER_DATA_PAGE_SIZE}
+      - name: QUIVER_DATA_MAX_PAGES_PER_REQUEST
+        value: ${QUIVER_DATA_MAX_PAGES_PER_REQUEST}
       - name: QUIVER_DATA_SEC13F_TODAY_ONLY
         value: ${QUIVER_DATA_SEC13F_TODAY_ONLY}
       image: ${JOB_IMAGE}
