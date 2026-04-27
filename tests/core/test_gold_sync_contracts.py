@@ -565,10 +565,18 @@ def test_market_sync_config_includes_market_structure_columns() -> None:
                 "date": [pd.Timestamp("2026-02-28")],
                 "symbol": ["aapl"],
                 "donchian_high_20d": [110.5],
+                "dist_prev_week_high_atr": [0.75],
+                "position_in_20d_range": [0.65],
                 "sr_support_1_touches": [2],
                 "fib_swing_direction": [-1],
                 "fib_level_618": [98.2],
                 "fib_in_value_zone": [1],
+                "swept_sr_resistance_1": [1],
+                "bars_since_bearish_sweep": [2],
+                "bearish_confirm_after_sweep": [1],
+                "amihud_20d": [0.0000123],
+                "dollar_volume_20d": [1500000.0],
+                "liquidity_stress_score": [1.25],
             }
         ),
         config=config,
@@ -576,12 +584,22 @@ def test_market_sync_config_includes_market_structure_columns() -> None:
 
     row = prepared.iloc[0]
     assert "donchian_high_20d" in config.columns
+    assert "dist_prev_week_high_atr" in config.columns
+    assert "position_in_20d_range" in config.columns
     assert "fib_level_618" in config.columns
     assert "sr_support_1_touches" in config.integer_columns
     assert "fib_swing_direction" in config.integer_columns
+    assert "swept_sr_resistance_1" in config.integer_columns
+    assert "bars_since_bearish_sweep" in config.integer_columns
+    assert "bearish_confirm_after_sweep" in config.integer_columns
     assert int(row["sr_support_1_touches"]) == 2
     assert int(row["fib_swing_direction"]) == -1
     assert int(row["fib_in_value_zone"]) == 1
+    assert int(row["swept_sr_resistance_1"]) == 1
+    assert int(row["bars_since_bearish_sweep"]) == 2
+    assert int(row["bearish_confirm_after_sweep"]) == 1
+    assert row["amihud_20d"] == pytest.approx(0.0000123)
+    assert row["dollar_volume_20d"] == pytest.approx(1_500_000.0)
 
 
 def test_finance_sync_config_includes_wide_ratio_columns() -> None:

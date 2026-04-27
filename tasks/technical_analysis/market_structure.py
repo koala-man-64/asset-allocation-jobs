@@ -4,6 +4,7 @@ This module adds:
 - Donchian channel levels and breakout flags.
 - Confirmed-pivot support/resistance zone scalars.
 - Fibonacci retracement levels derived from the latest confirmed swing.
+- Daily liquidity-location, sweep, and impact proxies built from OHLCV only.
 
 All features are aligned to the row's as-of date and avoid look-ahead leakage by
 using only pivots confirmed after `_PIVOT_SPAN` future bars have elapsed.
@@ -22,6 +23,10 @@ _PIVOT_SPAN = 3
 _ZONE_RECENCY_BARS = 63.0
 _ZONE_PRICE_PCT = 0.0075
 _ZONE_ATR_MULT = 0.35
+_LIQUIDITY_ROLLING_WINDOW = 20
+_LIQUIDITY_ZSCORE_WINDOW = 252
+_SWEEP_CONFIRM_WINDOW = 3
+_MIN_DOLLAR_VOLUME = 1.0
 
 
 @dataclass
@@ -134,6 +139,37 @@ def _confirmed_pivot_mask(series: pd.Series, *, mode: str) -> pd.Series:
     else:  # pragma: no cover - defensive only
         raise ValueError(f"Unsupported pivot mode={mode!r}")
     return series.eq(extrema) & series.notna()
+
+
+def _previous_period_extrema(
+    *,
+    dates: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    freq: str,
+) -> tuple[pd.Series, pd.Series]:
+    periods = dates.dt.to_period(freq)
+    grouped = (
+        pd.DataFrame({"period": periods, "high": high, "low": low})
+        .groupby("period", sort=True)
+        .agg(period_high=("high", "max"), period_low=("low", "min"))
+        .shift(1)
+    )
+    joined = pd.DataFrame({"period": periods}).join(grouped, on="period")
+    return joined["period_high"], joined["period_low"]
+
+
+def _bars_since_event(event: pd.Series) -> pd.Series:
+    event_mask = event.fillna(0).astype(bool)
+    bar_index = pd.Series(np.arange(len(event_mask), dtype="float64"), index=event.index)
+    last_seen = pd.Series(np.where(event_mask, bar_index, np.nan), index=event.index, dtype="float64").ffill()
+    return (bar_index - last_seen).where(last_seen.notna())
+
+
+def _rolling_zscore(series: pd.Series, *, window: int) -> pd.Series:
+    rolling_mean = series.rolling(window=window, min_periods=window).mean()
+    rolling_std = series.rolling(window=window, min_periods=window).std()
+    return _safe_div(series - rolling_mean, rolling_std)
 
 
 def _build_structure_frame(
@@ -345,7 +381,9 @@ def add_market_structure_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add Donchian, support/resistance, and Fibonacci features.
 
     The function expects single-symbol daily data with an existing `atr_14d`
-    column so distance metrics remain normalized and comparable.
+    column so distance metrics remain normalized and comparable. When available,
+    it also uses `volume`, `return_1d`, and `gap_atr` to derive daily liquidity
+    proxies without tightening the required caller contract.
     """
 
     out = df.copy()
@@ -368,6 +406,39 @@ def add_market_structure_features(df: pd.DataFrame) -> pd.DataFrame:
     close = out["close"]
     atr = out["atr_14d"]
     prev_close = close.shift(1)
+    volume = (
+        pd.to_numeric(out["volume"], errors="coerce")
+        if "volume" in out.columns
+        else pd.Series(np.nan, index=out.index, dtype="float64")
+    )
+    return_1d = (
+        pd.to_numeric(out["return_1d"], errors="coerce")
+        if "return_1d" in out.columns
+        else close.pct_change()
+    )
+    gap_atr = (
+        pd.to_numeric(out["gap_atr"], errors="coerce").abs()
+        if "gap_atr" in out.columns
+        else pd.Series(0.0, index=out.index, dtype="float64")
+    )
+
+    prev_week_high, prev_week_low = _previous_period_extrema(
+        dates=out["date"],
+        high=high,
+        low=low,
+        freq="W-FRI",
+    )
+    out["dist_prev_week_high_atr"] = _safe_div(prev_week_high - close, atr)
+    out["dist_prev_week_low_atr"] = _safe_div(close - prev_week_low, atr)
+
+    prev_month_high, prev_month_low = _previous_period_extrema(
+        dates=out["date"],
+        high=high,
+        low=low,
+        freq="M",
+    )
+    out["dist_prev_month_high_atr"] = _safe_div(prev_month_high - close, atr)
+    out["dist_prev_month_low_atr"] = _safe_div(close - prev_month_low, atr)
 
     for window in _DONCHIAN_WINDOWS:
         high_col = f"donchian_high_{window}d"
@@ -389,8 +460,75 @@ def add_market_structure_features(df: pd.DataFrame) -> pd.DataFrame:
         out[crosses_above_col] = (above & (prev_close <= out[high_col])).fillna(False).astype(int)
         out[crosses_below_col] = (below & (prev_close >= out[low_col])).fillna(False).astype(int)
 
+    out["position_in_20d_range"] = _safe_div(
+        close - out["donchian_low_20d"],
+        out["donchian_high_20d"] - out["donchian_low_20d"],
+    )
+    out["position_in_55d_range"] = _safe_div(
+        close - out["donchian_low_55d"],
+        out["donchian_high_55d"] - out["donchian_low_55d"],
+    )
+
     structure = _build_structure_frame(high=high, low=low, close=close, atr=atr)
     for column in structure.columns:
         out[column] = structure[column]
+
+    resistance_high = out["sr_resistance_1_high"]
+    support_low = out["sr_support_1_low"]
+
+    swept_resistance = (high > resistance_high) & (close < resistance_high)
+    swept_support = (low < support_low) & (close > support_low)
+    out["swept_sr_resistance_1"] = swept_resistance.fillna(False).astype(int)
+    out["swept_sr_support_1"] = swept_support.fillna(False).astype(int)
+
+    bearish_penetration = (high - resistance_high).clip(lower=0.0).where(resistance_high.notna())
+    bullish_penetration = (support_low - low).clip(lower=0.0).where(support_low.notna())
+    out["bearish_sweep_magnitude_atr"] = _safe_div(bearish_penetration, atr)
+    out["bullish_sweep_magnitude_atr"] = _safe_div(bullish_penetration, atr)
+
+    bearish_reclaim = pd.Series(0.0, index=out.index, dtype="float64").where(resistance_high.notna())
+    bearish_mask = bearish_penetration > 0.0
+    bearish_reclaim.loc[bearish_mask] = (
+        resistance_high.loc[bearish_mask] - close.loc[bearish_mask]
+    ) / bearish_penetration.loc[bearish_mask]
+    out["bearish_sweep_reclaim_frac"] = bearish_reclaim
+
+    bullish_reclaim = pd.Series(0.0, index=out.index, dtype="float64").where(support_low.notna())
+    bullish_mask = bullish_penetration > 0.0
+    bullish_reclaim.loc[bullish_mask] = (
+        close.loc[bullish_mask] - support_low.loc[bullish_mask]
+    ) / bullish_penetration.loc[bullish_mask]
+    out["bullish_sweep_reclaim_frac"] = bullish_reclaim
+
+    out["bars_since_bearish_sweep"] = _bars_since_event(out["swept_sr_resistance_1"])
+    out["bars_since_bullish_sweep"] = _bars_since_event(out["swept_sr_support_1"])
+
+    last_bearish_sweep_low = low.where(swept_resistance).ffill()
+    last_bullish_sweep_high = high.where(swept_support).ffill()
+    out["bearish_confirm_after_sweep"] = (
+        (out["bars_since_bearish_sweep"] <= _SWEEP_CONFIRM_WINDOW) & close.lt(last_bearish_sweep_low)
+    ).fillna(False).astype(int)
+    out["bullish_confirm_after_sweep"] = (
+        (out["bars_since_bullish_sweep"] <= _SWEEP_CONFIRM_WINDOW) & close.gt(last_bullish_sweep_high)
+    ).fillna(False).astype(int)
+
+    dollar_volume = (close * volume).where(close.notna() & volume.notna())
+    safe_dollar_volume = dollar_volume.clip(lower=_MIN_DOLLAR_VOLUME)
+    out["dollar_volume_20d"] = dollar_volume.rolling(
+        window=_LIQUIDITY_ROLLING_WINDOW,
+        min_periods=_LIQUIDITY_ROLLING_WINDOW,
+    ).mean()
+    amihud_input = return_1d.abs().divide(safe_dollar_volume)
+    amihud_input = amihud_input.where(return_1d.notna() & dollar_volume.notna())
+    out["amihud_20d"] = amihud_input.rolling(
+        window=_LIQUIDITY_ROLLING_WINDOW,
+        min_periods=_LIQUIDITY_ROLLING_WINDOW,
+    ).mean()
+    out["amihud_z_252d"] = _rolling_zscore(out["amihud_20d"], window=_LIQUIDITY_ZSCORE_WINDOW)
+    out["dollar_volume_z_252d"] = _rolling_zscore(
+        out["dollar_volume_20d"],
+        window=_LIQUIDITY_ZSCORE_WINDOW,
+    )
+    out["liquidity_stress_score"] = out["amihud_z_252d"] - out["dollar_volume_z_252d"] + gap_atr.fillna(0.0)
 
     return out.replace([np.inf, -np.inf], np.nan)
