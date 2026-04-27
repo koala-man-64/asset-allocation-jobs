@@ -7,6 +7,7 @@ The `economic_catalyst_data` domain ingests official macro calendars, structured
 - Official schedule and release sources: FRED, BLS, BEA, Federal Reserve, Treasury, ECB, BOE, BOJ.
 - Structured vendor overlays: Nasdaq Data Link table mappings configured through `ECONOMIC_CATALYST_NASDAQ_TABLES`.
 - Headline overlays: Massive primary, Alpaca and Alpha Vantage secondary.
+- Production defaults enable only the structured vendor overlay (`ECONOMIC_CATALYST_VENDOR_SOURCES=nasdaq_tables`); headline vendors are opt-in until their credentials, entitlements, and rate limits are verified.
 - Postgres stores structured event surfaces plus headline metadata only. Raw payloads and full article text remain in Bronze storage.
 
 ## Storage Layout

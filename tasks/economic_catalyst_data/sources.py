@@ -43,11 +43,51 @@ class SourceFetchError(RuntimeError):
     pass
 
 
+_SECRET_LABEL_PATTERN = r"(api[\s_-]?key|apikey|token|secret|password|authorization)"
+_SECRET_TOKEN_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._~+/=-]*"
+_SECRET_PROSE_TOKEN_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._~+/=-]{5,}"
+_PUBLIC_CALENDAR_USER_AGENT = "AssetAllocationJobs/1.0 (+https://github.com/koala-man-64/asset-allocation-jobs)"
+
+
+def redact_secret_phrases(text: str) -> str:
+    redacted = re.sub(
+        rf"(?i)\bauthorization\s*[:=]\s*(Bearer|Basic)\s+{_SECRET_TOKEN_PATTERN}",
+        "authorization=<redacted>",
+        text,
+    )
+    redacted = re.sub(
+        rf"(?i)\b{_SECRET_LABEL_PATTERN}\s*[:=]\s*{_SECRET_TOKEN_PATTERN}",
+        r"\1=<redacted>",
+        redacted,
+    )
+    redacted = re.sub(
+        rf"(?i)\b{_SECRET_LABEL_PATTERN}\s+(as|is|was)\s+['\"]{_SECRET_TOKEN_PATTERN}['\"]",
+        r"\1 \2 <redacted>",
+        redacted,
+    )
+    redacted = re.sub(
+        rf"(?i)\b{_SECRET_LABEL_PATTERN}\s+(as|is|was)\s+{_SECRET_TOKEN_PATTERN}",
+        r"\1 \2 <redacted>",
+        redacted,
+    )
+    redacted = re.sub(
+        rf"(?i)\b{_SECRET_LABEL_PATTERN}\s+['\"]{_SECRET_TOKEN_PATTERN}['\"]",
+        r"\1 <redacted>",
+        redacted,
+    )
+    return re.sub(
+        rf"(?i)\b{_SECRET_LABEL_PATTERN}\s+{_SECRET_PROSE_TOKEN_PATTERN}",
+        r"\1 <redacted>",
+        redacted,
+    )
+
+
 def _sanitize_issue_detail(value: object, *, limit: int = 220) -> str:
     text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
     if not text:
         return ""
     text = re.sub(r"https?://\S+", "<url>", text)
+    text = redact_secret_phrases(text)
     text = re.sub(
         r"(?i)\b(api[_-]?key|apikey|token|secret|password|authorization)=([^\s&]+)",
         r"\1=<redacted>",
@@ -77,6 +117,14 @@ def _iso(dt: datetime) -> str:
 
 def _http_client(timeout_seconds: float) -> httpx.Client:
     return httpx.Client(timeout=httpx.Timeout(timeout_seconds), follow_redirects=True, trust_env=False)
+
+
+def _public_calendar_headers(accept: str) -> dict[str, str]:
+    return {
+        "User-Agent": _PUBLIC_CALENDAR_USER_AGENT,
+        "Accept": accept,
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
 
 def _json_batch(
@@ -165,7 +213,11 @@ def _fred_release_batches(config: EconomicCatalystConfig, *, now: datetime) -> l
 
 
 def _bls_release_batches(config: EconomicCatalystConfig, *, now: datetime) -> list[RawSourceBatch]:
-    text = _request_text(_http_client(config.http_timeout_seconds), config.bls_ics_url)
+    text = _request_text(
+        _http_client(config.http_timeout_seconds),
+        config.bls_ics_url,
+        headers=_public_calendar_headers("text/calendar, text/plain, */*"),
+    )
     return [
         _text_batch(
             source_name="bls_release_calendar",
@@ -179,7 +231,11 @@ def _bls_release_batches(config: EconomicCatalystConfig, *, now: datetime) -> li
 
 
 def _bea_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> list[RawSourceBatch]:
-    text = _request_text(_http_client(config.http_timeout_seconds), config.bea_schedule_url)
+    text = _request_text(
+        _http_client(config.http_timeout_seconds),
+        config.bea_schedule_url,
+        headers=_public_calendar_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    )
     return [
         _text_batch(
             source_name="bea_release_schedule",
@@ -196,7 +252,11 @@ def _fomc_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> 
     client = _http_client(config.http_timeout_seconds)
     batches: list[RawSourceBatch] = []
     for index, url in enumerate(config.fomc_schedule_urls, start=1):
-        text = _request_text(client, url)
+        text = _request_text(
+            client,
+            url,
+            headers=_public_calendar_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        )
         batches.append(
             _text_batch(
                 source_name="fomc_schedule",
@@ -211,7 +271,11 @@ def _fomc_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> 
 
 
 def _ecb_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> list[RawSourceBatch]:
-    text = _request_text(_http_client(config.http_timeout_seconds), config.ecb_calendar_url)
+    text = _request_text(
+        _http_client(config.http_timeout_seconds),
+        config.ecb_calendar_url,
+        headers=_public_calendar_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    )
     return [
         _text_batch(
             source_name="ecb_policy_calendar",
@@ -225,7 +289,11 @@ def _ecb_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> l
 
 
 def _boe_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> list[RawSourceBatch]:
-    text = _request_text(_http_client(config.http_timeout_seconds), config.boe_calendar_url)
+    text = _request_text(
+        _http_client(config.http_timeout_seconds),
+        config.boe_calendar_url,
+        headers=_public_calendar_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    )
     return [
         _text_batch(
             source_name="boe_mpc_calendar",
@@ -239,7 +307,11 @@ def _boe_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> l
 
 
 def _boj_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> list[RawSourceBatch]:
-    text = _request_text(_http_client(config.http_timeout_seconds), config.boj_schedule_url)
+    text = _request_text(
+        _http_client(config.http_timeout_seconds),
+        config.boj_schedule_url,
+        headers=_public_calendar_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    )
     return [
         _text_batch(
             source_name="boj_release_schedule",
@@ -253,7 +325,11 @@ def _boj_schedule_batches(config: EconomicCatalystConfig, *, now: datetime) -> l
 
 
 def _treasury_auction_batches(config: EconomicCatalystConfig, *, now: datetime) -> list[RawSourceBatch]:
-    text = _request_text(_http_client(config.http_timeout_seconds), config.treasury_auctions_url)
+    text = _request_text(
+        _http_client(config.http_timeout_seconds),
+        config.treasury_auctions_url,
+        headers=_public_calendar_headers("application/xml,text/xml,text/html;q=0.9,*/*;q=0.8"),
+    )
     payload_format = "xml"
     try:
         ET.fromstring(text)

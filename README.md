@@ -72,6 +72,7 @@ Canonical workflows live under `.github/workflows/`.
 - `scripts/setup-env.ps1` builds repo-local `.env.web` using Azure and git discovery where possible.
 - `scripts/sync-all-to-github.ps1` syncs the `.env.web` surface into repo vars and secrets.
 - `DEPLOYMENT_SETUP.md` is the canonical deploy, operate, and rollback runbook.
+- `docs/ops/bronze-runtime-hardening.md` documents the Bronze deployment drift checks, safe defaults, canary order, and Log Analytics alert queries.
 - `docs/ops/networking-audit-2026-04-18.md` captures the live Azure networking posture observed on April 18, 2026 and the prioritized hardening backlog.
 - `docs/ops/economic-catalyst-data.md` documents the economic catalyst Bronze/Silver/Gold pipeline, Postgres serving tables, source precedence, and replay expectations.
 

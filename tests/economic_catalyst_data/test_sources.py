@@ -101,3 +101,56 @@ def test_fetch_requested_sources_sanitizes_failure_details(monkeypatch) -> None:
 
     assert failures == ["massive_news: RuntimeError: GET <url> failed with Bearer <redacted>"]
     assert "secret-token" not in failures[0]
+
+
+def test_fetch_requested_sources_sanitizes_provider_secret_prose(monkeypatch) -> None:
+    def _failing_fetcher(config: EconomicCatalystConfig, now: datetime) -> list[RawSourceBatch]:
+        raise RuntimeError(
+            "Alpha Vantage throttle limit reached for API key as SECRET12345; "
+            "retry token: token-secret-67890 authorization: Basic basic-secret-123"
+        )
+
+    monkeypatch.setitem(source_module._FETCHERS, "massive_news", _failing_fetcher)
+    monkeypatch.setattr(source_module.mdc, "write_warning", lambda *_args, **_kwargs: None)
+
+    _, _, failures = fetch_requested_sources(
+        _config(),
+        now=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+        source_names=("massive_news",),
+    )
+
+    failure = failures[0]
+    assert "API key as <redacted>" in failure
+    assert "token=<redacted>" in failure
+    assert "authorization=<redacted>" in failure
+    assert "SECRET12345" not in failure
+    assert "token-secret-67890" not in failure
+    assert "basic-secret-123" not in failure
+
+
+def test_official_calendar_fetchers_send_public_calendar_headers(monkeypatch) -> None:
+    captured: list[dict[str, str]] = []
+
+    def _request_text(_client, _url, *, headers=None, params=None) -> str:
+        captured.append(dict(headers or {}))
+        return "calendar payload"
+
+    monkeypatch.setattr(source_module, "_request_text", _request_text)
+    config = _config()
+    now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+
+    source_module._bls_release_batches(config, now=now)
+    source_module._boe_schedule_batches(config, now=now)
+
+    assert len(captured) == 2
+    assert all(headers["User-Agent"].startswith("AssetAllocationJobs/") for headers in captured)
+    assert captured[0]["Accept"].startswith("text/calendar")
+    assert captured[1]["Accept"].startswith("text/html")
+
+
+def test_economic_catalyst_vendor_sources_default_to_structured_only(monkeypatch) -> None:
+    monkeypatch.delenv("ECONOMIC_CATALYST_VENDOR_SOURCES", raising=False)
+
+    config = EconomicCatalystConfig.from_env()
+
+    assert config.vendor_sources == ("nasdaq_tables",)

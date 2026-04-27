@@ -136,8 +136,8 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 6. Build the jobs image from `Dockerfile`.
 7. Deploy the job manifests you need from `deploy/job_*.yaml`.
    For intraday monitoring, deploy both `deploy/job_intraday_monitor.yaml` and `deploy/job_intraday_market_refresh.yaml` together.
-   For intraday monitoring, deploy both `deploy/job_intraday_monitor.yaml` and `deploy/job_intraday_market_refresh.yaml` together.
    For Quiver, deploy `deploy/job_bronze_quiver_data.yaml`, `deploy/job_bronze_quiver_backfill.yaml`, `deploy/job_silver_quiver_data.yaml`, and `deploy/job_gold_quiver_data.yaml` together so the trigger chain exists before the first bronze run.
+   The prod workflow verifies live ACA runtime parity after apply; schedule, retry, timeout, image, env values, and secretRef names must match the rendered manifests.
 8. Verify each job can:
    - pull from ACR
    - read storage
