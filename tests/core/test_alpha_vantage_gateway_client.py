@@ -145,6 +145,7 @@ def test_request_retries_after_retryable_gateway_status_with_extended_backoff(
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
+    monkeypatch.setattr(alpha_vantage_gateway_client_module.random, "uniform", lambda _start, _stop: 0.0)
     monkeypatch.setattr(alpha_vantage_gateway_client_module.time, "sleep", sleep_calls.append)
     client = AlphaVantageGatewayClient(
         AlphaVantageGatewayClientConfig(
@@ -199,6 +200,7 @@ def test_request_raises_after_exhausting_retryable_gateway_status_budget(
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5.0), trust_env=False)
+    monkeypatch.setattr(alpha_vantage_gateway_client_module.random, "uniform", lambda _start, _stop: 0.0)
     monkeypatch.setattr(alpha_vantage_gateway_client_module.time, "sleep", sleep_calls.append)
     client = AlphaVantageGatewayClient(
         AlphaVantageGatewayClientConfig(

@@ -404,6 +404,12 @@ Market-structure columns:
 | `below_donchian_low_55d` | binary flag | `1` when close is below the prior 55-day low. |
 | `crosses_above_donchian_high_55d` | binary flag | `1` when close breaks above the prior 55-day high on that row. |
 | `crosses_below_donchian_low_55d` | binary flag | `1` when close breaks below the prior 55-day low on that row. |
+| `dist_prev_week_high_atr` | number | Distance from close to the prior completed week's high, normalized by `atr_14d`. |
+| `dist_prev_week_low_atr` | number | Distance from the prior completed week's low to close, normalized by `atr_14d`. |
+| `dist_prev_month_high_atr` | number | Distance from close to the prior completed month's high, normalized by `atr_14d`. |
+| `dist_prev_month_low_atr` | number | Distance from the prior completed month's low to close, normalized by `atr_14d`. |
+| `position_in_20d_range` | number | Close's relative position inside the prior completed 20-day Donchian range. |
+| `position_in_55d_range` | number | Close's relative position inside the prior completed 55-day Donchian range. |
 | `sr_support_1_mid` | number | Midpoint of the nearest confirmed-pivot support zone. |
 | `sr_support_1_low` | number | Lower edge of the nearest confirmed-pivot support zone. |
 | `sr_support_1_high` | number | Upper edge of the nearest confirmed-pivot support zone. |
@@ -432,6 +438,21 @@ Market-structure columns:
 | `fib_nearest_level` | number | Closest Fibonacci retracement level to close for the active swing. |
 | `fib_nearest_dist_atr` | number | `(close - fib_nearest_level) / atr_14d`. |
 | `fib_in_value_zone` | binary flag | `1` when close sits between the 38.2% and 61.8% retracement levels of the active swing. |
+| `swept_sr_resistance_1` | binary flag | `1` when price trades above the nearest resistance zone and closes back below it. |
+| `swept_sr_support_1` | binary flag | `1` when price trades below the nearest support zone and closes back above it. |
+| `bearish_sweep_magnitude_atr` | number | Resistance sweep penetration distance normalized by `atr_14d`. |
+| `bullish_sweep_magnitude_atr` | number | Support sweep penetration distance normalized by `atr_14d`. |
+| `bearish_sweep_reclaim_frac` | number | Fraction of the resistance sweep penetration reclaimed by the close. |
+| `bullish_sweep_reclaim_frac` | number | Fraction of the support sweep penetration reclaimed by the close. |
+| `bars_since_bearish_sweep` | integer | Number of bars since the most recent resistance sweep. |
+| `bars_since_bullish_sweep` | integer | Number of bars since the most recent support sweep. |
+| `bearish_confirm_after_sweep` | binary flag | `1` when a resistance sweep is followed by downside confirmation within the configured window. |
+| `bullish_confirm_after_sweep` | binary flag | `1` when a support sweep is followed by upside confirmation within the configured window. |
+| `amihud_20d` | number | Twenty-day average absolute return divided by dollar volume. |
+| `amihud_z_252d` | number | 252-day z-score of `amihud_20d`. |
+| `dollar_volume_20d` | number | Twenty-day average dollar volume. |
+| `dollar_volume_z_252d` | number | 252-day z-score of `dollar_volume_20d`. |
+| `liquidity_stress_score` | number | Composite liquidity stress proxy from Amihud z-score, dollar-volume z-score, and gap pressure. |
 
 Candle-geometry columns:
 

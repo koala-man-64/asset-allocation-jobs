@@ -1,12 +1,21 @@
 import pandas as pd
+from asset_allocation_runtime_common.market_data.gold_sync_contracts import get_sync_config
 
 from tasks.common.gold_output_contracts import (
     GOLD_EARNINGS_OUTPUT_COLUMNS,
+    GOLD_MARKET_INTEGER_COLUMNS,
     GOLD_MARKET_OUTPUT_COLUMNS,
     GOLD_PRICE_TARGET_OUTPUT_COLUMNS,
     empty_gold_output_frame,
     project_gold_output_frame,
 )
+
+
+def test_market_gold_output_contract_matches_runtime_common_sync_contract() -> None:
+    sync_config = get_sync_config("market")
+
+    assert GOLD_MARKET_OUTPUT_COLUMNS == sync_config.columns
+    assert frozenset(GOLD_MARKET_INTEGER_COLUMNS) == sync_config.integer_columns
 
 
 def test_project_gold_output_frame_projects_earnings_contract_and_drops_intermediate_columns() -> None:
