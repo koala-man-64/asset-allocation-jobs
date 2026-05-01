@@ -17,6 +17,7 @@ from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client impo
     AlphaVantageGatewayError,
     AlphaVantageGatewayInvalidSymbolError,
     AlphaVantageGatewayThrottleError,
+    AlphaVantageGatewayUnavailableError,
 )
 from asset_allocation_runtime_common.market_data import symbol_availability
 from asset_allocation_runtime_common.foundation import config as cfg
@@ -789,20 +790,43 @@ def _failure_bucket_key(exc: BaseException) -> str:
     return key
 
 
-async def main_async() -> int:
-    mdc.log_environment_diagnostics()
-    _validate_environment()
+def _sync_earnings_availability_symbols() -> pd.DataFrame:
+    try:
+        sync_result = symbol_availability.sync_domain_availability("earnings")
+    except (AlphaVantageGatewayThrottleError, AlphaVantageGatewayUnavailableError) as exc:
+        df_symbols_raw = symbol_availability.get_domain_symbols("earnings")
+        if "Symbol" not in df_symbols_raw.columns or df_symbols_raw["Symbol"].dropna().empty:
+            raise
 
-    list_manager.load()
+        listed_count = int(df_symbols_raw["Symbol"].dropna().shape[0])
+        mdc.write_warning(
+            "Bronze earnings availability sync degraded: "
+            f"provider=alpha_vantage source=stale_postgres listed_count={listed_count} "
+            f"reason={_format_failure_reason(exc)}"
+        )
+        mdc.write_line(
+            "Bronze earnings availability sync: "
+            f"provider=alpha_vantage listed_count={listed_count} "
+            "inserted_count=0 disabled_count=0 duration_ms=0 lock_wait_ms=0 degraded=true"
+        )
+        return df_symbols_raw
 
-    sync_result = symbol_availability.sync_domain_availability("earnings")
     mdc.write_line(
         "Bronze earnings availability sync: "
         f"provider={sync_result.provider} listed_count={sync_result.listed_count} "
         f"inserted_count={sync_result.inserted_count} disabled_count={sync_result.disabled_count} "
         f"duration_ms={sync_result.duration_ms} lock_wait_ms={sync_result.lock_wait_ms}"
     )
-    df_symbols_raw = symbol_availability.get_domain_symbols("earnings")
+    return symbol_availability.get_domain_symbols("earnings")
+
+
+async def main_async() -> int:
+    mdc.log_environment_diagnostics()
+    _validate_environment()
+
+    list_manager.load()
+
+    df_symbols_raw = _sync_earnings_availability_symbols()
     if "Symbol" not in df_symbols_raw.columns or df_symbols_raw["Symbol"].dropna().empty:
         mdc.write_error(
             "Bronze earnings provider unavailable: listing status returned no symbols; "
