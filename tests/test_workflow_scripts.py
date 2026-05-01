@@ -630,6 +630,10 @@ def test_deploy_prod_workflow_exports_bronze_runtime_safety_vars() -> None:
     assert "ECONOMIC_CATALYST_VENDOR_SOURCES: ${{ vars.ECONOMIC_CATALYST_VENDOR_SOURCES || 'nasdaq_tables' }}" in workflow_text
     assert "ECONOMIC_CATALYST_GENERAL_POLL_MINUTES: ${{ vars.ECONOMIC_CATALYST_GENERAL_POLL_MINUTES || '30' }}" in workflow_text
     assert "QUIVER_DATA_ENABLED: ${{ vars.QUIVER_DATA_ENABLED || 'false' }}" in workflow_text
+    assert "uses: ./.github/actions/setup-python-jobs" in workflow_text
+    assert "python scripts/workflows/install_jobs_dependencies.py \\" in workflow_text
+    assert "--requirements requirements.lock.txt \\" in workflow_text
+    assert "--editable-no-deps . \\" in workflow_text
     assert "python scripts/workflows/verify_deployed_job_runtime.py" in workflow_text
 
 
