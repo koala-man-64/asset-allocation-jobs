@@ -1,6 +1,6 @@
 # Networking Audit - 2026-04-18
 
-Status: Historical current-state live Azure networking review for `asset-allocation-jobs` as observed on April 18, 2026. Repo-local prod bootstrap now defaults to the internal control-plane URL `http://asset-allocation-api-vnet`; the Azure observations below remain pre-cutover evidence.  
+Status: Historical current-state live Azure networking review for `asset-allocation-jobs` as observed on April 18, 2026. Repo-local prod bootstrap now defaults to the internal same-environment control-plane URL `http://asset-allocation-api`; the Azure observations below remain pre-cutover evidence.
 Scope: Subscription `eabd0bb1-8f36-4f27-ad86-8b33e02aaeb9`, resource group `AssetAllocationRG`.  
 Routing decision: This is local-only and does not require contracts repo routing.
 
@@ -23,7 +23,7 @@ Produce a networking review that separates facts, inferences, and recommendation
 ### Repo-backed facts
 
 - `deploy/job_*.yaml` injects `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE` into jobs that call the control plane over HTTP.
-- `scripts/setup-env.ps1` now defaults `ASSET_ALLOCATION_API_BASE_URL` to `http://asset-allocation-api-vnet` and `JOB_STARTUP_API_CONTAINER_APPS` to `asset-allocation-api-vnet` instead of deriving a public ingress FQDN.
+- `scripts/setup-env.ps1` now defaults `ASSET_ALLOCATION_API_BASE_URL` to `http://asset-allocation-api` and `JOB_STARTUP_API_CONTAINER_APPS` to `asset-allocation-api` instead of deriving a public ingress FQDN.
 - `tasks/common/job_trigger.py` uses `SYSTEM_HEALTH_ARM_*` plus `https://management.azure.com/.default` to start container apps and downstream ACA jobs through Azure ARM.
 - Job manifests use secret-based `AZURE_STORAGE_CONNECTION_STRING` and `POSTGRES_DSN` rather than an identity-only runtime path.
 - `DEPLOYMENT_SETUP.md` is explicit that shared Azure bootstrap belongs to the sibling `asset-allocation-control-plane` repo, not to this repository.
@@ -188,7 +188,7 @@ Why it matters:
 
 ## Inferences
 
-- At audit time, jobs were configured to target the public API edge because `scripts/setup-env.ps1` resolved `ASSET_ALLOCATION_API_BASE_URL` from the public ACA ingress FQDN. The jobs repo now defaults to `http://asset-allocation-api-vnet`, but the shared Azure substrate still needs the corresponding runtime cutover.
+- At audit time, jobs were configured to target the public API edge because `scripts/setup-env.ps1` resolved `ASSET_ALLOCATION_API_BASE_URL` from the public ACA ingress FQDN. The jobs repo now defaults to `http://asset-allocation-api` for same-environment internal restore; the shared Azure substrate still needs the durable VNet-backed runtime cutover.
 - Because storage and Postgres use public endpoints plus shared secrets, the current design optimizes for deployment simplicity over segmentation.
 - Because the shared runtime identity can reach ARM and already has RG-wide `Contributor`, control-plane orchestration is effectively an ambient privilege for multiple runtime surfaces.
 - Because PostgreSQL is in `East US 2` while ACA compute is in `East US`, the current design also carries a cross-region latency and failure-domain dependency for relational traffic.

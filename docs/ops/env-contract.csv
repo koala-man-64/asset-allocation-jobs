@@ -45,7 +45,7 @@ GOLD_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource n
 GOLD_QUIVER_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for Quiver gold sync.
 PLATINUM_RANKINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for platinum rankings.
 BACKTEST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for backtests.
-JOB_STARTUP_API_CONTAINER_APPS,deploy_var,var,deploy_config,true,Container Apps that jobs may wake before running. Default this to the internal control-plane app name.
+JOB_STARTUP_API_CONTAINER_APPS,deploy_var,var,deploy_config,true,Container Apps that jobs may wake before running. Default this to the internal same-environment control-plane app name.
 ALPHA_VANTAGE_EARNINGS_FRESH_DAYS,deploy_var,var,deploy_config,true,Alpha Vantage earnings freshness window.
 ALPHA_VANTAGE_FINANCE_FRESH_DAYS,deploy_var,var,deploy_config,true,Alpha Vantage finance freshness window.
 ALPHA_VANTAGE_MAX_WORKERS,deploy_var,var,deploy_config,true,Alpha Vantage worker concurrency.
@@ -78,7 +78,7 @@ QUIVER_DATA_SYMBOL_LIMIT,deploy_var,var,deploy_config,true,Cap on the resolved Q
 QUIVER_DATA_PAGE_SIZE,deploy_var,var,deploy_config,true,Quiver page size for paginated live and historical pulls.
 QUIVER_DATA_MAX_PAGES_PER_REQUEST,deploy_var,var,deploy_config,true,Maximum pages to fetch per paginated Quiver request. Use 0 to exhaust pages until an empty or short page.
 QUIVER_DATA_SEC13F_TODAY_ONLY,deploy_var,var,deploy_config,true,Whether Quiver sec13f incremental pulls should restrict to the current day.
-ASSET_ALLOCATION_API_BASE_URL,secret,secret,secret_store,true,Control-plane base URL used by jobs HTTP clients. Default to the internal ACA service URL http://asset-allocation-api-vnet; do not use a public ACA ingress FQDN in prod.
+ASSET_ALLOCATION_API_BASE_URL,deploy_var,var,deploy_config,true,Control-plane base URL used by jobs HTTP clients. Immediate restore default is the internal same-environment ACA service URL http://asset-allocation-api; switch to http://asset-allocation-api-vnet only after that target is deployed and reachable. Do not use a public ACA ingress FQDN in prod.
 ASSET_ALLOCATION_API_SCOPE,secret,secret,secret_store,true,Managed-identity scope used for jobs to control-plane auth. Auto-discovered from the asset-allocation-api Entra app when available.
 AZURE_STORAGE_CONNECTION_STRING,secret,secret,secret_store,true,Storage connection string. Never auto-discovered.
 FRED_API_KEY,secret,secret,secret_store,true,FRED API key for release calendar ingestion. Never auto-discovered.

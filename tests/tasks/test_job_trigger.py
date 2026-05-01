@@ -8,7 +8,7 @@ from tasks.common import job_trigger
 
 
 def test_ensure_api_awake_cloud_runtime_probes_health(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api")
     monkeypatch.setenv("CONTAINER_APP_JOB_EXECUTION_NAME", "exec-1")
 
     probe_calls: list[str] = []
@@ -21,7 +21,7 @@ def test_ensure_api_awake_cloud_runtime_probes_health(monkeypatch: pytest.Monkey
 
     job_trigger.ensure_api_awake_from_env(required=True)
 
-    assert probe_calls == ["http://asset-allocation-api-vnet/healthz"]
+    assert probe_calls == ["http://asset-allocation-api/healthz"]
     assert job_trigger.get_last_startup_api_wake_status()["recovered"] is False
 
 
@@ -34,7 +34,7 @@ def test_ensure_api_awake_raises_when_required_and_base_url_missing(monkeypatch:
 
 
 def test_ensure_api_awake_starts_container_app_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api")
     monkeypatch.setenv("SYSTEM_HEALTH_ARM_SUBSCRIPTION_ID", "sub")
     monkeypatch.setenv("SYSTEM_HEALTH_ARM_RESOURCE_GROUP", "rg")
     monkeypatch.setenv("CONTAINER_APP_JOB_EXECUTION_NAME", "exec-1")
@@ -65,7 +65,7 @@ def test_ensure_api_awake_starts_container_app_and_recovers(monkeypatch: pytest.
 
     job_trigger.ensure_api_awake_from_env(required=True)
 
-    assert start_calls == [("asset-allocation-api-vnet", True)]
+    assert start_calls == [("asset-allocation-api", True)]
     status = job_trigger.get_last_startup_api_wake_status()
     assert status["healthy"] is True
     assert status["recovered"] is True
@@ -76,7 +76,7 @@ def test_ensure_api_awake_local_waits_for_local_health(monkeypatch: pytest.Monke
     monkeypatch.delenv("CONTAINER_APP_REPLICA_NAME", raising=False)
     monkeypatch.delenv("CONTAINER_APP_ENV_DNS_SUFFIX", raising=False)
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
-    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api-vnet")
+    monkeypatch.setenv("ASSET_ALLOCATION_API_BASE_URL", "http://asset-allocation-api")
 
     probe_calls: list[str] = []
     probes = iter(
@@ -103,16 +103,16 @@ def test_ensure_api_awake_local_waits_for_local_health(monkeypatch: pytest.Monke
     job_trigger.ensure_api_awake_from_env(required=True)
 
     assert probe_calls == []
-    assert (os.environ.get("ASSET_ALLOCATION_API_BASE_URL") or "").strip() == "http://asset-allocation-api-vnet"
+    assert (os.environ.get("ASSET_ALLOCATION_API_BASE_URL") or "").strip() == "http://asset-allocation-api"
 
 
 def test_resolve_startup_container_apps_matches_internal_service_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("JOB_STARTUP_API_CONTAINER_APPS", raising=False)
     monkeypatch.delenv("API_CONTAINER_APP_NAME", raising=False)
-    monkeypatch.setenv("SYSTEM_HEALTH_ARM_CONTAINERAPPS", "asset-allocation-api-vnet,asset-allocation-ui-vnet")
+    monkeypatch.setenv("SYSTEM_HEALTH_ARM_CONTAINERAPPS", "asset-allocation-api,asset-allocation-ui")
 
-    resolved = job_trigger._resolve_startup_container_apps("http://asset-allocation-api-vnet")
-    assert resolved == ["asset-allocation-api-vnet"]
+    resolved = job_trigger._resolve_startup_container_apps("http://asset-allocation-api")
+    assert resolved == ["asset-allocation-api"]
 
 
 def test_trigger_next_job_from_env_logs_multi_job_plan(monkeypatch: pytest.MonkeyPatch) -> None:

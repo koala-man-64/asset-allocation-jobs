@@ -125,7 +125,7 @@ def test_sync_script_dry_run_ignores_undocumented_env_keys(tmp_path: Path) -> No
         "\n".join(
             [
                 "AZURE_CLIENT_ID=test-client-id",
-                "ASSET_ALLOCATION_API_BASE_URL=http://asset-allocation-api-vnet",
+                "ASSET_ALLOCATION_API_BASE_URL=http://asset-allocation-api",
                 "ASSET_ALLOCATION_API_SCOPE=api://example/.default",
                 "BEA_API_KEY=stale-key",
                 "",
@@ -150,13 +150,14 @@ def test_sync_script_dry_run_ignores_undocumented_env_keys(tmp_path: Path) -> No
 def test_env_bootstrap_scripts_handle_control_plane_bootstrap_secrets() -> None:
     setup_text = (repo_root() / "scripts" / "setup-env.ps1").read_text(encoding="utf-8")
     sync_text = (repo_root() / "scripts" / "sync-all-to-github.ps1").read_text(encoding="utf-8")
+    env_contract = (repo_root() / "docs" / "ops" / "env-contract.csv").read_text(encoding="utf-8")
 
     assert "Test-CanAutoDiscoverSecretValue" in setup_text
     assert '"ASSET_ALLOCATION_API_BASE_URL"' in setup_text
     assert '"ASSET_ALLOCATION_API_SCOPE"' in setup_text
-    assert "asset-allocation-api-vnet" in setup_text
+    assert "asset-allocation-api" in setup_text
     assert "Get-ContainerAppFqdn" not in setup_text
-    assert "ASSET_ALLOCATION_API_BASE_URL" in sync_text
+    assert "ASSET_ALLOCATION_API_BASE_URL,deploy_var,var" in env_contract
     assert "ASSET_ALLOCATION_API_SCOPE" in sync_text
 
 

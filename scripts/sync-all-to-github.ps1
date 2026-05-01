@@ -42,7 +42,6 @@ if ($undocumented.Count -gt 0) {
 }
 
 $requiredControlPlaneSecrets = @(
-    "ASSET_ALLOCATION_API_BASE_URL",
     "ASSET_ALLOCATION_API_SCOPE"
 )
 $missingControlPlaneSecrets = @(
