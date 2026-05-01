@@ -102,6 +102,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Set up Python
+        uses: ./.github/actions/setup-python-jobs
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock.txt
+            pyproject.toml
+          python-package-index-url: ${{ secrets.PYTHON_PACKAGE_INDEX_URL }}
+          python-package-extra-index-url: ${{ secrets.PYTHON_PACKAGE_EXTRA_INDEX_URL }}
+
+      - name: Install deploy dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/workflows/install_jobs_dependencies.py \
+            --jobs-path . \
+            --requirements requirements.lock.txt \
+            --editable-no-deps . \
+            --pip-check
+
       - name: Resolve rollout image
         id: image
         env:
