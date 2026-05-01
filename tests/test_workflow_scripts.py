@@ -727,6 +727,26 @@ def test_verify_deployed_job_runtime_accepts_matching_live_job(
     )
 
 
+def test_verify_deployed_job_runtime_treats_boolean_like_env_text_case_insensitively(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/verify_deployed_job_runtime.py", "verify_deployed_job_runtime")
+    rendered_dir = tmp_path / "rendered"
+    rendered_dir.mkdir()
+    (rendered_dir / "job_example.yaml").write_text(_runtime_manifest(), encoding="utf-8")
+    live = _matching_live_runtime()
+    live["properties"]["template"]["containers"][0]["env"][1]["value"] = "False"
+    monkeypatch.setattr(module, "query_job_runtime", lambda **_: live)
+
+    assert module._normalize("True") == "true"
+
+    module.verify_deployed_job_runtime(
+        rendered_dir=rendered_dir,
+        resource_group="rg",
+        expected_image="registry/image@sha256:expected",
+    )
+
+
 def test_verify_deployed_job_runtime_detects_drift_without_printing_env_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
