@@ -14,7 +14,7 @@ if ([string]::IsNullOrWhiteSpace($EnvFilePath)) {
 
 $contractPath = Join-Path $repoRoot "docs\ops\env-contract.csv"
 $templatePath = Join-Path $repoRoot ".env.template"
-$controlPlaneInternalAppName = "asset-allocation-api-vnet"
+$controlPlaneInternalAppName = "asset-allocation-api"
 $controlPlaneInternalBaseUrl = "http://$controlPlaneInternalAppName"
 
 function Test-CommandAvailable {

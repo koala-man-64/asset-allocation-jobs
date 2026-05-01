@@ -104,7 +104,8 @@ def ensure_control_plane_base_url_policy(environment: dict[str, str]) -> None:
 
     raise SystemExit(
         "ASSET_ALLOCATION_API_BASE_URL resolved to a public Azure Container Apps ingress host for prod. "
-        "Set ASSET_ALLOCATION_API_BASE_URL to http://asset-allocation-api-vnet, or set "
+        "Set ASSET_ALLOCATION_API_BASE_URL to http://asset-allocation-api for the same-environment restore path, "
+        "or to http://asset-allocation-api-vnet after that target is deployed and reachable. Set "
         f"{PUBLIC_CONTROL_PLANE_OVERRIDE_ENV}=true only for an explicitly approved emergency rollback."
     )
 

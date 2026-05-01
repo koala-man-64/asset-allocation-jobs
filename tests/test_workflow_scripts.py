@@ -605,6 +605,14 @@ def test_deploy_prod_workflow_exports_subscription_id_for_manifest_rendering() -
     assert "AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}" in workflow_text
 
 
+def test_deploy_prod_workflow_defaults_to_internal_api_var_not_public_secret() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert "ASSET_ALLOCATION_API_BASE_URL: ${{ vars.ASSET_ALLOCATION_API_BASE_URL || 'http://asset-allocation-api' }}" in workflow_text
+    assert "ASSET_ALLOCATION_API_BASE_URL: ${{ secrets.ASSET_ALLOCATION_API_BASE_URL }}" not in workflow_text
+    assert "JOB_STARTUP_API_CONTAINER_APPS: ${{ vars.JOB_STARTUP_API_CONTAINER_APPS || 'asset-allocation-api' }}" in workflow_text
+
+
 def test_deploy_prod_workflow_exports_economic_catalyst_secret_vars() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
