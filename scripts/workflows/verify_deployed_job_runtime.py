@@ -9,6 +9,9 @@ from typing import Any
 import yaml
 
 
+_BOOLEAN_TEXT = {"true": "true", "false": "false"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Verify deployed ACA Job runtime settings against rendered manifests."
@@ -45,7 +48,11 @@ def _normalize(value: Any) -> str:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
-    return str(value)
+    text = str(value)
+    boolean_text = _BOOLEAN_TEXT.get(text.strip().lower())
+    if boolean_text is not None:
+        return boolean_text
+    return text
 
 
 def _env_contract(container: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
