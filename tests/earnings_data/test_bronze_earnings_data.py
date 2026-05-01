@@ -1024,6 +1024,59 @@ def test_main_async_empty_listing_status_fails_without_active_publish():
     asyncio.run(run_test())
 
 
+def test_sync_earnings_availability_falls_back_to_existing_symbols_on_transient_gateway_error():
+    stale_symbols = pd.DataFrame({"Symbol": ["MSFT", "AAPL", None]})
+    transient_error = bronze.AlphaVantageGatewayUnavailableError(
+        "API gateway returned a non-CSV Alpha Vantage payload.",
+        payload={"path": "/api/providers/alpha-vantage/listing-status"},
+    )
+
+    with patch(
+        "tasks.earnings_data.bronze_earnings_data.symbol_availability.sync_domain_availability",
+        side_effect=transient_error,
+    ) as mock_sync, patch(
+        "tasks.earnings_data.bronze_earnings_data.symbol_availability.get_domain_symbols",
+        return_value=stale_symbols,
+    ) as mock_get_symbols, patch(
+        "tasks.earnings_data.bronze_earnings_data.mdc.write_warning"
+    ) as mock_write_warning, patch(
+        "tasks.earnings_data.bronze_earnings_data.mdc.write_line"
+    ) as mock_write_line:
+        result = bronze._sync_earnings_availability_symbols()
+
+    assert result is stale_symbols
+    mock_sync.assert_called_once_with("earnings")
+    mock_get_symbols.assert_called_once_with("earnings")
+    warning_messages = [str(call.args[0]) for call in mock_write_warning.call_args_list if call.args]
+    line_messages = [str(call.args[0]) for call in mock_write_line.call_args_list if call.args]
+    assert any("Bronze earnings availability sync degraded:" in message for message in warning_messages)
+    assert any("source=stale_postgres" in message for message in warning_messages)
+    assert any("path=/api/providers/alpha-vantage/listing-status" in message for message in warning_messages)
+    assert any("Bronze earnings availability sync:" in message and "degraded=true" in message for message in line_messages)
+
+
+def test_sync_earnings_availability_reraises_transient_gateway_error_without_existing_symbols():
+    transient_error = bronze.AlphaVantageGatewayThrottleError(
+        "rate limited",
+        status_code=429,
+        payload={"path": "/api/providers/alpha-vantage/listing-status"},
+    )
+
+    with patch(
+        "tasks.earnings_data.bronze_earnings_data.symbol_availability.sync_domain_availability",
+        side_effect=transient_error,
+    ), patch(
+        "tasks.earnings_data.bronze_earnings_data.symbol_availability.get_domain_symbols",
+        return_value=pd.DataFrame({"Symbol": []}),
+    ), patch(
+        "tasks.earnings_data.bronze_earnings_data.mdc.write_warning"
+    ) as mock_write_warning:
+        with pytest.raises(bronze.AlphaVantageGatewayThrottleError):
+            bronze._sync_earnings_availability_symbols()
+
+    mock_write_warning.assert_not_called()
+
+
 def test_main_async_calendar_failure_degrades_when_historical_output_is_complete(unique_ticker):
     symbol = unique_ticker
     mock_av = MagicMock()
