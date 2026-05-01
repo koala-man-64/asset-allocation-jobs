@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where az *)",
+      "Bash(az --version)",
+      "Bash(az containerapp *)",
+      "Bash(tee /tmp/bronze_market_yy1s0lo.log)",
+      "Bash(az monitor *)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
