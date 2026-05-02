@@ -59,7 +59,21 @@ list_manager = ListManager(
 _COVERAGE_DOMAIN = "earnings"
 _COVERAGE_PROVIDER = "alpha-vantage"
 _INVALID_CANDIDATE_REASON = "provider_invalid_symbol"
+_GATEWAY_RETRY_EXHAUSTED_CANDIDATE_REASON = "provider_gateway_retry_exhausted"
+_GATEWAY_RETRY_EXHAUSTED_PROMOTION_THRESHOLD = 3
 _PROMOTED_REPROBE_LIMIT = 25
+_ALPHA_VANTAGE_EARNINGS_GATEWAY_PATH = "/api/providers/alpha-vantage/earnings"
+_GLOBAL_PROVIDER_FAILURE_STATUSES = frozenset({429, 503, 504})
+_PROVIDER_UNAVAILABLE_FAILURE_THRESHOLD = 3
+_GATEWAY_RETRY_EXHAUSTED_CANDIDATE_STATUSES = frozenset({503, 504})
+_GLOBAL_PROVIDER_DETAIL_EXCLUSIONS = (
+    "stream timeout",
+    "circuit remains open",
+    "rate limit",
+    "daily quota",
+    "daily rate",
+    "standard api rate limit",
+)
 _EARNINGS_CALENDAR_HORIZONS = frozenset({"3month", "6month", "12month"})
 _EARNINGS_CALENDAR_EXPECTED_COLUMNS = (
     "symbol",
@@ -790,6 +804,51 @@ def _failure_bucket_key(exc: BaseException) -> str:
     return key
 
 
+def _is_global_provider_failure(exc: BaseException) -> bool:
+    if isinstance(exc, AlphaVantageGatewayInvalidSymbolError):
+        return False
+    if not isinstance(exc, AlphaVantageGatewayError):
+        return False
+
+    payload = getattr(exc, "payload", None)
+    path = ""
+    if isinstance(payload, dict):
+        path = str(payload.get("path") or "").strip().rstrip("/")
+    if path and path != _ALPHA_VANTAGE_EARNINGS_GATEWAY_PATH:
+        return False
+
+    status_code = getattr(exc, "status_code", None)
+    if status_code in _GLOBAL_PROVIDER_FAILURE_STATUSES:
+        return True
+
+    if isinstance(exc, (AlphaVantageGatewayThrottleError, AlphaVantageGatewayUnavailableError)):
+        return True
+
+    detail = str(getattr(exc, "detail", "") or str(exc) or "").lower()
+    return "circuit remains open" in detail or "stream timeout" in detail
+
+
+def _is_gateway_retry_exhausted_blacklist_candidate(exc: BaseException) -> bool:
+    if isinstance(exc, (AlphaVantageGatewayInvalidSymbolError, AlphaVantageGatewayThrottleError)):
+        return False
+    if not isinstance(exc, AlphaVantageGatewayError):
+        return False
+
+    status_code = getattr(exc, "status_code", None)
+    if status_code not in _GATEWAY_RETRY_EXHAUSTED_CANDIDATE_STATUSES:
+        return False
+
+    payload = getattr(exc, "payload", None)
+    path = ""
+    if isinstance(payload, dict):
+        path = str(payload.get("path") or "").strip().rstrip("/")
+    if path and path != _ALPHA_VANTAGE_EARNINGS_GATEWAY_PATH:
+        return False
+
+    detail = str(getattr(exc, "detail", "") or str(exc) or "").casefold()
+    return not any(exclusion in detail for exclusion in _GLOBAL_PROVIDER_DETAIL_EXCLUSIONS)
+
+
 def _sync_earnings_availability_symbols() -> pd.DataFrame:
     try:
         sync_result = symbol_availability.sync_domain_availability("earnings")
@@ -930,6 +989,7 @@ async def main_async() -> int:
         "skipped": 0,
         "failed": 0,
         "invalid_candidates": 0,
+        "gateway_blacklist_candidates": 0,
         "unavailable": 0,
         "blacklist_promotions": 0,
         "reprobe_recovered": 0,
@@ -940,6 +1000,13 @@ async def main_async() -> int:
     failure_counts: dict[str, int] = {}
     failure_examples: dict[str, str] = {}
     progress_lock = asyncio.Lock()
+    provider_unavailable_event = asyncio.Event()
+    provider_unavailable_abort: dict[str, Any] = {
+        "triggered": False,
+        "reason": None,
+        "symbol": None,
+        "failed": 0,
+    }
     collected_symbol_frames: Dict[str, pd.DataFrame] = {}
     collected_lock: Optional[threading.Lock] = threading.Lock()
 
@@ -967,12 +1034,32 @@ async def main_async() -> int:
     async def record_failure(symbol: str, exc: BaseException) -> None:
         failure_reason = _format_failure_reason(exc)
         failure_key = _failure_bucket_key(exc)
+        provider_abort_message: str | None = None
         async with progress_lock:
             progress["failed"] += 1
             failure_counts[failure_key] = failure_counts.get(failure_key, 0) + 1
             failure_examples.setdefault(failure_key, f"symbol={symbol} {failure_reason}")
             failed_total = progress["failed"]
             key_total = failure_counts[failure_key]
+            if (
+                _is_global_provider_failure(exc)
+                and key_total >= _PROVIDER_UNAVAILABLE_FAILURE_THRESHOLD
+                and not provider_unavailable_abort["triggered"]
+            ):
+                provider_unavailable_abort.update(
+                    {
+                        "triggered": True,
+                        "reason": failure_key,
+                        "symbol": symbol,
+                        "failed": failed_total,
+                    }
+                )
+                provider_unavailable_event.set()
+                provider_abort_message = (
+                    "Bronze AV earnings provider unavailable; aborting remaining symbols: "
+                    f"reason={failure_key} threshold={_PROVIDER_UNAVAILABLE_FAILURE_THRESHOLD} "
+                    f"failed={failed_total} scheduled={len(execution_symbols)} example_symbol={symbol}"
+                )
 
         # Sample detailed failures to avoid log flooding while still exposing root causes.
         if key_total <= 3 or failed_total % 250 == 0:
@@ -985,10 +1072,57 @@ async def main_async() -> int:
                     key_total=key_total,
                 )
             )
+        if provider_abort_message:
+            mdc.write_warning(provider_abort_message)
+
+    async def record_gateway_retry_exhausted_blacklist_candidate(
+        symbol: str,
+        exc: AlphaVantageGatewayError,
+    ) -> None:
+        try:
+            promotion = record_invalid_symbol_candidate(
+                common_client=common_client,
+                bronze_client=bronze_client,
+                domain=_COVERAGE_DOMAIN,
+                symbol=symbol,
+                provider=_COVERAGE_PROVIDER,
+                reason_code=_GATEWAY_RETRY_EXHAUSTED_CANDIDATE_REASON,
+                run_id=run_id,
+                promotion_threshold=_GATEWAY_RETRY_EXHAUSTED_PROMOTION_THRESHOLD,
+            )
+        except Exception as marker_exc:
+            mdc.write_warning(
+                "Bronze earnings gateway retry-exhausted candidate marker failed: "
+                f"symbol={symbol} reason={_format_failure_reason(marker_exc)} "
+                f"source_failure={_format_failure_reason(exc)}"
+            )
+            return
+
+        async with progress_lock:
+            progress["gateway_blacklist_candidates"] += 1
+            if promotion.get("promoted"):
+                progress["blacklist_promotions"] += 1
+            should_log = progress["gateway_blacklist_candidates"] <= 20
+
+        if should_log:
+            mdc.write_warning(
+                "Bronze earnings gateway retry-exhausted blacklist candidate: "
+                f"symbol={symbol} status={getattr(exc, 'status_code', 'n/a')} "
+                f"observed_run_count={promotion.get('observedRunCount')} "
+                f"threshold={_GATEWAY_RETRY_EXHAUSTED_PROMOTION_THRESHOLD} "
+                f"promoted={str(bool(promotion.get('promoted'))).lower()} "
+                f"blacklist_path={promotion.get('blacklistPath') or 'n/a'}"
+            )
 
     async def run_symbol(symbol: str) -> None:
+        if provider_unavailable_event.is_set():
+            return
         is_reprobe = symbol in reprobe_symbol_set
+        attempted = False
         async with semaphore:
+            if provider_unavailable_event.is_set():
+                return
+            attempted = True
             try:
                 wrote, coverage_summary, symbol_event_summary = await loop.run_in_executor(
                     executor,
@@ -1106,6 +1240,8 @@ async def main_async() -> int:
                         symbol=symbol,
                         outcome=f"failed_{type(exc).__name__.lower()}",
                     )
+                elif _is_gateway_retry_exhausted_blacklist_candidate(exc):
+                    await record_gateway_retry_exhausted_blacklist_candidate(symbol, exc)
                 await record_failure(symbol, exc)
             except Exception as exc:
                 if is_reprobe:
@@ -1117,15 +1253,17 @@ async def main_async() -> int:
                     )
                 await record_failure(symbol, exc)
             finally:
-                async with progress_lock:
-                    progress["processed"] += 1
-                    if progress["processed"] % 500 == 0:
-                        mdc.write_line(
-                            "Bronze AV earnings progress: processed={processed} written={written} skipped={skipped} "
-                            "invalid_candidates={invalid_candidates} unavailable={unavailable} "
-                            "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
-                            "reprobe_retained={reprobe_retained} failed={failed}".format(**progress)
-                        )
+                if attempted:
+                    async with progress_lock:
+                        progress["processed"] += 1
+                        if progress["processed"] % 500 == 0:
+                            mdc.write_line(
+                                "Bronze AV earnings progress: processed={processed} written={written} skipped={skipped} "
+                                "invalid_candidates={invalid_candidates} gateway_blacklist_candidates={gateway_blacklist_candidates} "
+                                "unavailable={unavailable} "
+                                "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
+                                "reprobe_retained={reprobe_retained} failed={failed}".format(**progress)
+                            )
 
     try:
         await asyncio.gather(*(run_symbol(s) for s in execution_symbols))
@@ -1140,7 +1278,9 @@ async def main_async() -> int:
             pass
 
     publish_block_reason: str | None = None
-    if progress["failed"] > 0:
+    if provider_unavailable_abort["triggered"]:
+        publish_block_reason = "provider_unavailable"
+    elif progress["failed"] > 0:
         publish_block_reason = "symbol_failures"
     elif progress["written"] <= 0:
         publish_block_reason = "empty_output"
@@ -1153,7 +1293,10 @@ async def main_async() -> int:
             "Bronze earnings alpha26 publish withheld: "
             f"reason={publish_block_reason} calendar_degraded={str(calendar_degraded).lower()} "
             f"written={progress['written']} skipped={progress['skipped']} unavailable={progress['unavailable']} "
-            f"invalid_candidates={progress['invalid_candidates']}"
+            f"invalid_candidates={progress['invalid_candidates']} "
+            f"gateway_blacklist_candidates={progress['gateway_blacklist_candidates']} "
+            f"provider_abort={str(provider_unavailable_abort['triggered']).lower()} "
+            f"provider_abort_reason={provider_unavailable_abort.get('reason') or 'n/a'}"
         )
     else:
         try:
@@ -1184,20 +1327,24 @@ async def main_async() -> int:
 
     job_status, exit_code = resolve_job_run_status(
         failed_count=progress["failed"],
-        warning_count=progress["invalid_candidates"] + (1 if calendar_degraded else 0),
+        warning_count=progress["invalid_candidates"]
+        + progress["gateway_blacklist_candidates"]
+        + (1 if calendar_degraded else 0),
     )
     mdc.write_line(
         "Bronze AV earnings ingest complete: processed={processed} written={written} skipped={skipped} "
-        "invalid_candidates={invalid_candidates} unavailable={unavailable} "
+        "invalid_candidates={invalid_candidates} gateway_blacklist_candidates={gateway_blacklist_candidates} "
+        "unavailable={unavailable} "
         "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
         "reprobe_retained={reprobe_retained} failed={failed} coverage_checked={coverage_checked} "
         "coverage_forced_refetch={coverage_forced_refetch} coverage_marked_covered={coverage_marked_covered} "
         "coverage_marked_limited={coverage_marked_limited} coverage_skipped_limited_marker={coverage_skipped_limited_marker} "
         "scheduled_rows_retained={scheduled_rows_retained} actual_over_scheduled_replacements={actual_over_scheduled_replacements} "
-        "job_status={job_status}".format(
+        "provider_unavailable_abort={provider_unavailable_abort} job_status={job_status}".format(
             **progress,
             **coverage_progress,
             **event_progress,
+            provider_unavailable_abort=str(provider_unavailable_abort["triggered"]).lower(),
             job_status=job_status,
         )
     )
