@@ -2,11 +2,16 @@
 import pandas as pd
 from datetime import UTC, datetime
 from io import BytesIO
-from typing import Optional
+from typing import Optional, Sequence
 
 from tasks.market_data import config as cfg
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.market_data import delta_core
+from asset_allocation_contracts.market_history import (
+    LEGACY_SILVER_MARKET_COLUMNS,
+    SILVER_MARKET_COLUMNS,
+    SILVER_MARKET_NUMERIC_COLUMNS,
+)
 from asset_allocation_contracts.paths import DataPaths
 from asset_allocation_runtime_common.market_data import bronze_bucketing
 from asset_allocation_runtime_common.market_data import domain_artifacts
@@ -52,30 +57,10 @@ _INDEX_ARTIFACT_COLUMN_NAMES = {
     "index_level_0",
 }
 _MARKET_PRICE_COLUMNS = {"open", "high", "low", "close"}
-_ALPHA26_MARKET_MIN_COLUMNS = [
-    "date",
-    "symbol",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "short_interest",
-    "short_volume",
-    "dividend_amount",
-    "split_coefficient",
-]
-_ALPHA26_MARKET_NUMERIC_COLUMNS = [
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "short_interest",
-    "short_volume",
-    "dividend_amount",
-    "split_coefficient",
-]
+_ALPHA26_MARKET_SCHEMA = tuple(SILVER_MARKET_COLUMNS)
+_LEGACY_ALPHA26_MARKET_SCHEMA = tuple(LEGACY_SILVER_MARKET_COLUMNS)
+_ALPHA26_MARKET_MIN_COLUMNS = list(SILVER_MARKET_COLUMNS)
+_ALPHA26_MARKET_NUMERIC_COLUMNS = list(SILVER_MARKET_NUMERIC_COLUMNS)
 _BRONZE_TO_SILVER_REQUIRED_COLUMNS = {
     "symbol",
     "date",
@@ -136,6 +121,61 @@ def _debug_symbol_scope() -> set[str]:
     }
 
 
+def _normalize_market_schema_columns(columns: Sequence[str] | None) -> tuple[str, ...]:
+    if not columns:
+        return tuple()
+    normalized = normalize_columns_to_snake_case(pd.DataFrame(columns=[str(col) for col in columns]))
+    return tuple(str(col) for col in normalized.columns)
+
+
+def _silver_market_schema_label(schema_columns: Sequence[str] | None) -> str:
+    normalized = _normalize_market_schema_columns(schema_columns)
+    if not normalized:
+        return "missing"
+    if normalized == _ALPHA26_MARKET_SCHEMA:
+        return "ready_11"
+    if normalized == _LEGACY_ALPHA26_MARKET_SCHEMA:
+        return "legacy_9"
+    return "schema_drift"
+
+
+def _raise_silver_market_schema_drift(
+    *,
+    bucket: str,
+    path: str,
+    existing_schema_columns: Sequence[str] | None,
+) -> None:
+    normalized = _normalize_market_schema_columns(existing_schema_columns)
+    mdc.write_error(
+        "delta_write_decision layer=silver domain=market "
+        f"bucket={bucket} action=blocked reason=schema_drift path={path} "
+        f"expected_columns={list(_ALPHA26_MARKET_SCHEMA)} existing_columns={list(normalized)}"
+    )
+    raise RuntimeError(
+        "Silver market schema drift blocked: "
+        f"bucket={bucket} path={path} expected_columns={list(_ALPHA26_MARKET_SCHEMA)} "
+        f"existing_columns={list(normalized)}"
+    )
+
+
+def _silver_market_schema_mode_for_write(
+    *,
+    bucket: str,
+    path: str,
+    existing_schema_columns: Sequence[str] | None,
+) -> Optional[str]:
+    label = _silver_market_schema_label(existing_schema_columns)
+    if label in {"missing", "ready_11"}:
+        return None
+    if label == "legacy_9":
+        return "overwrite"
+    _raise_silver_market_schema_drift(
+        bucket=bucket,
+        path=path,
+        existing_schema_columns=existing_schema_columns,
+    )
+
+
 def _merge_preserved_alpha26_market_bucket_symbols(
     *,
     bucket: str,
@@ -193,8 +233,15 @@ def _load_silver_market_bucket(path: str) -> pd.DataFrame | None:
     return delta_core.load_delta(cfg.AZURE_CONTAINER_SILVER, path)
 
 
-def _store_silver_market_bucket(df: pd.DataFrame, path: str) -> None:
-    delta_core.store_delta(sanitize_delta_write_frame(df), cfg.AZURE_CONTAINER_SILVER, path, mode="overwrite")
+def _store_silver_market_bucket(df: pd.DataFrame, path: str, *, schema_mode: Optional[str] = None) -> None:
+    kwargs = {"schema_mode": schema_mode} if schema_mode else {}
+    delta_core.store_delta(
+        sanitize_delta_write_frame(df),
+        cfg.AZURE_CONTAINER_SILVER,
+        path,
+        mode="overwrite",
+        **kwargs,
+    )
 
 
 def _vacuum_silver_market_bucket(path: str) -> None:
@@ -257,6 +304,24 @@ def _validate_silver_market_bucket_output_contract(df_bucket: pd.DataFrame, *, b
     if symbols.eq("").any():
         raise ValueError(
             f"bronze_to_silver contract violation for bucket={bucket}: blank symbols in output frame."
+        )
+
+    duplicate_rows = int(df_bucket.assign(symbol=symbols, date=parsed_dates).duplicated(subset=["symbol", "date"]).sum())
+    if duplicate_rows:
+        raise ValueError(
+            f"bronze_to_silver contract violation for bucket={bucket}: duplicate symbol/date rows={duplicate_rows}."
+        )
+
+    dividend_amount = pd.to_numeric(df_bucket["dividend_amount"], errors="coerce").dropna()
+    if not dividend_amount.empty and (dividend_amount < 0).any():
+        raise ValueError(
+            f"bronze_to_silver contract violation for bucket={bucket}: negative dividend_amount values."
+        )
+
+    split_coefficient = pd.to_numeric(df_bucket["split_coefficient"], errors="coerce").dropna()
+    if not split_coefficient.empty and (split_coefficient <= 0).any():
+        raise ValueError(
+            f"bronze_to_silver contract violation for bucket={bucket}: non-positive split_coefficient values."
         )
 
 
@@ -590,7 +655,7 @@ def _write_alpha26_market_buckets(
         if str(bucket).strip()
     }
     if not selected_buckets:
-        return 0, None
+        return 0, None, None
 
     invalid_buckets = selected_buckets.difference(valid_buckets)
     if invalid_buckets:
@@ -627,13 +692,21 @@ def _write_alpha26_market_buckets(
             container=cfg.AZURE_CONTAINER_SILVER,
             path=silver_bucket_path,
             skip_empty_without_schema=False,
+            enforced_schema_columns=_ALPHA26_MARKET_SCHEMA,
+        )
+        schema_mode = _silver_market_schema_mode_for_write(
+            bucket=bucket,
+            path=silver_bucket_path,
+            existing_schema_columns=write_decision.existing_schema_columns,
         )
         mdc.write_line(
             "delta_write_decision layer=silver domain=market "
             f"bucket={bucket} action={'skip' if write_decision.action == 'skip_empty_no_schema' else 'write'} "
-            f"reason={write_decision.reason} path={silver_bucket_path}"
+            f"reason={write_decision.reason} path={silver_bucket_path} "
+            f"existing_schema={_silver_market_schema_label(write_decision.existing_schema_columns)} "
+            f"schema_mode={schema_mode or 'default'}"
         )
-        _store_silver_market_bucket(write_decision.frame, silver_bucket_path)
+        _store_silver_market_bucket(write_decision.frame, silver_bucket_path, schema_mode=schema_mode)
         try:
             domain_artifacts.write_bucket_artifact(
                 layer="silver",
@@ -697,27 +770,58 @@ def _restore_blob_watermark(
 
 
 def _detect_missing_alpha26_market_buckets() -> tuple[bool, set[str]]:
-    if silver_client is None:
-        return False, set()
-    try:
-        blob_infos = silver_client.list_blob_infos(name_starts_with="market-data/buckets/")
-    except Exception as exc:
-        mdc.write_warning(f"Silver market alpha26 bootstrap probe failed: {exc}")
-        return False, set()
+    rebuild_buckets: set[str] = set()
+    status_counts: dict[str, int] = {}
+    for bucket in layer_bucketing.ALPHABET_BUCKETS:
+        path = DataPaths.get_silver_market_bucket_path(bucket)
+        try:
+            schema_columns = delta_core.get_delta_schema_columns(cfg.AZURE_CONTAINER_SILVER, path)
+        except Exception as exc:
+            raise RuntimeError(f"Silver market alpha26 schema probe failed bucket={bucket} path={path}: {exc}") from exc
 
-    present_buckets: set[str] = set()
-    valid_buckets = set(layer_bucketing.ALPHABET_BUCKETS)
-    for blob in blob_infos:
-        name = str(blob.get("name", "")).strip("/")
-        parts = name.split("/")
-        if len(parts) < 3:
+        label = _silver_market_schema_label(schema_columns)
+        status_counts[label] = status_counts.get(label, 0) + 1
+        if label in {"missing", "legacy_9"}:
+            rebuild_buckets.add(bucket)
             continue
-        bucket = parts[2].strip().upper()
-        if bucket in valid_buckets:
-            present_buckets.add(bucket)
+        if label != "ready_11":
+            _raise_silver_market_schema_drift(
+                bucket=bucket,
+                path=path,
+                existing_schema_columns=schema_columns,
+            )
 
-    missing = valid_buckets.difference(present_buckets)
-    return bool(missing), missing
+    if rebuild_buckets:
+        mdc.write_warning(
+            "Silver market alpha26 schema rebuild required: "
+            f"bucket_status_counts={status_counts} rebuild_buckets={','.join(sorted(rebuild_buckets))}"
+        )
+    return bool(rebuild_buckets), rebuild_buckets
+
+
+def _validate_all_silver_market_bucket_schemas() -> None:
+    invalid: dict[str, list[str]] = {}
+    for bucket in layer_bucketing.ALPHABET_BUCKETS:
+        path = DataPaths.get_silver_market_bucket_path(bucket)
+        schema_columns = delta_core.get_delta_schema_columns(cfg.AZURE_CONTAINER_SILVER, path)
+        normalized = _normalize_market_schema_columns(schema_columns)
+        if normalized != _ALPHA26_MARKET_SCHEMA:
+            invalid[bucket] = list(normalized)
+
+    if invalid:
+        mdc.write_error(
+            "silver_schema_not_ready layer=silver domain=market "
+            f"expected_columns={list(_ALPHA26_MARKET_SCHEMA)} invalid_buckets={invalid}"
+        )
+        raise RuntimeError(
+            "silver_schema_not_ready: "
+            f"expected_columns={list(_ALPHA26_MARKET_SCHEMA)} invalid_buckets={invalid}"
+        )
+
+    mdc.write_line(
+        "silver_schema_ready layer=silver domain=market "
+        f"buckets={len(layer_bucketing.ALPHABET_BUCKETS)} columns={len(_ALPHA26_MARKET_SCHEMA)}"
+    )
 
 
 def _run_market_reconciliation(*, bronze_blob_list: list[dict]) -> tuple[int, int]:
@@ -911,7 +1015,15 @@ def main():
                 "status=failed orphan_count=unknown deleted_blobs=unknown cutoff_rows_dropped=unknown"
             )
 
-    total_failed = failed + reconciliation_failed
+    schema_validation_failed = 0
+    if failed == 0 and reconciliation_failed == 0 and (alpha26_flush_count > 0 or force_checkpoint_rebuild):
+        try:
+            _validate_all_silver_market_bucket_schemas()
+        except Exception as exc:
+            schema_validation_failed = 1
+            mdc.write_error(f"Silver market schema validation failed: {exc}")
+
+    total_failed = failed + reconciliation_failed + schema_validation_failed
     mdc.write_line(
         "Silver market job complete: "
         f"processed={processed} skipped_unchanged={skipped_unchanged} "
@@ -922,8 +1034,10 @@ def main():
         f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} "
         f"failed={total_failed}"
     )
-    if watermarks_dirty:
+    if watermarks_dirty and total_failed == 0:
         save_watermarks("bronze_market_data", watermarks)
+    elif watermarks_dirty:
+        mdc.write_warning("Silver market watermarks not saved because the run did not pass final validation.")
     if total_failed == 0:
         save_last_success(
             "silver_market_data",

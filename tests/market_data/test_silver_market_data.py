@@ -500,6 +500,7 @@ def test_main_bootstraps_alpha26_write_when_silver_buckets_missing(monkeypatch):
     monkeypatch.setattr(silver, "process_alpha26_bucket_blob", _fake_process_alpha26_bucket_blob)
     monkeypatch.setattr(silver, "_write_alpha26_market_buckets", _fake_write)
     monkeypatch.setattr(silver, "_detect_missing_alpha26_market_buckets", lambda: (True, {"A"}))
+    monkeypatch.setattr(silver, "_validate_all_silver_market_bucket_schemas", lambda: None)
     monkeypatch.setattr(silver.bronze_bucketing, "bronze_layout_mode", lambda: "alpha26")
     monkeypatch.setattr(silver.layer_bucketing, "silver_layout_mode", lambda: "alpha26")
     monkeypatch.setattr(silver.layer_bucketing, "silver_alpha26_force_rebuild", lambda: False)
@@ -516,6 +517,64 @@ def test_main_bootstraps_alpha26_write_when_silver_buckets_missing(monkeypatch):
     assert saved_last_success.get("alpha26_staged_rows") == 1
     assert saved_last_success.get("alpha26_symbols") == 1
     assert saved_last_success.get("column_count") == len(silver._ALPHA26_MARKET_MIN_COLUMNS)
+
+
+def test_main_blocks_watermarks_when_final_silver_schema_validation_fails(monkeypatch):
+    blob = {"name": "market-data/buckets/A.parquet"}
+    saved = {"watermarks": 0, "last_success": 0}
+
+    def _fake_process_alpha26_bucket_blob(
+        _blob,
+        *,
+        watermarks,
+        alpha26_bucket_frames=None,
+        force_reprocess=False,
+    ):
+        del watermarks, force_reprocess
+        assert alpha26_bucket_frames is not None
+        alpha26_bucket_frames.setdefault("A", []).append(
+            pd.DataFrame({"symbol": ["AAPL"], "date": [pd.Timestamp("2025-01-02")]})
+        )
+        return "ok"
+
+    monkeypatch.setattr(silver, "bronze_client", object())
+    monkeypatch.setattr(
+        silver.bronze_bucketing,
+        "list_active_bucket_blob_infos",
+        lambda _domain, _client: [dict(blob)],
+    )
+    monkeypatch.setattr(silver, "load_watermarks", lambda _name: {})
+    monkeypatch.setattr(silver, "load_last_success", lambda _name: None)
+    monkeypatch.setattr(silver, "save_watermarks", lambda *_args, **_kwargs: saved.update(watermarks=1))
+    monkeypatch.setattr(silver, "save_last_success", lambda *_args, **_kwargs: saved.update(last_success=1))
+    monkeypatch.setattr(silver, "should_process_blob_since_last_success", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(silver, "process_alpha26_bucket_blob", _fake_process_alpha26_bucket_blob)
+    monkeypatch.setattr(
+        silver,
+        "_write_alpha26_market_buckets",
+        lambda _frames, *, touched_buckets=None: (
+            1,
+            "system/silver-index/market/latest.parquet",
+            len(silver._ALPHA26_MARKET_MIN_COLUMNS),
+        ),
+    )
+    monkeypatch.setattr(silver, "_detect_missing_alpha26_market_buckets", lambda: (False, set()))
+    monkeypatch.setattr(
+        silver,
+        "_validate_all_silver_market_bucket_schemas",
+        lambda: (_ for _ in ()).throw(RuntimeError("silver_schema_not_ready")),
+    )
+    monkeypatch.setattr(silver.bronze_bucketing, "bronze_layout_mode", lambda: "alpha26")
+    monkeypatch.setattr(silver.layer_bucketing, "silver_layout_mode", lambda: "alpha26")
+    monkeypatch.setattr(silver.layer_bucketing, "silver_alpha26_force_rebuild", lambda: False)
+    monkeypatch.setattr(silver, "_run_market_reconciliation", lambda *, bronze_blob_list: (0, 0))
+    monkeypatch.setattr(silver.mdc, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(silver.mdc, "write_line", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(silver.mdc, "write_error", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(silver.mdc, "write_warning", lambda *_args, **_kwargs: None)
+
+    assert silver.main() == 1
+    assert saved == {"watermarks": 0, "last_success": 0}
 
 
 def test_main_force_rebuild_reprocesses_market_candidates(monkeypatch):
@@ -564,6 +623,7 @@ def test_main_force_rebuild_reprocesses_market_candidates(monkeypatch):
     monkeypatch.setattr(silver, "process_alpha26_bucket_blob", _fake_process_alpha26_bucket_blob)
     monkeypatch.setattr(silver, "_write_alpha26_market_buckets", _fake_write)
     monkeypatch.setattr(silver, "_detect_missing_alpha26_market_buckets", lambda: (False, set()))
+    monkeypatch.setattr(silver, "_validate_all_silver_market_bucket_schemas", lambda: None)
     monkeypatch.setattr(silver.bronze_bucketing, "bronze_layout_mode", lambda: "alpha26")
     monkeypatch.setattr(silver.layer_bucketing, "silver_layout_mode", lambda: "alpha26")
     monkeypatch.setattr(silver.layer_bucketing, "silver_alpha26_force_rebuild", lambda: True)
@@ -638,6 +698,138 @@ def test_write_alpha26_market_buckets_enforces_typed_schema_for_empty_buckets(mo
 
     assert captured[path_a]["symbol"].tolist() == ["AAPL"]
     assert "unexpected" not in captured[path_a].columns
+
+
+def test_silver_market_bucket_output_contract_rejects_duplicate_and_bad_corporate_actions():
+    frame = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2026-01-02"), pd.Timestamp("2026-01-02")],
+            "symbol": ["AAPL", "AAPL"],
+            "open": [100.0, 100.0],
+            "high": [102.0, 102.0],
+            "low": [99.0, 99.0],
+            "close": [101.0, 101.0],
+            "volume": [1000.0, 1000.0],
+            "short_interest": [pd.NA, pd.NA],
+            "short_volume": [pd.NA, pd.NA],
+            "dividend_amount": [0.0, -0.01],
+            "split_coefficient": [1.0, 0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="duplicate symbol/date"):
+        silver._validate_silver_market_bucket_output_contract(frame, bucket="A")
+
+    clean_frame = frame.drop_duplicates(subset=["symbol", "date"]).copy()
+    clean_frame.loc[:, "dividend_amount"] = -0.01
+    with pytest.raises(ValueError, match="negative dividend_amount"):
+        silver._validate_silver_market_bucket_output_contract(clean_frame, bucket="A")
+
+    clean_frame.loc[:, "dividend_amount"] = 0.0
+    clean_frame.loc[:, "split_coefficient"] = 0.0
+    with pytest.raises(ValueError, match="non-positive split_coefficient"):
+        silver._validate_silver_market_bucket_output_contract(clean_frame, bucket="A")
+
+
+def test_write_alpha26_market_buckets_uses_schema_overwrite_for_legacy_bucket(monkeypatch):
+    captured_schema_modes: dict[str, str | None] = {}
+
+    def _fake_store_delta(df, _container, path, mode="overwrite", schema_mode=None):
+        del df
+        assert mode == "overwrite"
+        captured_schema_modes[str(path)] = schema_mode
+
+    monkeypatch.setattr(delta_core, "store_delta", _fake_store_delta)
+    monkeypatch.setattr(delta_core, "get_delta_schema_columns", lambda *_args, **_kwargs: silver._LEGACY_ALPHA26_MARKET_SCHEMA)
+    monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ["A"])
+    monkeypatch.setattr(
+        silver.layer_bucketing,
+        "write_layer_symbol_index",
+        lambda **_kwargs: "system/silver-index/market/latest.parquet",
+    )
+
+    bucket_frames = {
+        "A": [
+            pd.DataFrame(
+                {
+                    "date": [pd.Timestamp("2026-01-02")],
+                    "symbol": ["aapl"],
+                    "open": [100.0],
+                    "high": [102.0],
+                    "low": [99.0],
+                    "close": [101.0],
+                    "volume": [1000],
+                    "short_interest": [pd.NA],
+                    "short_volume": [pd.NA],
+                    "dividend_amount": [0.0],
+                    "split_coefficient": [1.0],
+                }
+            )
+        ]
+    }
+
+    symbol_count, _index_path, _column_count = silver._write_alpha26_market_buckets(bucket_frames)
+
+    assert symbol_count == 1
+    assert captured_schema_modes == {DataPaths.get_silver_market_bucket_path("A"): "overwrite"}
+
+
+def test_write_alpha26_market_buckets_blocks_unapproved_schema_drift(monkeypatch):
+    monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ["A"])
+    monkeypatch.setattr(delta_core, "get_delta_schema_columns", lambda *_args, **_kwargs: ("date", "symbol", "open"))
+    monkeypatch.setattr(
+        delta_core,
+        "store_delta",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("store_delta should not be called")),
+    )
+
+    bucket_frames = {
+        "A": [
+            pd.DataFrame(
+                {
+                    "date": [pd.Timestamp("2026-01-02")],
+                    "symbol": ["aapl"],
+                    "open": [100.0],
+                    "high": [102.0],
+                    "low": [99.0],
+                    "close": [101.0],
+                    "volume": [1000],
+                    "short_interest": [pd.NA],
+                    "short_volume": [pd.NA],
+                    "dividend_amount": [0.0],
+                    "split_coefficient": [1.0],
+                }
+            )
+        ]
+    }
+
+    with pytest.raises(RuntimeError, match="Silver market schema drift blocked"):
+        silver._write_alpha26_market_buckets(bucket_frames)
+
+
+def test_detect_missing_alpha26_market_buckets_detects_legacy_schema(monkeypatch):
+    schemas = {
+        DataPaths.get_silver_market_bucket_path("A"): silver._LEGACY_ALPHA26_MARKET_SCHEMA,
+        DataPaths.get_silver_market_bucket_path("B"): silver._ALPHA26_MARKET_SCHEMA,
+    }
+
+    monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ["A", "B"])
+    monkeypatch.setattr(delta_core, "get_delta_schema_columns", lambda _container, path: schemas[path])
+    monkeypatch.setattr(silver.mdc, "write_warning", lambda *_args, **_kwargs: None)
+
+    needs_rebuild, buckets = silver._detect_missing_alpha26_market_buckets()
+
+    assert needs_rebuild is True
+    assert buckets == {"A"}
+
+
+def test_detect_missing_alpha26_market_buckets_blocks_unknown_schema_drift(monkeypatch):
+    monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ["A"])
+    monkeypatch.setattr(delta_core, "get_delta_schema_columns", lambda *_args, **_kwargs: ("date", "symbol", "open"))
+    monkeypatch.setattr(silver.mdc, "write_error", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="Silver market schema drift blocked"):
+        silver._detect_missing_alpha26_market_buckets()
 
 
 def test_write_alpha26_market_buckets_partial_update_preserves_untouched_symbol_index(monkeypatch):

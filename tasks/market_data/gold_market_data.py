@@ -19,12 +19,14 @@ from typing import Any, Iterator, Optional
 
 import numpy as np
 import pandas as pd
+from asset_allocation_contracts.market_history import GOLD_MARKET_SILVER_SOURCE_COLUMNS, SILVER_MARKET_COLUMNS
 from asset_allocation_contracts.paths import DataPaths
 from asset_allocation_runtime_common.foundation.postgres import PostgresError, connect
 from asset_allocation_runtime_common.shared_core.config import parse_debug_symbols
 
 from tasks.common.watermarks import load_watermarks, save_watermarks
 from tasks.common.backfill import apply_backfill_start_cutoff, get_backfill_range
+from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.market_data import domain_artifacts
 from tasks.common import gold_checkpoint_publication
 from asset_allocation_runtime_common.market_data import layer_bucketing
@@ -138,17 +140,8 @@ _SILVER_TO_GOLD_REQUIRED_COLUMNS = {
     "close",
     "volume",
 }
-_GOLD_MARKET_SILVER_SOURCE_COLUMNS: tuple[str, ...] = (
-    "date",
-    "symbol",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "dividend_amount",
-    "split_coefficient",
-)
+_SILVER_MARKET_SCHEMA: tuple[str, ...] = tuple(SILVER_MARKET_COLUMNS)
+_GOLD_MARKET_SILVER_SOURCE_COLUMNS: tuple[str, ...] = tuple(GOLD_MARKET_SILVER_SOURCE_COLUMNS)
 _BUCKET_PROGRESS_LOG_INTERVAL = 100
 _REGIME_REQUIRED_MARKET_SYMBOL_SET = frozenset(REGIME_REQUIRED_MARKET_SYMBOLS)
 _MARKET_CHUNK_SYMBOL_LIMIT = 25
@@ -161,6 +154,40 @@ def _configured_scope_symbols() -> set[str]:
         for symbol in parse_debug_symbols(os.environ.get("DEBUG_SYMBOLS") or "")
         if str(symbol or "").strip()
     }
+
+
+def _normalize_market_schema_columns(columns: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    if not columns:
+        return tuple()
+    normalized = normalize_columns_to_snake_case(pd.DataFrame(columns=[str(col) for col in columns]))
+    return tuple(str(col) for col in normalized.columns)
+
+
+def _validate_all_silver_market_source_schemas(*, silver_container: str) -> None:
+    from asset_allocation_runtime_common.market_data import delta_core
+
+    invalid: dict[str, list[str]] = {}
+    for bucket in layer_bucketing.ALPHABET_BUCKETS:
+        silver_path = DataPaths.get_silver_market_bucket_path(bucket)
+        schema_columns = delta_core.get_delta_schema_columns(silver_container, silver_path)
+        normalized = _normalize_market_schema_columns(schema_columns)
+        if normalized != _SILVER_MARKET_SCHEMA:
+            invalid[bucket] = list(normalized)
+
+    if invalid:
+        mdc.write_error(
+            "silver_schema_not_ready layer=gold domain=market "
+            f"expected_columns={list(_SILVER_MARKET_SCHEMA)} invalid_buckets={invalid}"
+        )
+        raise RuntimeError(
+            "silver_schema_not_ready: "
+            f"expected_columns={list(_SILVER_MARKET_SCHEMA)} invalid_buckets={invalid}"
+        )
+
+    mdc.write_line(
+        "silver_schema_ready layer=gold domain=market "
+        f"buckets={len(layer_bucketing.ALPHABET_BUCKETS)} columns={len(_SILVER_MARKET_SCHEMA)}"
+    )
 
 
 def _merge_preserved_gold_bucket_rows(
@@ -1319,6 +1346,7 @@ def _run_alpha26_market_gold(
     from asset_allocation_runtime_common.market_data import delta_core
     backfill_start = pd.to_datetime(backfill_start_iso).normalize() if backfill_start_iso else None
     scoped_symbols = _configured_scope_symbols()
+    _validate_all_silver_market_source_schemas(silver_container=silver_container)
 
     # Track per-run outcomes for caller status and logging.
     failed = 0

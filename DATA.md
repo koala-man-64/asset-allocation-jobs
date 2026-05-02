@@ -300,6 +300,8 @@ Path: `market-data/buckets/{bucket}`
 | `volume` | number | Session traded volume. |
 | `short_interest` | number | Short-interest value joined during Bronze ingestion when available. |
 | `short_volume` | number | Short-volume value joined during Bronze ingestion when available. |
+| `dividend_amount` | number | Corporate-action cash dividend amount captured from adjusted daily source data. |
+| `split_coefficient` | number | Corporate-action split multiplier captured from adjusted daily source data. |
 | `ingested_at` | string | UTC ingestion timestamp recorded when the Bronze row is written. |
 | `source_hash` | string | Hash of the normalized Bronze payload used for change detection and watermarking. |
 
@@ -318,6 +320,10 @@ Path: `market-data/buckets/{bucket}`
 | `volume` | number | Session traded volume. |
 | `short_interest` | number | Canonical short-interest metric. |
 | `short_volume` | number | Canonical short-volume metric. |
+| `dividend_amount` | number | Canonical cash dividend amount, defaulting to `0.0` on non-event days. |
+| `split_coefficient` | number | Canonical split multiplier, defaulting to `1.0` on non-event days. |
+
+Silver market buckets contain exactly these eleven canonical columns. Bronze ingestion metadata such as `source_hash` and `ingested_at` does not carry into Silver.
 
 ### Gold Market
 
@@ -337,7 +343,7 @@ Base columns:
 
 Corporate-action columns:
 
-Alpha Vantage adjusted-daily data is overlaid onto the canonical market bars only for corporate-action enrichment. OHLCV remains sourced from the existing market pipeline.
+Gold carries the Silver corporate-action values and derives event flags from them. OHLCV remains sourced from the canonical Silver market bars.
 
 | Column | Type | Description |
 | --- | --- | --- |

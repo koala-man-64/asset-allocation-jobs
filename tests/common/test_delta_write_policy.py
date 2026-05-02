@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
-from tasks.common.delta_write_policy import prepare_delta_write_frame
+from tasks.common.delta_write_policy import DeltaSchemaDriftError, prepare_delta_write_frame
 
 
 def test_prepare_delta_write_frame_skips_empty_frame_without_existing_schema(monkeypatch):
@@ -30,7 +31,7 @@ def test_prepare_delta_write_frame_aligns_empty_frame_to_existing_schema(monkeyp
     )
 
     decision = prepare_delta_write_frame(
-        pd.DataFrame(columns=["date", "symbol"]),
+        pd.DataFrame(columns=["date", "symbol", "feature_x"]),
         container="gold",
         path="market/buckets/A",
     )
@@ -42,7 +43,32 @@ def test_prepare_delta_write_frame_aligns_empty_frame_to_existing_schema(monkeyp
     assert list(decision.frame.columns) == existing_cols
 
 
-def test_prepare_delta_write_frame_aligns_non_empty_frame_to_existing_schema(monkeypatch):
+def test_prepare_delta_write_frame_aligns_non_empty_frame_to_exact_existing_schema(monkeypatch):
+    existing_cols = ["date", "symbol", "feature_x"]
+    monkeypatch.setattr(
+        "tasks.common.delta_write_policy.delta_core.get_delta_schema_columns",
+        lambda _container, _path: existing_cols,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "Date": ["2026-01-02"],
+            "Symbol": ["AAPL"],
+            "feature_x": [7],
+        },
+        index=[10],
+    )
+    decision = prepare_delta_write_frame(frame, container="gold", path="market/buckets/A")
+
+    assert decision.action == "write"
+    assert decision.reason == "aligned_to_existing_schema"
+    assert list(decision.frame.columns) == ["date", "symbol", "feature_x"]
+    assert decision.frame.index.tolist() == [0]
+    assert decision.frame.loc[0, "symbol"] == "AAPL"
+    assert decision.frame.loc[0, "feature_x"] == 7
+
+
+def test_prepare_delta_write_frame_blocks_non_empty_schema_drift(monkeypatch):
     existing_cols = ["date", "symbol", "feature_x"]
     monkeypatch.setattr(
         "tasks.common.delta_write_policy.delta_core.get_delta_schema_columns",
@@ -57,13 +83,9 @@ def test_prepare_delta_write_frame_aligns_non_empty_frame_to_existing_schema(mon
         },
         index=[10],
     )
-    decision = prepare_delta_write_frame(frame, container="gold", path="market/buckets/A")
 
-    assert decision.action == "write"
-    assert list(decision.frame.columns) == ["date", "symbol", "feature_x", "extra_field"]
-    assert decision.frame.index.tolist() == [0]
-    assert decision.frame.loc[0, "symbol"] == "AAPL"
-    assert pd.isna(decision.frame.loc[0, "feature_x"])
+    with pytest.raises(DeltaSchemaDriftError, match="Delta schema drift detected"):
+        prepare_delta_write_frame(frame, container="gold", path="market/buckets/A")
 
 
 def test_prepare_delta_write_frame_normalizes_non_empty_frame_without_existing_schema(monkeypatch):
@@ -81,22 +103,19 @@ def test_prepare_delta_write_frame_normalizes_non_empty_frame_without_existing_s
     assert decision.frame.index.tolist() == [0]
 
 
-def test_prepare_delta_write_frame_preserves_empty_wider_schema_for_existing_table(monkeypatch):
+def test_prepare_delta_write_frame_blocks_empty_schema_drift(monkeypatch):
     existing_cols = ["date", "symbol", "close", "return_1d"]
     monkeypatch.setattr(
         "tasks.common.delta_write_policy.delta_core.get_delta_schema_columns",
         lambda _container, _path: existing_cols,
     )
 
-    decision = prepare_delta_write_frame(
-        pd.DataFrame(columns=["date", "symbol"]),
-        container="gold",
-        path="market/buckets/Z",
-    )
-
-    assert decision.action == "write"
-    assert decision.frame.empty
-    assert list(decision.frame.columns) == existing_cols
+    with pytest.raises(DeltaSchemaDriftError, match="Delta schema drift detected"):
+        prepare_delta_write_frame(
+            pd.DataFrame(columns=["date", "symbol"]),
+            container="gold",
+            path="market/buckets/Z",
+        )
 
 
 def test_prepare_delta_write_frame_enforces_declared_schema_over_legacy_table_columns(monkeypatch):

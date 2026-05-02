@@ -89,7 +89,7 @@ def test_run_alpha26_price_target_gold_skips_empty_bucket_without_existing_schem
 
 def test_run_alpha26_price_target_gold_writes_empty_bucket_when_schema_exists(monkeypatch):
     target_path = DataPaths.get_gold_price_targets_bucket_path("A")
-    existing_cols = ["obs_date", "symbol", "tp_mean_est"]
+    existing_cols = list(GOLD_PRICE_TARGET_OUTPUT_COLUMNS)
     captured: dict[str, object] = {"store_calls": 0}
 
     monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", ("A",))

@@ -187,7 +187,7 @@ def test_run_alpha26_earnings_gold_skips_empty_bucket_without_existing_schema(mo
 
 def test_run_alpha26_earnings_gold_writes_empty_bucket_when_schema_exists(monkeypatch):
     target_path = DataPaths.get_gold_earnings_bucket_path("A")
-    existing_cols = ["date", "symbol", "surprise"]
+    existing_cols = list(GOLD_EARNINGS_OUTPUT_COLUMNS)
     captured: dict[str, object] = {"store_calls": 0}
 
     monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", ("A",))

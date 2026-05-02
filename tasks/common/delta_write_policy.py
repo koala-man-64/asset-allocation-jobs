@@ -9,6 +9,26 @@ from asset_allocation_runtime_common.market_data import delta_core
 from tasks.common.silver_contracts import normalize_columns_to_snake_case
 
 
+class DeltaSchemaDriftError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        container: str,
+        path: str,
+        existing_schema_columns: tuple[str, ...],
+        incoming_schema_columns: tuple[str, ...],
+    ) -> None:
+        self.container = container
+        self.path = path
+        self.existing_schema_columns = existing_schema_columns
+        self.incoming_schema_columns = incoming_schema_columns
+        super().__init__(
+            "Delta schema drift detected: "
+            f"container={container} path={path} "
+            f"existing_columns={list(existing_schema_columns)} incoming_columns={list(incoming_schema_columns)}"
+        )
+
+
 @dataclass(frozen=True)
 class DeltaWriteDecision:
     action: Literal["write", "skip_empty_no_schema"]
@@ -36,18 +56,24 @@ def _normalize_declared_schema_columns(declared_cols: Sequence[str]) -> list[str
     return _normalize_existing_schema_columns(tuple(str(col) for col in declared_cols))
 
 
-def _align_frame_to_existing_schema(df: pd.DataFrame, *, existing_cols: tuple[str, ...]) -> pd.DataFrame:
+def _align_frame_to_existing_schema(
+    df: pd.DataFrame,
+    *,
+    existing_cols: tuple[str, ...],
+    container: str,
+    path: str,
+) -> pd.DataFrame:
     out = normalize_columns_to_snake_case(df).reset_index(drop=True)
     normalized_existing = _normalize_existing_schema_columns(existing_cols)
-    for col in normalized_existing:
-        if col not in out.columns:
-            out[col] = pd.NA
-
-    if out.empty:
-        ordered_cols = normalized_existing
-    else:
-        ordered_cols = normalized_existing + [col for col in out.columns if col not in normalized_existing]
-    return out[ordered_cols].reset_index(drop=True)
+    incoming_columns = list(out.columns)
+    if incoming_columns != normalized_existing:
+        raise DeltaSchemaDriftError(
+            container=container,
+            path=path,
+            existing_schema_columns=tuple(normalized_existing),
+            incoming_schema_columns=tuple(incoming_columns),
+        )
+    return out[normalized_existing].reset_index(drop=True)
 
 
 def _align_frame_to_declared_schema(df: pd.DataFrame, *, declared_cols: Sequence[str]) -> pd.DataFrame:
@@ -89,7 +115,12 @@ def prepare_delta_write_frame(
     if existing_schema_columns:
         return DeltaWriteDecision(
             action="write",
-            frame=_align_frame_to_existing_schema(normalized, existing_cols=existing_schema_columns),
+            frame=_align_frame_to_existing_schema(
+                normalized,
+                existing_cols=existing_schema_columns,
+                container=container,
+                path=path,
+            ),
             reason="aligned_to_existing_schema",
             existing_schema_columns=existing_schema_columns,
         )

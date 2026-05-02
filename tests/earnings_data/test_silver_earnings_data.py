@@ -264,7 +264,7 @@ def test_write_alpha26_earnings_buckets_skips_empty_bucket_without_existing_sche
 
 def test_write_alpha26_earnings_buckets_writes_empty_bucket_when_schema_exists(monkeypatch):
     target_path = DataPaths.get_silver_earnings_bucket_path("A")
-    existing_cols = ["date", "symbol", "reported_eps"]
+    existing_cols = list(silver._ALPHA26_EARNINGS_MIN_COLUMNS)
     captured: dict[str, object] = {"store_calls": 0}
 
     monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ("A",))
@@ -311,7 +311,11 @@ def test_write_alpha26_earnings_buckets_partial_update_preserves_untouched_symbo
         "write_layer_symbol_index",
         lambda **kwargs: captured_index.update(kwargs) or "index",
     )
-    monkeypatch.setattr(silver.delta_core, "get_delta_schema_columns", lambda *_args, **_kwargs: ["date", "symbol"])
+    monkeypatch.setattr(
+        silver.delta_core,
+        "get_delta_schema_columns",
+        lambda *_args, **_kwargs: list(silver._ALPHA26_EARNINGS_MIN_COLUMNS),
+    )
     monkeypatch.setattr(
         silver.delta_core,
         "store_delta",

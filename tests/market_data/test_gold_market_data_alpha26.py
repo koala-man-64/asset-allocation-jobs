@@ -9,6 +9,7 @@ from asset_allocation_runtime_common.market_data.market_symbols import REGIME_RE
 from asset_allocation_contracts.paths import DataPaths
 from asset_allocation_runtime_common.foundation.postgres import PostgresError
 from tasks.market_data import gold_market_data as gold
+from tasks.common.gold_output_contracts import GOLD_MARKET_OUTPUT_COLUMNS
 from asset_allocation_runtime_common.market_data.gold_sync_contracts import GoldSyncResult
 
 
@@ -101,6 +102,16 @@ def _transient_postgres_sync_failure(
     setattr(failure, "failure_error_class", error_class)
     setattr(failure, "failure_transient", True)
     return failure
+
+
+@pytest.fixture(autouse=True)
+def _install_ready_gold_market_silver_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_get_schema(container: str, path: str):
+        if container == "silver" and str(path).startswith("market-data/buckets/"):
+            return gold._SILVER_MARKET_SCHEMA
+        return None
+
+    monkeypatch.setattr(delta_core_module, "get_delta_schema_columns", _fake_get_schema)
 
 
 @pytest.fixture(autouse=True)
@@ -290,6 +301,33 @@ def test_run_alpha26_market_gold_logs_bucket_progress_and_loads_required_columns
     assert any("status=ok bucket=A symbols_in=1 symbols_out=1 failures=0" in message for message in messages)
 
 
+def test_run_alpha26_market_gold_fails_before_writes_when_silver_schema_not_ready(monkeypatch):
+    monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", ["A"])
+    monkeypatch.setattr(
+        delta_core_module,
+        "get_delta_schema_columns",
+        lambda *_args, **_kwargs: gold._GOLD_MARKET_SILVER_SOURCE_COLUMNS,
+    )
+    monkeypatch.setattr(
+        delta_core_module,
+        "load_delta",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("load_delta should not be called")),
+    )
+    monkeypatch.setattr(
+        delta_core_module,
+        "store_delta",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("store_delta should not be called")),
+    )
+
+    with pytest.raises(RuntimeError, match="silver_schema_not_ready"):
+        gold._run_alpha26_market_gold(
+            silver_container="silver",
+            gold_container="gold",
+            backfill_start_iso=None,
+            watermarks={},
+        )
+
+
 def test_run_alpha26_market_gold_chunked_publish_preserves_rows_symbols_and_contract_columns(monkeypatch):
     watermarks: dict = {}
     written: dict[str, pd.DataFrame] = {}
@@ -455,7 +493,13 @@ def test_run_alpha26_market_gold_writes_healthy_symbols_and_blocks_publication_o
         return _gold_feature_df(symbol)
 
     monkeypatch.setattr(delta_core_module, "get_delta_last_commit", _fake_last_commit)
-    monkeypatch.setattr(delta_core_module, "get_delta_schema_columns", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        delta_core_module,
+        "get_delta_schema_columns",
+        lambda container, path: gold._SILVER_MARKET_SCHEMA
+        if container == "silver" and str(path).startswith("market-data/buckets/")
+        else None,
+    )
     monkeypatch.setattr(delta_core_module, "load_delta", _fake_load_delta)
     monkeypatch.setattr(gold, "compute_features", _fake_compute_features)
     monkeypatch.setattr(
@@ -651,6 +695,8 @@ def test_run_alpha26_market_gold_skips_empty_bucket_without_existing_schema(monk
 
     def _fake_get_schema(_container: str, path: str):
         captured["checked_paths"].append(path)
+        if str(path).startswith("market-data/buckets/"):
+            return gold._SILVER_MARKET_SCHEMA
         return None
 
     def _fake_store(*_args, **_kwargs):
@@ -682,7 +728,7 @@ def test_run_alpha26_market_gold_skips_empty_bucket_without_existing_schema(monk
     assert alpha26_symbols == 0
     assert index_path == "index"
     assert captured["store_calls"] == 0
-    assert captured["checked_paths"] == [target_path]
+    assert captured["checked_paths"] == [DataPaths.get_silver_market_bucket_path("A"), target_path]
 
 
 def test_run_alpha26_market_gold_processes_bucket_when_postgres_bootstrap_missing(monkeypatch):
@@ -936,7 +982,7 @@ def test_run_alpha26_market_gold_blocks_watermark_on_checkpoint_failure(monkeypa
 
 def test_run_alpha26_market_gold_aligns_empty_bucket_to_existing_schema(monkeypatch):
     target_path = DataPaths.get_gold_market_bucket_path("A")
-    existing_cols = ["date", "symbol", "close", "return_1d"]
+    existing_cols = list(GOLD_MARKET_OUTPUT_COLUMNS)
     captured: dict[str, object] = {"store_calls": 0}
 
     monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", ["A"])
@@ -946,7 +992,11 @@ def test_run_alpha26_market_gold_aligns_empty_bucket_to_existing_schema(monkeypa
     monkeypatch.setattr(
         delta_core_module,
         "get_delta_schema_columns",
-        lambda _container, path: existing_cols if path == target_path else None,
+        lambda container, path: gold._SILVER_MARKET_SCHEMA
+        if container == "silver" and str(path).startswith("market-data/buckets/")
+        else existing_cols
+        if path == target_path
+        else None,
     )
 
     def _fake_store(df: pd.DataFrame, _container: str, path: str, mode: str = "overwrite", **_kwargs):
@@ -1000,6 +1050,8 @@ def test_run_alpha26_market_gold_does_not_advance_watermark_for_empty_bucket_wit
 
     def _fake_get_schema(_container: str, path: str):
         captured["checked_paths"].append(path)
+        if str(path).startswith("market-data/buckets/"):
+            return gold._SILVER_MARKET_SCHEMA
         return None
 
     def _fake_store(*_args, **_kwargs):
@@ -1032,7 +1084,7 @@ def test_run_alpha26_market_gold_does_not_advance_watermark_for_empty_bucket_wit
     assert alpha26_symbols == 0
     assert index_path == "index"
     assert captured["store_calls"] == 0
-    assert captured["checked_paths"] == [target_path]
+    assert captured["checked_paths"] == [DataPaths.get_silver_market_bucket_path("A"), target_path]
 
 
 def test_run_alpha26_market_gold_rebuilds_domain_artifact_when_all_buckets_are_skipped(monkeypatch):

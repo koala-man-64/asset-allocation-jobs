@@ -201,7 +201,7 @@ def test_write_alpha26_price_target_buckets_skips_empty_bucket_without_existing_
 
 def test_write_alpha26_price_target_buckets_writes_empty_bucket_when_schema_exists(monkeypatch):
     target_path = DataPaths.get_silver_price_target_bucket_path("A")
-    existing_cols = ["obs_date", "symbol", "tp_mean_est"]
+    existing_cols = list(silver._ALPHA26_PRICE_TARGET_MIN_COLUMNS)
     captured: dict[str, object] = {"store_calls": 0}
 
     monkeypatch.setattr(silver.layer_bucketing, "ALPHABET_BUCKETS", ("A",))
@@ -248,7 +248,11 @@ def test_write_alpha26_price_target_buckets_partial_update_preserves_untouched_s
         "write_layer_symbol_index",
         lambda **kwargs: captured_index.update(kwargs) or "index",
     )
-    monkeypatch.setattr(silver.delta_core, "get_delta_schema_columns", lambda *_args, **_kwargs: ["obs_date", "symbol"])
+    monkeypatch.setattr(
+        silver.delta_core,
+        "get_delta_schema_columns",
+        lambda *_args, **_kwargs: list(silver._ALPHA26_PRICE_TARGET_MIN_COLUMNS),
+    )
     monkeypatch.setattr(
         silver.delta_core,
         "store_delta",
