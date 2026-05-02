@@ -186,6 +186,26 @@ def test_project_gold_finance_piotroski_frame_limits_output_schema() -> None:
     assert "shares_outstanding" not in projected.columns
 
 
+def test_symbol_position_index_normalizes_selects_and_preserves_source_frame() -> None:
+    source = pd.DataFrame(
+        {
+            "symbol": [" aapl", "AAPL ", "msft", " ", "", None, "aapl"],
+            "value": [1, 2, 3, 4, 5, 6, 7],
+        }
+    )
+    original = source.copy(deep=True)
+
+    position_index = gold_finance_data._build_symbol_position_index(source)
+    selected = gold_finance_data._select_symbol_rows(source, " Aapl ", position_index)
+    selected.loc[selected.index[0], "value"] = 99
+
+    assert sorted(position_index) == ["AAPL", "MSFT"]
+    assert selected["value"].tolist() == [99, 2, 7]
+    assert gold_finance_data._select_symbol_rows(source, "missing", position_index).empty
+    assert gold_finance_data._select_symbol_rows(source, "", position_index).empty
+    pd.testing.assert_frame_equal(source, original)
+
+
 def test_run_alpha26_finance_gold_projects_optional_valuation_metrics(monkeypatch):
     target_path = DataPaths.get_gold_finance_alpha26_bucket_path("A")
     captured: dict[str, object] = {}
@@ -388,6 +408,103 @@ def test_run_alpha26_finance_gold_emits_sparse_valuation_only_rows(monkeypatch):
     assert captured["df"].loc[0, "market_cap"] == 1_000_000.0
     assert captured["df"].loc[0, "pe_ratio"] == 20.0
     assert pd.isna(captured["df"].loc[0, "piotroski_f_score"])
+
+
+def test_run_alpha26_finance_gold_handles_full_sparse_and_omitted_symbols_with_index(monkeypatch):
+    target_path = DataPaths.get_gold_finance_alpha26_bucket_path("A")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(gold_finance_data.layer_bucketing, "ALPHABET_BUCKETS", ("A",))
+    monkeypatch.setattr(gold_finance_data.layer_bucketing, "load_layer_symbol_index", lambda **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(gold_finance_data.layer_bucketing, "write_layer_symbol_index", lambda **_kwargs: "index")
+    monkeypatch.setattr(gold_finance_data, "save_watermarks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(gold_finance_data, "resolve_postgres_dsn", lambda: None)
+    monkeypatch.setattr(gold_finance_data.domain_artifacts, "write_bucket_artifact", lambda **_kwargs: None)
+    monkeypatch.setattr(gold_finance_data.domain_artifacts, "write_domain_artifact", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        delta_core,
+        "get_delta_last_commit",
+        lambda _container, path: 1 if "finance-data/" in path else None,
+    )
+    monkeypatch.setattr(delta_core, "get_delta_schema_columns", lambda *_args, **_kwargs: None)
+
+    date_value = pd.Timestamp("2024-01-01")
+    income_df = pd.DataFrame(
+        {
+            "date": [date_value, date_value],
+            "symbol": [" aapl ", "OMIT"],
+            "total_revenue": [100.0, 10.0],
+            "gross_profit": [40.0, 4.0],
+            "net_income": [10.0, 1.0],
+        }
+    )
+    balance_df = pd.DataFrame(
+        {
+            "date": [date_value],
+            "symbol": ["AAPL"],
+            "long_term_debt": [250.0],
+            "total_assets": [1_000.0],
+            "current_assets": [500.0],
+            "current_liabilities": [250.0],
+            "shares_outstanding": [100.0],
+        }
+    )
+    cashflow_df = pd.DataFrame(
+        {
+            "date": [date_value],
+            "symbol": ["AAPL"],
+            "operating_cash_flow": [25.0],
+        }
+    )
+    valuation_df = pd.DataFrame(
+        {
+            "date": [date_value, date_value],
+            "symbol": ["AAPL", " MSFT "],
+            "market_cap": [1_000_000.0, 2_000_000.0],
+            "pe_ratio": [20.0, 30.0],
+        }
+    )
+
+    def _fake_load_delta(_container: str, path: str):
+        if "income_statement" in path:
+            return income_df
+        if "balance_sheet" in path:
+            return balance_df
+        if "cash_flow" in path:
+            return cashflow_df
+        if "valuation" in path:
+            return valuation_df
+        return pd.DataFrame()
+
+    def _fake_store(df: pd.DataFrame, _container: str, path: str, mode: str = "overwrite", **_kwargs) -> None:
+        captured["path"] = path
+        captured["mode"] = mode
+        captured["df"] = df.copy()
+
+    monkeypatch.setattr(delta_core, "load_delta", _fake_load_delta)
+    monkeypatch.setattr(delta_core, "store_delta", _fake_store)
+
+    result = gold_finance_data._run_alpha26_finance_gold(
+        silver_container="silver",
+        gold_container="gold",
+        backfill_start_iso=None,
+        watermarks={},
+    )
+
+    written = captured["df"]
+    assert result.processed_buckets == 1
+    assert result.hard_failures == 0
+    assert result.alpha26_symbols == 2
+    assert result.full_symbols == 1
+    assert result.sparse_symbols == 1
+    assert result.omitted_symbols == 1
+    assert captured["path"] == target_path
+    assert captured["mode"] == "overwrite"
+    assert list(written.columns) == EXPECTED_GOLD_FINANCE_COLUMNS
+    assert set(written["symbol"].astype(str)) == {"AAPL", "MSFT"}
+    assert "OMIT" not in set(written["symbol"].astype(str))
+    assert written.loc[written["symbol"].astype(str) == "MSFT", "market_cap"].iloc[0] == 2_000_000.0
+    assert pd.isna(written.loc[written["symbol"].astype(str) == "MSFT", "piotroski_f_score"].iloc[0])
 
 
 def test_run_alpha26_finance_gold_checkpoint_persists_index_and_defers_root_artifact(monkeypatch):
