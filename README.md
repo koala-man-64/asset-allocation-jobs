@@ -10,8 +10,8 @@ Runtime-owned jobs repository for:
 Local development installs versioned shared packages rather than sibling repos:
 
 ```powershell
-python -m pip install asset-allocation-contracts==3.11.0
-python -m pip install asset-allocation-runtime-common==3.4.7
+python -m pip install asset-allocation-contracts==3.14.0
+python -m pip install asset-allocation-runtime-common==3.5.3
 python scripts/run_quality_gate.py check-fast
 ```
 
