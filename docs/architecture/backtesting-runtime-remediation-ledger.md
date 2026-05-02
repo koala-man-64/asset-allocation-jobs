@@ -7,7 +7,7 @@
 System health and the UI must use the API metadata fields, not the job name or medallion layer, when grouping these jobs.
 
 ## Purpose
-- Single source of truth for decisions, actions, PRs, validation evidence, and rollout notes for the backtesting runtime v2-to-v4 remediation.
+- Single source of truth for decisions, actions, PRs, validation evidence, and rollout notes for the backtesting runtime v2-to-v7 remediation.
 - Canonical file path: `C:/Users/rdpro/Projects/asset-allocation-jobs/docs/architecture/backtesting-runtime-remediation-ledger.md`.
 - Update this file in every repo PR that changes scope, interfaces, status, or test evidence.
 
@@ -29,8 +29,46 @@ System health and the UI must use the API metadata fields, not the job name or m
 | Worker preflight | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | Included in `tests/tasks/test_backtesting_worker.py` and runtime gate | Depends on control-plane readiness endpoint remaining stable |
 | Dedicated runtime quality gate | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `python scripts/run_quality_gate.py test-backtesting-runtime` passed | CI workflow updated but not exercised in GitHub Actions here |
 | Docs and traceability | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | Docs updated; ledger evidence recorded below | PR links and release notes remain `TBD` until commit/publish |
+| Research-safe vNext contracts | `asset-allocation-contracts` | Implemented locally | Uncommitted workspace | `tests/python/test_contract_models.py` -> `76 passed` | Package publication still pending |
+| Research-safe vNext persistence | `asset-allocation-runtime-common` | Implemented locally | Uncommitted workspace | `tests/python/test_backtest_results.py` -> `1 passed` | Package publication still pending |
+| Research-safe vNext control-plane read APIs | `asset-allocation-control-plane` | Implemented locally | Uncommitted workspace | Not fully runnable locally: `oauthlib` missing in this Python env | Additive migration `0047`; endpoint tests updated |
+| Research-safe vNext jobs runtime | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `test-backtesting-runtime` -> `23 passed`; targeted runtime/migration tests -> `37 passed`; `lint-python` passed | Shared dependency compatibility gate blocked by unpublished `3.15.0` / `3.5.5` pins on Python 3.13 |
 
 ## Execution Log
+
+### 2026-05-02
+- Repo: `asset-allocation-contracts`
+- Branch / PR: TBD
+- Summary: Added Research-safe vNext request mode, v7 metadata, execution-honesty labels, data-quality event contracts, JSON schemas, TypeScript contracts, and package version `3.15.0`.
+- Test evidence:
+  - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python\test_contract_models.py -q` -> `76 passed`
+  - `npm run typecheck` in `ts/` -> blocked because `tsc` is not installed in the local `node_modules`.
+- Blockers: `asset-allocation-contracts==3.15.0` must be published before index-based downstream dependency gates can pass.
+
+- Repo: `asset-allocation-runtime-common`
+- Branch / PR: TBD
+- Summary: Bumped `BACKTEST_RESULTS_SCHEMA_VERSION` to `7`, added run-summary metadata persistence, added `core.backtest_data_quality_events` copy support, and retained row-count verification.
+- Test evidence:
+  - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-runtime-common\python;C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python\test_backtest_results.py -q` -> `1 passed`
+- Blockers: `asset-allocation-runtime-common==3.5.5` must be published after the contracts package.
+
+- Repo: `asset-allocation-control-plane`
+- Branch / PR: TBD
+- Summary: Added vNext metadata fields to backtest read responses, repository accessors for data-quality events, `GET /api/backtests/{run_id}/data-quality-events`, and additive migration `0047_backtest_research_safe_vnext.sql`.
+- Test evidence:
+  - `PYTHONPATH=... python -m pytest tests\api\test_backtests_endpoints.py -q` -> blocked at collection because `oauthlib` is not installed in the local Python 3.13 environment.
+- Blockers: Local test environment is missing control-plane runtime dependencies.
+
+- Repo: `asset-allocation-jobs`
+- Branch / PR: TBD
+- Summary: Defaulted runs to strict research integrity, made date-only slow data prior-session-only, allowed timestamped slow data only by `available_at <= bar_ts`, failed strict runs before result publication on missing held/selected execution data, left residual cash when selected names are below `topN`, processed sells before buys, reserved simple flat-bps costs for buys, stamped research-only/simple-bps metadata, added local migration `0042_backtest_research_safe_vnext.sql`, and aligned shared package pins.
+- Test evidence:
+  - `PYTHONPATH=... python scripts\run_quality_gate.py lint-python` -> passed
+  - `PYTHONPATH=... python scripts\run_quality_gate.py test-backtesting-runtime` -> `23 passed`
+  - `PYTHONPATH=... python -m pytest tests\core\test_backtest_runtime.py tests\test_postgres_migrations.py -q` -> `37 passed`
+  - `PYTHONPATH=... python scripts\run_quality_gate.py test-fast` -> `66 passed`, `6 failed` on pre-existing/local-environment issues: PowerShell execution policy, missing installed shared package metadata, sibling-source strategy config strictness, and whitespace-sensitive control-plane transport assertion.
+  - `PYTHONPATH=... python scripts\workflows\validate_shared_dependency_compatibility.py --repo-root .` -> blocked because `3.15.0` / `3.5.5` are not published and the local interpreter is Python 3.13 while shared packages require Python 3.14.
+- Blockers: Publish contracts/runtime-common packages, then rerun dependency compatibility and full fast gate in the intended Python 3.14 environment.
 
 ### 2026-04-17
 - Summary: Extended the earlier v2 remediation into additive v3 and v4 result schemas: corrected `net_exposure`, added gross-return and cost-drag summary fields, added `position_id` and `trade_role` to trade rows, and added flat-to-flat closed-position analytics plus summary trade-quality metrics.
@@ -89,6 +127,8 @@ Decision: worker preflight must not depend on claim, start, fail, or reconcile r
 - D-006: Create this ledger file as the first repo mutation and link it from `docs/architecture/master-design-contract.md`.
 - D-007: Keep the database default `results_schema_version` at `1` and stamp `2` when v2 results are published.
 Reason: this avoids mislabeling historical or unpublished runs while `persist_backtest_results()` marks v2 output explicitly at publish time.
+- D-008: Research-safe vNext stamps schema version `7`, defaults new runs to `researchIntegrityMode=strict`, and labels the output `research_only` with `simple_bps` / `not_tca_grade`.
+Reason: the runtime is now safer for deterministic research replay, but it still does not provide approval-grade TCA, OOS/walk-forward validation, factor attribution, or live risk controls.
 
 ## Action Ledger
 - A-001 `asset-allocation-contracts` Status: Implemented locally
@@ -118,6 +158,11 @@ Exit criteria: migration tests pass and historical data remains queryable.
 - A-007 CI and release Status: Implemented locally
 Owner: jobs
 Work: add `test-backtesting-runtime` to `scripts/run_quality_gate.py` and `.github/workflows/quality.yml`; keep `test-fast` lean.
+Exit criteria: runtime gate remains green in CI.
+- A-008 Research-safe vNext Status: Implemented locally
+Owner: contracts/runtime-common/control-plane/jobs
+Work: add v7 metadata and data-quality event contracts, persist/read diagnostics, enforce strict point-in-time and fail-fast data behavior in the jobs runtime, add additive database migrations, align shared dependency pins, and document research-only execution-quality caveats.
+Exit criteria: `asset-allocation-contracts==3.15.0` and `asset-allocation-runtime-common==3.5.5` are published, downstream compatibility gates pass on Python 3.14, and control-plane endpoint tests pass with dependencies installed.
 Exit criteria: required workflow passes with the new gate.
 - A-008 Docs and traceability Status: Implemented locally
 Owner: jobs

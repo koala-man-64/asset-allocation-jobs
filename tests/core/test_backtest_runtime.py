@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from core.backtest_runtime import (
+    BacktestDataQualityError,
     ResolvedBacktestDefinition,
     _apply_rebalance_target,
     _apply_trade_to_position,
@@ -22,6 +23,7 @@ from core.backtest_runtime import (
     _periods_per_year_from_bar_size,
     _rolling_window_periods,
     _score_snapshot,
+    _slow_frame_point_in_time_filter,
     _compute_rolling_metrics,
     _compute_summary,
     validate_backtest_submission,
@@ -131,6 +133,75 @@ def test_score_snapshot_breaks_ties_by_symbol() -> None:
 
     assert ranked["symbol"].tolist()[:2] == ["AAPL", "MSFT"]
     assert ranked["ordinal"].tolist()[:2] == [1, 2]
+
+
+def test_score_snapshot_leaves_cash_when_universe_shrinks_below_top_n() -> None:
+    ranked = _score_snapshot(
+        pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2026-03-03T14:30:00Z")],
+                "symbol": ["AAPL"],
+                "market_data__close": [10.0],
+                "market_data__return_20d": [0.5],
+            }
+        ),
+        definition=_sample_definition(),
+        rebalance_ts=datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc),
+    )
+
+    assert ranked["selected"].tolist() == [True]
+    assert ranked.iloc[0]["target_weight"] == pytest.approx(0.5)
+
+
+def test_slow_frame_point_in_time_filter_blocks_same_day_date_rows_in_strict_mode() -> None:
+    spec = universe_service.UniverseTableSpec(
+        name="fundamentals",
+        as_of_column="as_of_date",
+        as_of_kind="daily",
+        columns={
+            "as_of_date": universe_service.UniverseColumnSpec("as_of_date", "date", "date", []),
+            "metric": universe_service.UniverseColumnSpec("metric", "double precision", "number", []),
+        },
+    )
+
+    where_sql, params, order_columns = _slow_frame_point_in_time_filter(
+        spec,
+        as_of_ts=datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
+        research_integrity_mode="strict",
+    )
+
+    assert where_sql == '"as_of_date" < %s'
+    assert params == [datetime(2026, 3, 3, tzinfo=timezone.utc).date()]
+    assert order_columns == ['"as_of_date"']
+
+
+def test_slow_frame_point_in_time_filter_allows_timestamped_availability_only_when_published() -> None:
+    spec = universe_service.UniverseTableSpec(
+        name="fundamentals",
+        as_of_column="as_of_date",
+        as_of_kind="daily",
+        columns={
+            "as_of_date": universe_service.UniverseColumnSpec("as_of_date", "date", "date", []),
+            "available_at": universe_service.UniverseColumnSpec(
+                "available_at",
+                "timestamp with time zone",
+                "datetime",
+                [],
+            ),
+            "metric": universe_service.UniverseColumnSpec("metric", "double precision", "number", []),
+        },
+    )
+    as_of_ts = datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc)
+
+    where_sql, params, order_columns = _slow_frame_point_in_time_filter(
+        spec,
+        as_of_ts=as_of_ts,
+        research_integrity_mode="strict",
+    )
+
+    assert where_sql == '"available_at" <= %s'
+    assert params == [as_of_ts]
+    assert order_columns == ['"available_at"', '"as_of_date"']
 
 
 def test_validate_backtest_submission_rejects_intraday_coverage_gaps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -760,6 +831,8 @@ def test_execute_backtest_run_publishes_full_results_payload(monkeypatch: pytest
         closed_position_rows,
         selection_trace_rows,
         regime_trace_rows,
+        policy_event_rows,
+        data_quality_event_rows,
         results_schema_version: int,
     ) -> None:
         captured["dsn"] = dsn
@@ -771,6 +844,8 @@ def test_execute_backtest_run_publishes_full_results_payload(monkeypatch: pytest
         captured["closed_position_rows"] = list(closed_position_rows)
         captured["selection_trace_rows"] = list(selection_trace_rows)
         captured["regime_trace_rows"] = list(regime_trace_rows)
+        captured["policy_event_rows"] = list(policy_event_rows)
+        captured["data_quality_event_rows"] = list(data_quality_event_rows)
         captured["results_schema_version"] = results_schema_version
 
     monkeypatch.setattr("core.backtest_runtime.BacktestRepository", _FakeRepo)
@@ -788,9 +863,9 @@ def test_execute_backtest_run_publishes_full_results_payload(monkeypatch: pytest
     result = execute_backtest_run("postgresql://test", run_id="run-123")
 
     summary = result["summary"]
-    assert summary["gross_total_return"] == pytest.approx(0.02)
-    assert summary["total_transaction_cost"] == pytest.approx(303.0)
-    assert summary["cost_drag_bps"] == pytest.approx(30.3)
+    assert summary["gross_total_return"] == pytest.approx(0.0199700449)
+    assert summary["total_transaction_cost"] == pytest.approx(302.5461817)
+    assert summary["cost_drag_bps"] == pytest.approx(30.2546182)
     assert summary["closed_positions"] == 1
     assert captured["summary"] == captured["completed_summary"]
     assert captured["results_schema_version"] == BACKTEST_RESULTS_SCHEMA_VERSION
@@ -801,9 +876,197 @@ def test_execute_backtest_run_publishes_full_results_payload(monkeypatch: pytest
     assert len(captured["closed_position_rows"]) == 1
     assert len(captured["selection_trace_rows"]) == 2
     assert len(captured["regime_trace_rows"]) == 3
+    assert captured["summary"]["research_integrity_status"] == "strict_passed"
+    assert captured["summary"]["execution_model"] == "simple_bps"
+    assert captured["summary"]["execution_model_quality"] == "not_tca_grade"
+    assert captured["summary"]["approval_readiness"] == "research_only"
+    assert captured["summary"]["data_quality_event_count"] == 0
+    assert captured["summary"]["policy_event_count"] == 0
+    assert captured["policy_event_rows"] == []
+    assert captured["data_quality_event_rows"] == []
     first_trade, second_trade = captured["trade_rows"]
     assert first_trade["trade_role"] == "entry"
     assert second_trade["trade_role"] == "exit"
     assert first_trade["position_id"] == second_trade["position_id"]
     assert captured["closed_position_rows"][0]["exit_reason"] == "rebalance_exit"
     assert heartbeats
+
+
+def test_execute_backtest_run_fails_strict_when_pending_symbol_lacks_execution_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedule = [
+        datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc),
+        datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
+    ]
+    run_state = {
+        "run_id": "run-123",
+        "status": "queued",
+        "start_ts": schedule[0],
+        "end_ts": schedule[-1],
+        "bar_size": "5m",
+        "strategy_name": "mom-spy-res",
+        "strategy_version": 3,
+        "run_name": "Strict data gap",
+        "regime_model_name": None,
+        "regime_model_version": None,
+    }
+    completed = False
+
+    class _FakeRepo:
+        def __init__(self, _dsn: str) -> None:
+            self._state = run_state
+
+        def get_run(self, run_id: str):  # type: ignore[no-untyped-def]
+            return dict(self._state) if run_id == self._state["run_id"] else None
+
+        def start_run(self, run_id: str, execution_name: str | None = None) -> None:
+            self._state["status"] = "running"
+
+        def update_heartbeat(self, run_id: str) -> None:
+            return None
+
+        def complete_run(self, run_id: str, summary: dict[str, object]) -> None:
+            nonlocal completed
+            completed = True
+
+    def _snapshot_for_ts(current_ts: datetime, **_: object) -> pd.DataFrame:
+        if current_ts == schedule[0]:
+            return pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAPL",
+                        "market_data__open": 100.0,
+                        "market_data__high": 100.0,
+                        "market_data__low": 100.0,
+                        "market_data__close": 100.0,
+                    }
+                ]
+            )
+        return pd.DataFrame(columns=["symbol", "market_data__open", "market_data__close"])
+
+    def _ranking_for_ts(*args: object, **kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "rebalance_ts": schedule[0].isoformat(),
+                    "ordinal": 1,
+                    "symbol": "AAPL",
+                    "score": 1.0,
+                    "selected": True,
+                    "target_weight": 0.5,
+                }
+            ]
+        )
+
+    monkeypatch.setattr("core.backtest_runtime.BacktestRepository", _FakeRepo)
+    monkeypatch.setattr("core.backtest_runtime.resolve_backtest_definition", lambda *args, **kwargs: _sample_definition())
+    monkeypatch.setattr("core.backtest_runtime.validate_backtest_submission", lambda *args, **kwargs: schedule)
+    monkeypatch.setattr("core.backtest_runtime._load_regime_schedule_map", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._required_columns", lambda definition: {})
+    monkeypatch.setattr("core.backtest_runtime._load_intraday_session_frames", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._load_slow_frames", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._snapshot_for_timestamp", _snapshot_for_ts)
+    monkeypatch.setattr("core.backtest_runtime._score_snapshot", _ranking_for_ts)
+    monkeypatch.setattr(universe_service, "_load_gold_table_specs", lambda _dsn: {})
+    monkeypatch.setattr(
+        "core.backtest_runtime.persist_backtest_results",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("result persistence should not run")),
+    )
+
+    with pytest.raises(BacktestDataQualityError) as exc:
+        execute_backtest_run("postgresql://test", run_id="run-123")
+
+    assert exc.value.event["reason_code"] == "pending_symbol_missing_execution_snapshot"
+    assert exc.value.event["severity"] == "fatal"
+    assert completed is False
+
+
+def test_execute_backtest_run_fails_strict_when_held_symbol_lacks_market_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedule = [
+        datetime(2026, 3, 3, 14, 30, tzinfo=timezone.utc),
+        datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
+        datetime(2026, 3, 3, 14, 40, tzinfo=timezone.utc),
+    ]
+    run_state = {
+        "run_id": "run-123",
+        "status": "queued",
+        "start_ts": schedule[0],
+        "end_ts": schedule[-1],
+        "bar_size": "5m",
+        "strategy_name": "mom-spy-res",
+        "strategy_version": 3,
+        "run_name": "Strict held gap",
+        "regime_model_name": None,
+        "regime_model_version": None,
+    }
+    completed = False
+
+    class _FakeRepo:
+        def __init__(self, _dsn: str) -> None:
+            self._state = run_state
+
+        def get_run(self, run_id: str):  # type: ignore[no-untyped-def]
+            return dict(self._state) if run_id == self._state["run_id"] else None
+
+        def start_run(self, run_id: str, execution_name: str | None = None) -> None:
+            self._state["status"] = "running"
+
+        def update_heartbeat(self, run_id: str) -> None:
+            return None
+
+        def complete_run(self, run_id: str, summary: dict[str, object]) -> None:
+            nonlocal completed
+            completed = True
+
+    def _snapshot_for_ts(current_ts: datetime, **_: object) -> pd.DataFrame:
+        if current_ts == schedule[-1]:
+            return pd.DataFrame(columns=["symbol", "market_data__open", "market_data__close"])
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "market_data__open": 100.0,
+                    "market_data__high": 101.0,
+                    "market_data__low": 99.0,
+                    "market_data__close": 100.5,
+                }
+            ]
+        )
+
+    def _ranking_for_ts(*args: object, **kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "rebalance_ts": schedule[0].isoformat(),
+                    "ordinal": 1,
+                    "symbol": "AAPL",
+                    "score": 1.0,
+                    "selected": True,
+                    "target_weight": 0.5,
+                }
+            ]
+        )
+
+    monkeypatch.setattr("core.backtest_runtime.BacktestRepository", _FakeRepo)
+    monkeypatch.setattr("core.backtest_runtime.resolve_backtest_definition", lambda *args, **kwargs: _sample_definition())
+    monkeypatch.setattr("core.backtest_runtime.validate_backtest_submission", lambda *args, **kwargs: schedule)
+    monkeypatch.setattr("core.backtest_runtime._load_regime_schedule_map", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._required_columns", lambda definition: {})
+    monkeypatch.setattr("core.backtest_runtime._load_intraday_session_frames", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._load_slow_frames", lambda *args, **kwargs: {})
+    monkeypatch.setattr("core.backtest_runtime._snapshot_for_timestamp", _snapshot_for_ts)
+    monkeypatch.setattr("core.backtest_runtime._score_snapshot", _ranking_for_ts)
+    monkeypatch.setattr(universe_service, "_load_gold_table_specs", lambda _dsn: {})
+    monkeypatch.setattr(
+        "core.backtest_runtime.persist_backtest_results",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("result persistence should not run")),
+    )
+
+    with pytest.raises(BacktestDataQualityError) as exc:
+        execute_backtest_run("postgresql://test", run_id="run-123")
+
+    assert exc.value.event["reason_code"] == "held_symbol_missing_open_snapshot"
+    assert completed is False
