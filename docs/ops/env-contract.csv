@@ -28,8 +28,7 @@ BRONZE_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for 
 BRONZE_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze price-target sync.
 BRONZE_EARNINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze earnings sync.
 BRONZE_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for bronze economic catalyst sync.
-BRONZE_QUIVER_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for scheduled incremental Quiver bronze sync.
-BRONZE_QUIVER_BACKFILL_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for manual Quiver historical backfill.
+BRONZE_QUIVER_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for consolidated Quiver bronze sync. Scheduled executions run incremental mode; operator-triggered executions can override to historical_backfill.
 SILVER_MARKET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver market sync.
 SILVER_FINANCE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver finance sync.
 SILVER_PRICE_TARGET_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for silver price-target sync.

@@ -5,7 +5,7 @@ FROM python:3.14-slim-bookworm
 WORKDIR /app
 
 ARG CONTRACTS_VERSION=3.14.0
-ARG RUNTIME_COMMON_VERSION=3.5.3
+ARG RUNTIME_COMMON_VERSION=3.5.4
 
 COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt

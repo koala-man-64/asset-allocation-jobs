@@ -211,6 +211,13 @@ jobs:
             --resource-group "${RESOURCE_GROUP}" \
             --expected-image "${{ steps.image.outputs.image_digest }}"
 
+      - name: Delete retired jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/workflows/delete_retired_jobs.py \
+            --resource-group "${RESOURCE_GROUP}"
+
       - name: Upload rendered manifests and rollback data
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:

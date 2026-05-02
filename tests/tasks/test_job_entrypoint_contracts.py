@@ -14,7 +14,13 @@ _ENTRYPOINT_LOCK_CASES: list[tuple[str, list[str]]] = [
         "tasks/economic_catalyst_data/bronze_economic_catalyst_data.py",
         ['with mdc.JobLock(job_name, conflict_policy="fail")'],
     ),
-    ("tasks/quiver_data/bronze_quiver_data.py", ['with mdc.JobLock(job_name, conflict_policy="fail")']),
+    (
+        "tasks/quiver_data/bronze_quiver_data.py",
+        [
+            'lock_conflict_policy = "fail" if runtime_config.job_mode == "historical_backfill" else "skip_success"',
+            "with mdc.JobLock(job_name, conflict_policy=lock_conflict_policy)",
+        ],
+    ),
     (
         "tasks/finance_data/bronze_finance_data.py",
         [

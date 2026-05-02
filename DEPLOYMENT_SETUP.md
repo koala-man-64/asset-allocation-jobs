@@ -48,9 +48,9 @@ Use `python scripts\ops\trigger_job.py --job <job-key> --resource-group AssetAll
 - Treat `results-reconcile-job` as an `operational-support` scheduled reconciler. It sweeps durable publication signals every 30 minutes and operators can still start it manually for repair or replay workflows.
 - Treat the intraday pair as queue-driven schedules. `intraday-monitor-job` only claims due watchlists and `intraday-market-refresh-job` only drains queued targeted market refresh batches.
 - Treat `symbol-cleanup-job` as a queue-driven weekday schedule. It runs at `23:00 UTC` (`0 23 * * 1-5`) after Bronze day-end refreshes and drains queued symbol cleanup work in a bounded serial pass; operators can still start it manually for repair or replay workflows.
-- Treat Quiver as a split pipeline:
-  - `bronze-quiver-data-job` is the weekday hourly incremental run at `0 * * * 1-5`
-  - `bronze-quiver-backfill-job` is manual historical replay only
+- Treat Quiver as a split Bronze/Silver/Gold pipeline:
+  - `bronze-quiver-job` is the weekday hourly incremental run at `0 * * * 1-5`
+  - historical replay uses an operator-started one-off template override on `bronze-quiver-job`
   - `silver-quiver-data-job` and `gold-quiver-data-job` stay manual and are triggered by the upstream Quiver stage
   - Quiver gold does not trigger `results-reconcile-job` in this rollout
 
@@ -136,7 +136,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 6. Build the jobs image from `Dockerfile`.
 7. Deploy the job manifests you need from `deploy/job_*.yaml`.
    For intraday monitoring, deploy both `deploy/job_intraday_monitor.yaml` and `deploy/job_intraday_market_refresh.yaml` together.
-   For Quiver, deploy `deploy/job_bronze_quiver_data.yaml`, `deploy/job_bronze_quiver_backfill.yaml`, `deploy/job_silver_quiver_data.yaml`, and `deploy/job_gold_quiver_data.yaml` together so the trigger chain exists before the first bronze run.
+   For Quiver, deploy `deploy/job_bronze_quiver.yaml`, `deploy/job_silver_quiver_data.yaml`, and `deploy/job_gold_quiver_data.yaml` together so the trigger chain exists before the first bronze run.
    The prod workflow verifies live ACA runtime parity after apply; schedule, retry, timeout, image, env values, and secretRef names must match the rendered manifests.
 8. Verify each job can:
    - pull from ACR
@@ -164,8 +164,8 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - If intraday watchlists stay due but no runs are claimed, verify `job_intraday_monitor.yaml` is deployed, the job schedule is active, and the control plane still allows the `intraday-monitor-job` caller name.
 - If intraday refresh batches accumulate, verify `job_intraday_market_refresh.yaml` is deployed and that the manifest does not define `TRIGGER_NEXT_JOB_NAME`; the refresh worker is expected to run Bronze, Silver, and Gold in-process for the targeted symbols.
 - If symbol cleanup work accumulates, verify `job_symbol_cleanup.yaml` is deployed with the expected `0 23 * * 1-5` UTC schedule, and use `python scripts\ops\trigger_job.py --job symbol-cleanup --resource-group AssetAllocationRG` for an immediate repair run.
-- If Quiver bronze incremental falls behind, verify `job_bronze_quiver_data.yaml` is deployed with the `0 * * * 1-5` UTC schedule, then reduce `QUIVER_DATA_SYMBOL_LIMIT` or `QUIVER_DATA_TICKER_BATCH_SIZE` before widening the universe again.
-- If Quiver historical replay is needed, start `bronze-quiver-backfill-job` manually and confirm `QUIVER_DATA_JOB_MODE=historical_backfill`; do not repurpose the scheduled bronze manifest for replay.
+- If Quiver bronze incremental falls behind, verify `job_bronze_quiver.yaml` is deployed with the `0 * * * 1-5` UTC schedule, then reduce `QUIVER_DATA_SYMBOL_LIMIT` or `QUIVER_DATA_TICKER_BATCH_SIZE` before widening the universe again.
+- If Quiver historical replay is needed, run `python scripts\ops\trigger_job.py --job bronze-quiver --mode historical_backfill --resource-group AssetAllocationRG` and confirm the execution has `QUIVER_DATA_JOB_MODE=historical_backfill`; do not update the persisted scheduled job template for replay.
 - If Quiver gold writes domain metadata under `quiver-data/...`, treat that as a rollback blocker. Gold artifacts and gold system-health markers must publish under `quiver/...`.
 - If a backtest run fails before claim/start with an auth or reachability error, treat it as a preflight failure. Verify the readiness dependency, `ASSET_ALLOCATION_API_BASE_URL`, `ASSET_ALLOCATION_API_SCOPE`, and the control-plane identity path before retrying the job.
 - If summary metrics look daily-only on an intraday run, treat that as a cadence-metric issue, not a deployment issue. The remediation should publish cadence-aware metrics and rolling windows, so a job that still looks daily-only is not on the expected v5 path.

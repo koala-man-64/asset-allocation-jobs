@@ -245,6 +245,20 @@ def test_plan_symbol_batch_uses_historical_batch_size_for_backfill_mode() -> Non
     assert plan.selected_symbols == ("AAPL", "AMZN")
 
 
+def test_bronze_job_name_is_unified_for_all_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CONTAINER_APP_JOB_NAME", raising=False)
+
+    assert constants.BRONZE_JOB_NAME == "bronze-quiver-job"
+    assert bronze._runtime_job_name(constants.BRONZE_JOB_NAME) == "bronze-quiver-job"
+
+
+def test_bronze_watermark_keys_remain_mode_specific() -> None:
+    assert bronze._last_success_key("incremental") == "bronze_quiver_data_incremental"
+    assert bronze._last_success_key("historical_backfill") == "bronze_quiver_data_historical_backfill"
+    assert bronze._cursor_watermark_key("incremental") == "quiver_bronze_cursor_incremental"
+    assert bronze._cursor_watermark_key("historical_backfill") == "quiver_bronze_cursor_historical_backfill"
+
+
 def test_main_disabled_quiver_exits_before_client_or_publish(monkeypatch: pytest.MonkeyPatch) -> None:
     config = _config(enabled=False)
 

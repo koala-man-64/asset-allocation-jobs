@@ -69,7 +69,7 @@ ContainerAppConsoleLogs_CL
 ## Canary Order
 
 1. Run the deploy workflow and require runtime verification to pass.
-2. Manually start `bronze-quiver-data-job` with `QUIVER_DATA_ENABLED=false`; expect exit `0`, no health marker, and no Silver trigger.
+2. Manually start `bronze-quiver-job` with `QUIVER_DATA_ENABLED=false`; expect exit `0`, no health marker, and no Silver trigger.
 3. Manually start `bronze-market-job`; expect Massive-only logs and a Silver trigger after success.
 4. Manually start `bronze-economic-catalyst-job`; expect a weekday 30-minute cadence and optional vendor failures recorded as warnings if required official source coverage remains available.
 5. Manually start `bronze-earnings-job` only after Alpha Vantage listing-status returns non-empty symbols through the internal control plane.

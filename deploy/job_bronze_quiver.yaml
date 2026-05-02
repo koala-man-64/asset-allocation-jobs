@@ -1,5 +1,5 @@
 location: East US
-name: bronze-quiver-data-job
+name: bronze-quiver-job
 type: Microsoft.App/jobs
 tags:
   owner: ${RESOURCE_TAG_OWNER}
@@ -92,7 +92,7 @@ properties:
         value: ${QUIVER_DATA_SEC13F_TODAY_ONLY}
       image: ${JOB_IMAGE}
       imageType: ContainerImage
-      name: bronze-quiver-data-job
+      name: bronze-quiver-job
       command: ["python", "-m", "tasks.quiver_data.bronze_quiver_data"]
       resources:
         cpu: 2.0

@@ -7,6 +7,7 @@ import tomllib
 from types import ModuleType
 
 import pytest
+import yaml
 
 
 def repo_root() -> Path:
@@ -637,6 +638,15 @@ def test_deploy_prod_workflow_exports_bronze_runtime_safety_vars() -> None:
     assert "python scripts/workflows/verify_deployed_job_runtime.py" in workflow_text
 
 
+def test_deploy_prod_workflow_deletes_retired_quiver_jobs_after_runtime_verify() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    verify_index = workflow_text.index("python scripts/workflows/verify_deployed_job_runtime.py")
+    cleanup_index = workflow_text.index("python scripts/workflows/delete_retired_jobs.py")
+
+    assert verify_index < cleanup_index
+
+
 def test_verify_deployed_job_images_detects_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = load_module("scripts/workflows/verify_deployed_job_images.py", "verify_deployed_job_images")
     rendered_dir = tmp_path / "rendered"
@@ -915,6 +925,117 @@ def test_trigger_job_supports_symbol_cleanup_alias(monkeypatch: pytest.MonkeyPat
             "rg",
         ]
     ]
+
+
+def test_trigger_job_supports_bronze_quiver_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/ops/trigger_job.py", "trigger_job_bronze_quiver")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, check: commands.append(list(command)) or subprocess.CompletedProcess(command, 0),
+    )
+
+    resolved = module.start_job(
+        job_key="bronze-quiver",
+        resource_group="rg",
+        environment={"BRONZE_QUIVER_JOB": "custom-bronze-quiver-job"},
+    )
+
+    assert resolved == "custom-bronze-quiver-job"
+    assert commands == [
+        [
+            "az",
+            "containerapp",
+            "job",
+            "start",
+            "--name",
+            "custom-bronze-quiver-job",
+            "--resource-group",
+            "rg",
+        ]
+    ]
+
+
+def test_trigger_job_supports_quiver_historical_template_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/ops/trigger_job.py", "trigger_job_quiver_backfill")
+    commands: list[list[str]] = []
+    rendered_templates: list[dict] = []
+    yaml_paths: list[Path] = []
+
+    live_template = """
+serviceAccountName: asset-allocation-sa
+containers:
+- name: bronze-quiver-job
+  image: registry/image@sha256:1234
+  env:
+  - name: QUIVER_DATA_JOB_MODE
+    value: incremental
+  - name: POSTGRES_DSN
+    secretRef: pg-dsn
+"""
+
+    def fake_check_output(command, text):
+        commands.append(list(command))
+        assert command[:4] == ["az", "containerapp", "job", "show"]
+        assert command[-4:] == ["--query", "properties.template", "--output", "yaml"]
+        assert text is True
+        return live_template
+
+    def fake_run(command, check):
+        commands.append(list(command))
+        assert check is True
+        yaml_path = Path(command[-1])
+        yaml_paths.append(yaml_path)
+        rendered_templates.append(yaml.safe_load(yaml_path.read_text(encoding="utf-8")))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(module.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    resolved = module.start_job(
+        job_key="bronze-quiver",
+        resource_group="rg",
+        environment={"BRONZE_QUIVER_JOB": "bronze-quiver-job"},
+        mode="historical_backfill",
+    )
+
+    assert resolved == "bronze-quiver-job"
+    assert commands[1][:6] == ["az", "containerapp", "job", "start", "--name", "bronze-quiver-job"]
+    assert commands[1][-2] == "--yaml"
+    assert rendered_templates[0]["containers"][0]["env"][0] == {
+        "name": "QUIVER_DATA_JOB_MODE",
+        "value": "historical_backfill",
+    }
+    assert rendered_templates[0]["containers"][0]["env"][1] == {
+        "name": "POSTGRES_DSN",
+        "secretRef": "pg-dsn",
+    }
+    assert all(command[3] != "update" for command in commands)
+    assert yaml_paths and not yaml_paths[0].exists()
+
+
+def test_delete_retired_jobs_deletes_only_existing_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/workflows/delete_retired_jobs.py", "delete_retired_jobs")
+    deleted: list[str] = []
+
+    def fake_run(command, check, stdout, stderr):
+        assert command[:4] == ["az", "containerapp", "job", "show"]
+        job_name = command[5]
+        return subprocess.CompletedProcess(command, 0 if job_name == "bronze-quiver-data-job" else 1)
+
+    def fake_check_call(command):
+        assert command[:4] == ["az", "containerapp", "job", "delete"]
+        deleted.append(command[5])
+        return 0
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module.subprocess, "check_call", fake_check_call)
+
+    result = module.delete_retired_jobs(resource_group="rg")
+
+    assert result == ("bronze-quiver-data-job",)
+    assert deleted == ["bronze-quiver-data-job"]
 
 
 def test_check_fast_gate_runs_ruff_before_fast_tests(monkeypatch: pytest.MonkeyPatch) -> None:

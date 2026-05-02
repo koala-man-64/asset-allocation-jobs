@@ -56,8 +56,7 @@ MARKET_PIPELINE_JOB_MANIFESTS = (
 )
 
 QUIVER_PIPELINE_JOB_MANIFESTS = (
-    "job_bronze_quiver_data.yaml",
-    "job_bronze_quiver_backfill.yaml",
+    "job_bronze_quiver.yaml",
     "job_silver_quiver_data.yaml",
     "job_gold_quiver_data.yaml",
 )
@@ -70,8 +69,7 @@ EXPECTED_JOB_RESOURCE_NAMES = {
     "job_bronze_finance_data.yaml": "bronze-finance-job",
     "job_bronze_market_data.yaml": "bronze-market-job",
     "job_bronze_price_target_data.yaml": "bronze-price-target-job",
-    "job_bronze_quiver_backfill.yaml": "bronze-quiver-backfill-job",
-    "job_bronze_quiver_data.yaml": "bronze-quiver-data-job",
+    "job_bronze_quiver.yaml": "bronze-quiver-job",
     "job_gold_earnings_data.yaml": "gold-earnings-job",
     "job_gold_economic_catalyst_data.yaml": "gold-economic-catalyst-job",
     "job_gold_finance_data.yaml": "gold-finance-job",
@@ -177,6 +175,23 @@ def test_job_manifests_are_utf8_without_bom() -> None:
         assert not manifest.read_bytes().startswith(b"\xef\xbb\xbf"), manifest.name
 
 
+def test_consolidated_quiver_bronze_job_metadata_is_cataloged() -> None:
+    metadata = validate_job_metadata_tags(
+        "bronze-quiver-job",
+        {
+            "job-category": "data-pipeline",
+            "job-key": "quiver",
+            "job-role": "load",
+            "trigger-owner": "schedule",
+        },
+    )
+
+    assert metadata.jobCategory == "data-pipeline"
+    assert metadata.jobKey == "quiver"
+    assert metadata.jobRole == "load"
+    assert metadata.triggerOwner == "schedule"
+
+
 def test_strategy_compute_target_jobs_have_required_classifications() -> None:
     deploy_dir = repo_root() / "deploy"
     expected = {
@@ -271,8 +286,7 @@ def test_market_job_manifests_keep_folder_envs_aligned_to_contract_names() -> No
 
 def test_quiver_job_manifests_keep_folder_envs_aligned_to_contract_names() -> None:
     expected_lines = {
-        "job_bronze_quiver_data.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
-        "job_bronze_quiver_backfill.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
+        "job_bronze_quiver.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
         "job_silver_quiver_data.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
         "job_gold_quiver_data.yaml": ("value: ${AZURE_FOLDER_QUIVER}",),
     }
@@ -286,18 +300,12 @@ def test_quiver_job_manifests_keep_folder_envs_aligned_to_contract_names() -> No
 def test_quiver_job_manifests_keep_expected_trigger_types_and_chaining() -> None:
     deploy_dir = repo_root() / "deploy"
 
-    bronze_text = (deploy_dir / "job_bronze_quiver_data.yaml").read_text(encoding="utf-8")
+    bronze_text = (deploy_dir / "job_bronze_quiver.yaml").read_text(encoding="utf-8")
     assert "triggerType: Schedule" in bronze_text
     assert 'cronExpression: "0 * * * 1-5"' in bronze_text
     assert "value: incremental" in bronze_text
     assert "name: TRIGGER_NEXT_JOB_NAME" in bronze_text
     assert "value: ${SILVER_QUIVER_JOB}" in bronze_text
-
-    backfill_text = (deploy_dir / "job_bronze_quiver_backfill.yaml").read_text(encoding="utf-8")
-    assert "triggerType: Manual" in backfill_text
-    assert "manualTriggerConfig:" in backfill_text
-    assert "value: historical_backfill" in backfill_text
-    assert "value: ${SILVER_QUIVER_JOB}" in backfill_text
 
     silver_text = (deploy_dir / "job_silver_quiver_data.yaml").read_text(encoding="utf-8")
     assert "triggerType: Manual" in silver_text
@@ -313,21 +321,21 @@ def test_quiver_job_manifests_keep_expected_trigger_types_and_chaining() -> None
 
 def test_quiver_bronze_manifests_define_mode_and_runtime_envs() -> None:
     deploy_dir = repo_root() / "deploy"
-    for manifest_name in ("job_bronze_quiver_data.yaml", "job_bronze_quiver_backfill.yaml"):
-        text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
-        for required_name in (
-            "QUIVER_DATA_ENABLED",
-            "QUIVER_DATA_JOB_MODE",
-            "QUIVER_DATA_TICKER_BATCH_SIZE",
-            "QUIVER_DATA_HISTORICAL_BATCH_SIZE",
-            "QUIVER_DATA_SYMBOL_LIMIT",
-            "QUIVER_DATA_PAGE_SIZE",
-            "QUIVER_DATA_MAX_PAGES_PER_REQUEST",
-            "QUIVER_DATA_SEC13F_TODAY_ONLY",
-        ):
-            assert f"name: {required_name}" in text, f"{manifest_name} missing {required_name}"
-        assert 'name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS' in text, manifest_name
-        assert 'value: "120"' in text, manifest_name
+    manifest_name = "job_bronze_quiver.yaml"
+    text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
+    for required_name in (
+        "QUIVER_DATA_ENABLED",
+        "QUIVER_DATA_JOB_MODE",
+        "QUIVER_DATA_TICKER_BATCH_SIZE",
+        "QUIVER_DATA_HISTORICAL_BATCH_SIZE",
+        "QUIVER_DATA_SYMBOL_LIMIT",
+        "QUIVER_DATA_PAGE_SIZE",
+        "QUIVER_DATA_MAX_PAGES_PER_REQUEST",
+        "QUIVER_DATA_SEC13F_TODAY_ONLY",
+    ):
+        assert f"name: {required_name}" in text, f"{manifest_name} missing {required_name}"
+    assert 'name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS' in text, manifest_name
+    assert 'value: "120"' in text, manifest_name
 
 
 def test_economic_catalyst_bronze_manifest_runs_weekdays_every_30_minutes_without_retries() -> None:

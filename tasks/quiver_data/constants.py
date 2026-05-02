@@ -113,8 +113,7 @@ DOMAIN_SLUG: Final[str] = BRONZE_DOMAIN_SLUG
 BRONZE_ROOT_PREFIX: Final[str] = f"{BRONZE_DOMAIN_SLUG}/runs"
 DOMAIN_ARTIFACT_PATH: Final[str] = f"{BRONZE_DOMAIN_SLUG}/_metadata/domain.json"
 
-BRONZE_JOB_NAME: Final[str] = "bronze-quiver-data-job"
-BRONZE_BACKFILL_JOB_NAME: Final[str] = "bronze-quiver-backfill-job"
+BRONZE_JOB_NAME: Final[str] = "bronze-quiver-job"
 SILVER_JOB_NAME: Final[str] = "silver-quiver-data-job"
 GOLD_JOB_NAME: Final[str] = "gold-quiver-data-job"
 

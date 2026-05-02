@@ -529,9 +529,7 @@ def main(config: QuiverDataConfig | None = None) -> int:
 
     gateway_client = QuiverGatewayClient.from_env()
     run_id = _run_id()
-    job_name = _runtime_job_name(
-        constants.BRONZE_BACKFILL_JOB_NAME if config.job_mode == "historical_backfill" else constants.BRONZE_JOB_NAME
-    )
+    job_name = _runtime_job_name(constants.BRONZE_JOB_NAME)
     symbol_batch_plan = _load_symbol_batch_plan(config)
     batch_paths: list[str] = []
     request_fetches: list[dict[str, Any]] = []
@@ -636,12 +634,7 @@ if __name__ == "__main__":
     from tasks.common.system_health_markers import write_system_health_marker
 
     runtime_config = QuiverDataConfig.from_env()
-    configured_job_name = (
-        constants.BRONZE_BACKFILL_JOB_NAME
-        if runtime_config.job_mode == "historical_backfill"
-        else constants.BRONZE_JOB_NAME
-    )
-    job_name = _runtime_job_name(configured_job_name)
+    job_name = _runtime_job_name(constants.BRONZE_JOB_NAME)
     success_callbacks = (
         (
             lambda: write_system_health_marker(
@@ -654,7 +647,8 @@ if __name__ == "__main__":
         if runtime_config.enabled
         else ()
     )
-    with mdc.JobLock(job_name, conflict_policy="fail"):
+    lock_conflict_policy = "fail" if runtime_config.job_mode == "historical_backfill" else "skip_success"
+    with mdc.JobLock(job_name, conflict_policy=lock_conflict_policy):
         if runtime_config.enabled:
             ensure_api_awake_from_env(required=True)
         raise SystemExit(
