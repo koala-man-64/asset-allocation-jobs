@@ -10,8 +10,8 @@ Runtime-owned jobs repository for:
 Local development installs versioned shared packages rather than sibling repos:
 
 ```powershell
-python -m pip install asset-allocation-contracts==3.14.0
-python -m pip install asset-allocation-runtime-common==3.5.4
+python -m pip install asset-allocation-contracts==3.15.0
+python -m pip install asset-allocation-runtime-common==3.5.5
 python scripts/run_quality_gate.py check-fast
 ```
 
@@ -93,7 +93,8 @@ Backtest lifecycle state is owned by `asset-allocation-contracts` plus the contr
 - `deploy/job_intraday_monitor.yaml` is the scheduled intraday watchlist poller. It claims due runs from the control plane and posts symbol observations plus refresh candidates back to the internal intraday APIs.
 - `deploy/job_intraday_market_refresh.yaml` is the scheduled targeted refresh worker. It drains queued intraday market batches and runs the existing selected-symbol Bronze/Silver/Gold market path in-process without chaining the full downstream job fan-out.
 - `tasks/backtesting/worker.py` now performs fail-fast dependency preflight before looking up a targeted run or claiming queued work.
-- `core/backtest_runtime.py` sends wall-clock heartbeats during long sections, writes Postgres-backed v5 results, and now publishes net and gross return metrics, cost drag, corrected `net_exposure`, trade lifecycle fields, and flat-to-flat closed-position analytics. There is no cross-run persistent cache.
+- `core/backtest_runtime.py` sends wall-clock heartbeats during long sections and writes Postgres-backed v7 results. Strict research integrity mode is the default: date-only slow data uses the prior session, timestamped slow data must be available by the bar timestamp, held or selected symbols with missing execution/valuation prices fail before result publication, construction leaves residual cash when fewer names qualify than `topN`, and buy sizing reserves simple flat-bps costs. `legacy_replay` is only for reproducing older survivability behavior.
+- The execution model remains `simple_bps` with `executionModelQuality=not_tca_grade` and `approvalReadiness=research_only`; these backtests are deterministic research replay outputs, not execution-quality or live-risk approval artifacts.
 - Default-regime backtest policy is observe-only under the published contracts. The runtime records regime trace rows but does not block entries or rescale exposure from default-regime state.
 - `scripts/profile_backtest_runtime.py` is the profiling harness for the multiprocessing gate. `BACKTEST_RANKING_MAX_WORKERS` remains a benchmark-only knob and defaults to `1`.
 - Multiprocessing is intentionally disabled by default. Scale backtests by starting more ACA executions, not by turning one worker into a multi-run drain loop.

@@ -364,3 +364,74 @@ def test_strategy_publication_reconcile_migration_creates_idempotent_signal_tabl
     assert "idx_core_strategy_publication_reconcile_claims" in text
     assert "GRANT USAGE ON SCHEMA core" in text
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE core.strategy_publication_reconcile_signals" in text
+
+
+def test_backtest_research_safe_vnext_migration_adds_diagnostics_and_metadata() -> None:
+    repo_root = _repo_root()
+    migration = (
+        repo_root
+        / "deploy"
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0042_backtest_research_safe_vnext.sql"
+    )
+    text = migration.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS core.backtest_policy_events" in text
+    assert "CREATE TABLE IF NOT EXISTS core.backtest_data_quality_events" in text
+    assert "research_integrity_status" in text
+    assert "execution_model_quality" in text
+    assert "approval_readiness" in text
+    assert "data_quality_event_count" in text
+    assert "policy_event_count" in text
+    assert "idx_backtest_data_quality_events_run_bar_seq" in text
+    assert "severity IN ('warning', 'error', 'fatal')" in text
+
+
+def test_gold_market_contract_reconcile_migration_adds_required_columns() -> None:
+    repo_root = _repo_root()
+    migration = (
+        repo_root
+        / "deploy"
+        / "sql"
+        / "postgres"
+        / "migrations"
+        / "0043_reconcile_gold_market_output_contract.sql"
+    )
+    text = migration.read_text(encoding="utf-8")
+
+    required_columns = (
+        "dividend_amount",
+        "split_coefficient",
+        "is_dividend_day",
+        "is_split_day",
+        "rsi_14d",
+        "dist_prev_week_high_atr",
+        "dist_prev_week_low_atr",
+        "dist_prev_month_high_atr",
+        "dist_prev_month_low_atr",
+        "position_in_20d_range",
+        "position_in_55d_range",
+        "swept_sr_resistance_1",
+        "swept_sr_support_1",
+        "bearish_sweep_magnitude_atr",
+        "bullish_sweep_magnitude_atr",
+        "bearish_sweep_reclaim_frac",
+        "bullish_sweep_reclaim_frac",
+        "bars_since_bearish_sweep",
+        "bars_since_bullish_sweep",
+        "bearish_confirm_after_sweep",
+        "bullish_confirm_after_sweep",
+        "amihud_20d",
+        "amihud_z_252d",
+        "dollar_volume_20d",
+        "dollar_volume_z_252d",
+        "liquidity_stress_score",
+    )
+
+    for column in required_columns:
+        assert f"ADD COLUMN IF NOT EXISTS {column} " in text
+
+    assert "CREATE OR REPLACE VIEW gold.market_data_by_date AS" in text
+    assert "SELECT * FROM gold.market_data;" in text

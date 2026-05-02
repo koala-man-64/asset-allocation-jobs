@@ -37,6 +37,28 @@ _DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
 _TRADING_DAYS_PER_YEAR = 252.0
 _TRADING_MINUTES_PER_DAY = 390.0
 _DEFAULT_ROLLING_WINDOW_DAYS = 63
+_RESEARCH_INTEGRITY_STRICT = "strict"
+_RESEARCH_INTEGRITY_LEGACY = "legacy_replay"
+_SLOW_AVAILABILITY_COLUMNS = (
+    "available_at",
+    "available_ts",
+    "published_at",
+    "published_ts",
+    "accepted_at",
+    "filed_at",
+)
+
+
+class BacktestDataQualityError(RuntimeError):
+    def __init__(self, message: str, *, event: dict[str, Any]):
+        super().__init__(message)
+        self.event = event
+
+
+@dataclass(frozen=True)
+class RebalanceTarget:
+    target_weight: float
+    target_notional: float | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +77,83 @@ class ResolvedBacktestDefinition:
     regime_model_name: str | None = None
     regime_model_version: int | None = None
     regime_model_config: dict[str, Any] | None = None
+
+
+def _research_integrity_mode(run: dict[str, Any]) -> str:
+    for source in (run, run.get("config"), run.get("effective_config")):
+        if not isinstance(source, dict):
+            continue
+        raw = source.get("researchIntegrityMode") or source.get("research_integrity_mode")
+        mode = str(raw or "").strip()
+        if mode:
+            if mode not in {_RESEARCH_INTEGRITY_STRICT, _RESEARCH_INTEGRITY_LEGACY}:
+                raise ValueError(f"Unsupported researchIntegrityMode '{mode}'.")
+            return mode
+    return _RESEARCH_INTEGRITY_STRICT
+
+
+def _strict_research_integrity(mode: str) -> bool:
+    return mode != _RESEARCH_INTEGRITY_LEGACY
+
+
+def _record_data_quality_event(
+    events: list[dict[str, Any]],
+    *,
+    run_id: str,
+    bar_ts: datetime,
+    severity: str,
+    table_name: str,
+    reason_code: str,
+    action: str,
+    symbol: str | None = None,
+    field_name: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event = {
+        "run_id": run_id,
+        "event_seq": len(events) + 1,
+        "bar_ts": bar_ts.isoformat(),
+        "severity": severity,
+        "table_name": table_name,
+        "symbol": symbol,
+        "field_name": field_name,
+        "reason_code": reason_code,
+        "action": action,
+        "details": dict(details or {}),
+    }
+    events.append(event)
+    return event
+
+
+def _fail_strict_data_quality(
+    events: list[dict[str, Any]],
+    *,
+    run_id: str,
+    bar_ts: datetime,
+    table_name: str,
+    reason_code: str,
+    symbol: str | None = None,
+    field_name: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    event = _record_data_quality_event(
+        events,
+        run_id=run_id,
+        bar_ts=bar_ts,
+        severity="fatal",
+        table_name=table_name,
+        symbol=symbol,
+        field_name=field_name,
+        reason_code=reason_code,
+        action="fail_strict_backtest",
+        details=details,
+    )
+    raise BacktestDataQualityError(
+        f"Strict backtest data-quality failure: {reason_code}"
+        f"{f' symbol={symbol}' if symbol else ''}"
+        f"{f' field={field_name}' if field_name else ''}",
+        event=event,
+    )
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -213,6 +312,44 @@ def _load_intraday_session_frames(
     return frames
 
 
+def _column_is_datetime_like(spec: universe_service.UniverseTableSpec, column_name: str) -> bool:
+    column_spec = spec.columns.get(column_name)
+    if column_spec is None:
+        return False
+    if column_spec.value_kind == "datetime":
+        return True
+    return any(token in str(column_spec.data_type).lower() for token in ("timestamp", "timestamptz", "datetime"))
+
+
+def _availability_column_for_spec(spec: universe_service.UniverseTableSpec) -> str | None:
+    for column_name in _SLOW_AVAILABILITY_COLUMNS:
+        if column_name in spec.columns and _column_is_datetime_like(spec, column_name):
+            return column_name
+    return None
+
+
+def _slow_frame_point_in_time_filter(
+    spec: universe_service.UniverseTableSpec,
+    *,
+    as_of_ts: datetime,
+    research_integrity_mode: str,
+) -> tuple[str, list[Any], list[str]]:
+    as_of_column_sql = universe_service._quote_identifier(spec.as_of_column)
+    availability_column = _availability_column_for_spec(spec)
+    if _strict_research_integrity(research_integrity_mode) and availability_column is not None:
+        availability_column_sql = universe_service._quote_identifier(availability_column)
+        return (
+            f"{availability_column_sql} <= %s",
+            [as_of_ts],
+            [availability_column_sql, as_of_column_sql],
+        )
+    if _strict_research_integrity(research_integrity_mode) and _column_is_datetime_like(spec, spec.as_of_column):
+        return (f"{as_of_column_sql} <= %s", [as_of_ts], [as_of_column_sql])
+    if _strict_research_integrity(research_integrity_mode):
+        return (f"{as_of_column_sql} < %s", [as_of_ts.date()], [as_of_column_sql])
+    return (f"{as_of_column_sql} <= %s", [as_of_ts.date()], [as_of_column_sql])
+
+
 def _load_slow_frames(
     dsn: str,
     *,
@@ -220,6 +357,7 @@ def _load_slow_frames(
     required_columns: dict[str, set[str]],
     as_of_ts: datetime,
     bar_size: str | None,
+    research_integrity_mode: str = _RESEARCH_INTEGRITY_STRICT,
 ) -> dict[str, pd.DataFrame]:
     frames: dict[str, pd.DataFrame] = {}
     with connect(dsn) as conn:
@@ -233,20 +371,26 @@ def _load_slow_frames(
                 f'{universe_service._quote_identifier("symbol")} AS symbol',
             ]
             select_parts.extend(universe_service._quote_identifier(column) for column in selected_columns)
+            pit_filter_sql, pit_params, pit_order_columns = _slow_frame_point_in_time_filter(
+                spec,
+                as_of_ts=as_of_ts,
+                research_integrity_mode=research_integrity_mode,
+            )
             sql = f"""
                 SELECT DISTINCT ON ({universe_service._quote_identifier('symbol')})
                     {", ".join(select_parts)}
                 FROM "gold".{universe_service._quote_identifier(table_name)}
-                WHERE {universe_service._quote_identifier(spec.as_of_column)} <= %s
+                WHERE {pit_filter_sql}
             """
-            params: list[Any] = [as_of_ts.date()]
+            params: list[Any] = list(pit_params)
             if bar_size and "bar_size" in spec.columns:
                 sql += f" AND {universe_service._quote_identifier('bar_size')} = %s"
                 params.append(bar_size)
+            order_columns_sql = ",\n                    ".join(f"{column} DESC NULLS LAST" for column in pit_order_columns)
             sql += f"""
                 ORDER BY
                     {universe_service._quote_identifier('symbol')},
-                    {universe_service._quote_identifier(spec.as_of_column)} DESC NULLS LAST
+                    {order_columns_sql}
             """
             with conn.cursor() as cur:
                 cur.execute(sql, params)
@@ -516,6 +660,83 @@ def validate_backtest_submission(
     return schedule
 
 
+def _empty_ranking_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["rebalance_ts", "symbol", "score", "ordinal", "selected", "target_weight", "target_notional"]
+    )
+
+
+def _position_policy(definition: ResolvedBacktestDefinition) -> Any | None:
+    return getattr(definition.strategy_config, "positionPolicy", None)
+
+
+def _target_selection_count(definition: ResolvedBacktestDefinition, available_count: int) -> int:
+    policy = _position_policy(definition)
+    top_n = min(int(definition.strategy_config.topN), int(available_count))
+    max_open_positions = getattr(policy, "maxOpenPositions", None) if policy is not None else None
+    if max_open_positions is not None:
+        top_n = min(top_n, int(max_open_positions))
+    return max(top_n, 0)
+
+
+def _target_size_for_selection(
+    definition: ResolvedBacktestDefinition,
+    *,
+    selected_count: int,
+    target_weight_multiplier: float,
+) -> tuple[float, float | None]:
+    if selected_count <= 0:
+        return 0.0, None
+
+    policy = _position_policy(definition)
+    if policy is None or getattr(policy, "targetPositionSize", None) is None:
+        configured_top_n = max(int(definition.strategy_config.topN), 1)
+        return float(target_weight_multiplier) / configured_top_n, None
+
+    target_size = policy.targetPositionSize
+    max_size = getattr(policy, "maxPositionSize", None)
+    if target_size.mode == "pct_of_allocatable_capital":
+        target_weight = float(target_weight_multiplier) * (float(target_size.value) / 100.0)
+        if max_size is not None and max_size.mode == "pct_of_allocatable_capital":
+            target_weight = min(target_weight, float(target_weight_multiplier) * (float(max_size.value) / 100.0))
+        return target_weight, None
+
+    target_notional = float(target_size.value)
+    if max_size is not None and max_size.mode == "notional_base_ccy":
+        target_notional = min(target_notional, float(max_size.value))
+    return 0.0, target_notional
+
+
+def _pending_targets_from_records(records: Iterable[dict[str, Any]]) -> dict[str, RebalanceTarget]:
+    targets: dict[str, RebalanceTarget] = {}
+    for row in records:
+        if not bool(row.get("selected")):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        targets[symbol] = RebalanceTarget(
+            target_weight=float(row.get("target_weight") or 0.0),
+            target_notional=_maybe_float(row.get("target_notional")),
+        )
+    return targets
+
+
+def _apply_position_size_cap(
+    target_notional: float,
+    *,
+    market_equity_open: float,
+    definition: ResolvedBacktestDefinition,
+) -> float:
+    policy = _position_policy(definition)
+    max_size = getattr(policy, "maxPositionSize", None) if policy is not None else None
+    if max_size is None:
+        return target_notional
+    if max_size.mode == "pct_of_allocatable_capital":
+        return min(target_notional, market_equity_open * (float(max_size.value) / 100.0))
+    return min(target_notional, float(max_size.value))
+
+
 def _score_snapshot(
     snapshot: pd.DataFrame,
     *,
@@ -524,13 +745,13 @@ def _score_snapshot(
     target_weight_multiplier: float = 1.0,
 ) -> pd.DataFrame:
     if snapshot.empty:
-        return pd.DataFrame(columns=["symbol", "score", "ordinal", "selected", "target_weight", "rebalance_ts"])
+        return _empty_ranking_frame()
     filtered = snapshot[
         ranking_service._evaluate_universe_mask(snapshot, definition.strategy_universe.root)
         & ranking_service._evaluate_universe_mask(snapshot, definition.ranking_universe.root)
     ].copy()
     if filtered.empty:
-        return pd.DataFrame(columns=["symbol", "score", "ordinal", "selected", "target_weight", "rebalance_ts"])
+        return _empty_ranking_frame()
 
     group_scores: list[tuple[str, float, pd.Series]] = []
     required_masks: list[pd.Series] = []
@@ -544,7 +765,7 @@ def _score_snapshot(
         filtered = filtered[keep_mask].copy()
         group_scores = [(name, weight, series.loc[filtered.index]) for name, weight, series in group_scores]
         if filtered.empty:
-            return pd.DataFrame(columns=["symbol", "score", "ordinal", "selected", "target_weight", "rebalance_ts"])
+            return _empty_ranking_frame()
 
     weighted_total = pd.Series(0.0, index=filtered.index)
     total_weight = 0.0
@@ -561,16 +782,21 @@ def _score_snapshot(
     )
     filtered = filtered.dropna(subset=["score"]).copy()
     if filtered.empty:
-        return pd.DataFrame(columns=["symbol", "score", "ordinal", "selected", "target_weight", "rebalance_ts"])
+        return _empty_ranking_frame()
 
     filtered = filtered.sort_values(["score", "symbol"], ascending=[False, True]).reset_index(drop=True)
     filtered["ordinal"] = np.arange(1, len(filtered) + 1)
-    top_n = min(definition.strategy_config.topN, len(filtered))
+    top_n = _target_selection_count(definition, len(filtered))
     filtered["selected"] = filtered["ordinal"] <= top_n
-    target_weight = float(target_weight_multiplier) / top_n if top_n > 0 else 0.0
+    target_weight, target_notional = _target_size_for_selection(
+        definition,
+        selected_count=top_n,
+        target_weight_multiplier=target_weight_multiplier,
+    )
     filtered["target_weight"] = np.where(filtered["selected"], target_weight, 0.0)
+    filtered["target_notional"] = np.where(filtered["selected"] & (target_notional is not None), target_notional, None)
     filtered["rebalance_ts"] = pd.Timestamp(rebalance_ts)
-    return filtered[["rebalance_ts", "symbol", "score", "ordinal", "selected", "target_weight"]]
+    return filtered[["rebalance_ts", "symbol", "score", "ordinal", "selected", "target_weight", "target_notional"]]
 
 
 def _market_row(snapshot: pd.DataFrame | dict[str, pd.Series], symbol: str) -> pd.Series | None:
@@ -619,6 +845,81 @@ def _maybe_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _target_quantities_for_pending_targets(
+    pending_targets: dict[str, RebalanceTarget],
+    *,
+    snapshot_index: dict[str, pd.Series],
+    market_equity_open: float,
+    definition: ResolvedBacktestDefinition,
+    run_id: str,
+    bar_ts: datetime,
+    research_integrity_mode: str,
+    data_quality_event_rows: list[dict[str, Any]],
+    commission_bps: float,
+    slippage_bps: float,
+) -> dict[str, float]:
+    target_notional_by_symbol: dict[str, float] = {}
+    open_prices: dict[str, float] = {}
+    strict_mode = _strict_research_integrity(research_integrity_mode)
+    for symbol, target in pending_targets.items():
+        row = _market_row(snapshot_index, symbol)
+        if row is None:
+            if strict_mode:
+                _fail_strict_data_quality(
+                    data_quality_event_rows,
+                    run_id=run_id,
+                    bar_ts=bar_ts,
+                    table_name=_PRICE_TABLE,
+                    symbol=symbol,
+                    reason_code="pending_symbol_missing_execution_snapshot",
+                    field_name="open",
+                    details={"researchIntegrityMode": research_integrity_mode},
+                )
+            continue
+        open_price = _maybe_float(row.get(f"{_PRICE_TABLE}__open")) or _maybe_float(row.get(f"{_PRICE_TABLE}__close"))
+        if open_price is None or open_price <= 0:
+            if strict_mode:
+                _fail_strict_data_quality(
+                    data_quality_event_rows,
+                    run_id=run_id,
+                    bar_ts=bar_ts,
+                    table_name=_PRICE_TABLE,
+                    symbol=symbol,
+                    reason_code="pending_symbol_invalid_execution_price",
+                    field_name="open",
+                    details={"researchIntegrityMode": research_integrity_mode},
+                )
+            continue
+        target_notional = (
+            float(target.target_notional)
+            if target.target_notional is not None
+            else market_equity_open * float(target.target_weight)
+        )
+        target_notional_by_symbol[symbol] = _apply_position_size_cap(
+            target_notional,
+            market_equity_open=market_equity_open,
+            definition=definition,
+        )
+        open_prices[symbol] = open_price
+
+    total_target_notional = sum(target_notional_by_symbol.values())
+    if total_target_notional > market_equity_open + 1e-6:
+        raise ValueError("Long-only position policy target exposure exceeds available strategy capital.")
+
+    cost_rate = max(0.0, float(commission_bps + slippage_bps) / 10000.0)
+    cost_adjusted_capital = market_equity_open / (1.0 + cost_rate) if cost_rate > 0 else market_equity_open
+    if total_target_notional > cost_adjusted_capital + 1e-6 and total_target_notional > 0:
+        scale = cost_adjusted_capital / total_target_notional
+        target_notional_by_symbol = {
+            symbol: target_notional * scale for symbol, target_notional in target_notional_by_symbol.items()
+        }
+
+    return {
+        symbol: target_notional / open_prices[symbol]
+        for symbol, target_notional in target_notional_by_symbol.items()
+    }
 
 
 def _apply_rebalance_target(
@@ -1368,6 +1669,8 @@ def execute_backtest_run(
     start_ts = _ensure_utc(run["start_ts"])
     end_ts = _ensure_utc(run["end_ts"])
     bar_size = str(run.get("bar_size") or "").strip() or None
+    research_integrity_mode = _research_integrity_mode(run)
+    strict_research_integrity = _strict_research_integrity(research_integrity_mode)
     periods_per_year = _periods_per_year_from_bar_size(bar_size)
     rolling_window_periods = _rolling_window_periods(periods_per_year=periods_per_year)
     _log_stage_timing(
@@ -1376,6 +1679,7 @@ def execute_backtest_run(
         run_id=run_id,
         execution_name=execution_name,
         bar_size=bar_size,
+        research_integrity_mode=research_integrity_mode,
         periods_per_year=f"{periods_per_year:.2f}",
         rolling_window_periods=rolling_window_periods,
     )
@@ -1419,9 +1723,11 @@ def execute_backtest_run(
     cash = float(definition.strategy_config_raw.get("initialCash") or 100000.0)
     gross_cash = float(cash)
     positions: dict[str, PositionState] = {}
-    pending_target_weights: dict[str, float] = {}
+    pending_targets: dict[str, RebalanceTarget] = {}
     selection_trace_rows: list[dict[str, Any]] = []
     regime_trace_rows: list[dict[str, Any]] = []
+    policy_event_rows: list[dict[str, Any]] = []
+    data_quality_event_rows: list[dict[str, Any]] = []
     trade_rows: list[dict[str, Any]] = []
     closed_position_rows: list[dict[str, Any]] = []
     timeseries_rows: list[dict[str, Any]] = []
@@ -1454,6 +1760,7 @@ def execute_backtest_run(
             required_columns=required_columns,
             as_of_ts=session_schedule[-1],
             bar_size=bar_size,
+            research_integrity_mode=research_integrity_mode,
         )
         intraday_frames_by_ts = _build_intraday_frames_by_timestamp(intraday_frames)
         prepared_slow_frames = _prepare_slow_snapshot_frames(slow_frames)
@@ -1525,11 +1832,7 @@ def execute_backtest_run(
                 )
                 initial_ranking_records = initial_ranking.to_dict("records")
                 selection_trace_rows.extend(initial_ranking_records)
-                pending_target_weights = {
-                    str(row["symbol"]): float(row["target_weight"])
-                    for row in initial_ranking_records
-                    if bool(row["selected"])
-                }
+                pending_targets = _pending_targets_from_records(initial_ranking_records)
                 first_signal_computed = True
                 continue
 
@@ -1541,33 +1844,82 @@ def execute_backtest_run(
             for symbol, position in list(positions.items()):
                 row = _market_row(snapshot_index, symbol)
                 if row is None:
+                    if strict_research_integrity:
+                        _fail_strict_data_quality(
+                            data_quality_event_rows,
+                            run_id=run_id,
+                            bar_ts=current_ts,
+                            table_name=_PRICE_TABLE,
+                            symbol=symbol,
+                            reason_code="held_symbol_missing_open_snapshot",
+                            field_name="open",
+                            details={"researchIntegrityMode": research_integrity_mode},
+                        )
                     market_equity_open += position.quantity * previous_close_by_symbol.get(symbol, position.entry_price)
                     continue
-                open_price = _maybe_float(row.get(f"{_PRICE_TABLE}__open")) or _maybe_float(row.get(f"{_PRICE_TABLE}__close")) or position.entry_price
+                open_price = _maybe_float(row.get(f"{_PRICE_TABLE}__open")) or _maybe_float(row.get(f"{_PRICE_TABLE}__close"))
+                if open_price is None or open_price <= 0:
+                    if strict_research_integrity:
+                        _fail_strict_data_quality(
+                            data_quality_event_rows,
+                            run_id=run_id,
+                            bar_ts=current_ts,
+                            table_name=_PRICE_TABLE,
+                            symbol=symbol,
+                            reason_code="held_symbol_invalid_open_price",
+                            field_name="open",
+                            details={"researchIntegrityMode": research_integrity_mode},
+                        )
+                    open_price = position.entry_price
                 market_equity_open += position.quantity * open_price
 
             target_qty_by_symbol: dict[str, float] = {}
-            if pending_target_weights:
-                for symbol, target_weight in pending_target_weights.items():
-                    row = _market_row(snapshot_index, symbol)
-                    if row is None:
-                        continue
-                    open_price = _maybe_float(row.get(f"{_PRICE_TABLE}__open")) or _maybe_float(
-                        row.get(f"{_PRICE_TABLE}__close")
-                    )
-                    if open_price is None or open_price <= 0:
-                        continue
-                    target_qty_by_symbol[symbol] = (market_equity_open * target_weight) / open_price
+            if pending_targets:
+                target_qty_by_symbol = _target_quantities_for_pending_targets(
+                    pending_targets,
+                    snapshot_index=snapshot_index,
+                    market_equity_open=market_equity_open,
+                    definition=definition,
+                    run_id=run_id,
+                    bar_ts=current_ts,
+                    research_integrity_mode=research_integrity_mode,
+                    data_quality_event_rows=data_quality_event_rows,
+                    commission_bps=commission_bps,
+                    slippage_bps=slippage_bps,
+                )
 
             all_symbols = sorted(set(positions.keys()) | set(target_qty_by_symbol.keys()))
+            planned_trades: list[tuple[str, float, float, float, str | None, str]] = []
             for symbol in all_symbols:
                 row = _market_row(snapshot_index, symbol)
                 if row is None:
+                    if strict_research_integrity:
+                        _fail_strict_data_quality(
+                            data_quality_event_rows,
+                            run_id=run_id,
+                            bar_ts=current_ts,
+                            table_name=_PRICE_TABLE,
+                            symbol=symbol,
+                            reason_code="rebalance_symbol_missing_execution_snapshot",
+                            field_name="open",
+                            details={"researchIntegrityMode": research_integrity_mode},
+                        )
                     continue
                 open_price = _maybe_float(row.get(f"{_PRICE_TABLE}__open")) or _maybe_float(
                     row.get(f"{_PRICE_TABLE}__close")
                 )
                 if open_price is None or open_price <= 0:
+                    if strict_research_integrity:
+                        _fail_strict_data_quality(
+                            data_quality_event_rows,
+                            run_id=run_id,
+                            bar_ts=current_ts,
+                            table_name=_PRICE_TABLE,
+                            symbol=symbol,
+                            reason_code="rebalance_symbol_invalid_execution_price",
+                            field_name="open",
+                            details={"researchIntegrityMode": research_integrity_mode},
+                        )
                     continue
                 current_qty = positions[symbol].quantity if symbol in positions else 0.0
                 target_qty = target_qty_by_symbol.get(symbol, 0.0)
@@ -1577,6 +1929,13 @@ def execute_backtest_run(
                 existing_position = positions.get(symbol)
                 position_id = existing_position.position_id if existing_position is not None else _new_position_id()
                 trade_role = _trade_role_for_target(current_quantity=float(current_qty), target_quantity=float(target_qty))
+                planned_trades.append((symbol, float(delta_qty), float(open_price), float(target_qty), position_id, trade_role))
+
+            for symbol, delta_qty, open_price, target_qty, position_id, trade_role in sorted(
+                planned_trades,
+                key=lambda item: (item[1] > 0.0, item[0]),
+            ):
+                existing_position = positions.get(symbol)
                 cash, commission, slippage = _execute_trade(
                     trades=trade_rows,
                     ts=current_ts,
@@ -1589,6 +1948,20 @@ def execute_backtest_run(
                     position_id=position_id,
                     trade_role=trade_role,
                 )
+                if strict_research_integrity and cash < -1e-6:
+                    _fail_strict_data_quality(
+                        data_quality_event_rows,
+                        run_id=run_id,
+                        bar_ts=current_ts,
+                        table_name="portfolio",
+                        reason_code="negative_cash_after_rebalance_trade",
+                        field_name="cash",
+                        details={
+                            "researchIntegrityMode": research_integrity_mode,
+                            "symbol": symbol,
+                            "cash_after": cash,
+                        },
+                    )
                 gross_cash -= float(delta_qty * open_price)
                 total_commission += commission
                 total_slippage += slippage
@@ -1612,16 +1985,40 @@ def execute_backtest_run(
                 else:
                     positions[symbol] = updated_position
 
-            pending_target_weights = {}
+            pending_targets = {}
 
             for symbol, position in list(positions.items()):
                 row = _market_row(snapshot_index, symbol)
                 if row is None:
+                    if strict_research_integrity:
+                        _fail_strict_data_quality(
+                            data_quality_event_rows,
+                            run_id=run_id,
+                            bar_ts=current_ts,
+                            table_name=_PRICE_TABLE,
+                            symbol=symbol,
+                            reason_code="held_symbol_missing_exit_snapshot",
+                            field_name="close",
+                            details={"researchIntegrityMode": research_integrity_mode},
+                        )
                     continue
                 bar = price_bar_cache.get(symbol)
                 if bar is None:
                     bar = _price_bar(current_ts, row)
                     price_bar_cache[symbol] = bar
+                if strict_research_integrity and any(
+                    value is None or value <= 0 for value in (bar.open, bar.high, bar.low, bar.close)
+                ):
+                    _fail_strict_data_quality(
+                        data_quality_event_rows,
+                        run_id=run_id,
+                        bar_ts=current_ts,
+                        table_name=_PRICE_TABLE,
+                        symbol=symbol,
+                        reason_code="held_symbol_invalid_ohlc_for_exit",
+                        field_name="ohlc",
+                        details={"researchIntegrityMode": research_integrity_mode},
+                    )
                 evaluation = evaluator.evaluate_bar(definition.strategy_config, position, bar)
                 advanced_position = evaluation.position_state
                 positions[symbol] = advanced_position
@@ -1640,6 +2037,20 @@ def execute_backtest_run(
                     position_id=advanced_position.position_id,
                     trade_role="exit",
                 )
+                if strict_research_integrity and cash < -1e-6:
+                    _fail_strict_data_quality(
+                        data_quality_event_rows,
+                        run_id=run_id,
+                        bar_ts=current_ts,
+                        table_name="portfolio",
+                        reason_code="negative_cash_after_exit_trade",
+                        field_name="cash",
+                        details={
+                            "researchIntegrityMode": research_integrity_mode,
+                            "symbol": symbol,
+                            "cash_after": cash,
+                        },
+                    )
                 gross_cash += float(advanced_position.quantity * float(evaluation.decision.exit_price))
                 total_commission += commission
                 total_slippage += slippage
@@ -1674,7 +2085,29 @@ def execute_backtest_run(
                 if row is not None:
                     close_price = _maybe_float(row.get(f"{_PRICE_TABLE}__close")) or _maybe_float(row.get(f"{_PRICE_TABLE}__open"))
                 if close_price is None:
+                    if strict_research_integrity:
+                        _fail_strict_data_quality(
+                            data_quality_event_rows,
+                            run_id=run_id,
+                            bar_ts=current_ts,
+                            table_name=_PRICE_TABLE,
+                            symbol=symbol,
+                            reason_code="held_symbol_missing_close_price",
+                            field_name="close",
+                            details={"researchIntegrityMode": research_integrity_mode},
+                        )
                     close_price = previous_close_by_symbol.get(symbol, position.entry_price)
+                if strict_research_integrity and close_price <= 0:
+                    _fail_strict_data_quality(
+                        data_quality_event_rows,
+                        run_id=run_id,
+                        bar_ts=current_ts,
+                        table_name=_PRICE_TABLE,
+                        symbol=symbol,
+                        reason_code="held_symbol_invalid_close_price",
+                        field_name="close",
+                        details={"researchIntegrityMode": research_integrity_mode},
+                    )
                 previous_close_by_symbol[symbol] = float(close_price)
                 position_value = float(position.quantity * close_price)
                 close_equity += position_value
@@ -1706,6 +2139,16 @@ def execute_backtest_run(
                 }
             )
             previous_equity = close_equity
+            if strict_research_integrity and close_equity < -1e-6:
+                _fail_strict_data_quality(
+                    data_quality_event_rows,
+                    run_id=run_id,
+                    bar_ts=current_ts,
+                    table_name="portfolio",
+                    reason_code="negative_portfolio_equity",
+                    field_name="portfolio_value",
+                    details={"researchIntegrityMode": research_integrity_mode, "portfolio_value": close_equity},
+                )
 
             if index < len(session_schedule) - 1:
                 ranking = _score_snapshot(
@@ -1716,11 +2159,7 @@ def execute_backtest_run(
                 )
                 ranking_records = ranking.to_dict("records")
                 selection_trace_rows.extend(ranking_records)
-                pending_target_weights = {
-                    str(row["symbol"]): float(row["target_weight"])
-                    for row in ranking_records
-                    if bool(row["selected"])
-                }
+                pending_targets = _pending_targets_from_records(ranking_records)
 
     timeseries = pd.DataFrame(timeseries_rows)
     trades = pd.DataFrame(trade_rows)
@@ -1739,6 +2178,18 @@ def execute_backtest_run(
         periods_per_year=periods_per_year,
         initial_cash_override=initial_equity,
     )
+    summary.update(
+        {
+            "research_integrity_status": (
+                "strict_passed" if strict_research_integrity else "legacy_uncontrolled"
+            ),
+            "execution_model": "simple_bps",
+            "execution_model_quality": "not_tca_grade",
+            "approval_readiness": "research_only",
+            "data_quality_event_count": len(data_quality_event_rows),
+            "policy_event_count": len(policy_event_rows),
+        }
+    )
 
     _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="postgres_publish_start")
     _log_stage_timing(
@@ -1751,6 +2202,8 @@ def execute_backtest_run(
         closed_position_rows=len(closed_position_rows),
         selection_rows=len(selection_trace_rows),
         regime_rows=len(regime_trace_rows),
+        data_quality_rows=len(data_quality_event_rows),
+        policy_event_rows=len(policy_event_rows),
     )
     persist_backtest_results(
         dsn,
@@ -1762,6 +2215,8 @@ def execute_backtest_run(
         closed_position_rows=closed_position_rows,
         selection_trace_rows=selection_trace_rows,
         regime_trace_rows=regime_trace_rows,
+        policy_event_rows=policy_event_rows,
+        data_quality_event_rows=data_quality_event_rows,
         results_schema_version=BACKTEST_RESULTS_SCHEMA_VERSION,
     )
     _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="postgres_publish_complete", force=True)
@@ -1775,6 +2230,8 @@ def execute_backtest_run(
         closed_position_rows=len(closed_position_rows),
         selection_rows=len(selection_trace_rows),
         regime_rows=len(regime_trace_rows),
+        data_quality_rows=len(data_quality_event_rows),
+        policy_event_rows=len(policy_event_rows),
     )
     repo.complete_run(run_id, summary=summary)
     return {"summary": summary}
