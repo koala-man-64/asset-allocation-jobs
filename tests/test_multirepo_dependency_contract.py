@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from importlib.metadata import distribution
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 import tomllib
 
@@ -20,13 +20,26 @@ def project_dependencies() -> dict[str, str]:
     return dependencies
 
 
+def package_pyproject_dependencies(package_name: str) -> list[str]:
+    package_pyproject = repo_root().parent / package_name / "python" / "pyproject.toml"
+    if not package_pyproject.exists():
+        raise PackageNotFoundError(package_name)
+    pyproject = tomllib.loads(package_pyproject.read_text(encoding="utf-8"))
+    return list(pyproject["project"].get("dependencies", []))
+
+
 def shared_dependencies() -> dict[str, str]:
     return {name: version for name, version in project_dependencies().items() if name.startswith("asset-allocation-")}
 
 
 def installed_exact_dependency_versions(package_name: str) -> dict[str, str]:
     versions: dict[str, str] = {}
-    for requirement in distribution(package_name).requires or []:
+    try:
+        requirements = list(distribution(package_name).requires or [])
+    except PackageNotFoundError:
+        requirements = package_pyproject_dependencies(package_name)
+
+    for requirement in requirements:
         requirement_text = requirement.split(";", 1)[0].strip()
         if "==" not in requirement_text:
             continue

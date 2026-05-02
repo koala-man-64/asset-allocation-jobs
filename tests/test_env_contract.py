@@ -66,6 +66,10 @@ def powershell_exe() -> str:
     raise AssertionError("PowerShell executable not found for setup-env dry-run test")
 
 
+def powershell_script_command(script: Path, *args: str) -> list[str]:
+    return [powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *args]
+
+
 def test_contract_rows_are_well_formed() -> None:
     rows = contract_rows()
     names = [row["name"] for row in rows]
@@ -136,7 +140,7 @@ def test_sync_script_dry_run_ignores_undocumented_env_keys(tmp_path: Path) -> No
     (bin_dir / "gh.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
 
     completed = subprocess.run(
-        [powershell_exe(), "-NoProfile", "-File", str(scripts_dir / "sync-all-to-github.ps1"), "-DryRun"],
+        powershell_script_command(scripts_dir / "sync-all-to-github.ps1", "-DryRun"),
         cwd=temp_repo,
         check=True,
         capture_output=True,
@@ -164,7 +168,7 @@ def test_env_bootstrap_scripts_handle_control_plane_bootstrap_secrets() -> None:
 def test_setup_env_dry_run_reports_sources_without_prompting() -> None:
     script = repo_root() / "scripts" / "setup-env.ps1"
     completed = subprocess.run(
-        [powershell_exe(), "-NoProfile", "-File", str(script), "-DryRun"],
+        powershell_script_command(script, "-DryRun"),
         cwd=repo_root(),
         check=True,
         capture_output=True,
@@ -179,7 +183,7 @@ def test_setup_env_dry_run_uses_template_defaults_without_marking_them_prompt_re
     script = repo_root() / "scripts" / "setup-env.ps1"
     env_file = tmp_path / ".env.web"
     completed = subprocess.run(
-        [powershell_exe(), "-NoProfile", "-File", str(script), "-DryRun", "-EnvFilePath", str(env_file)],
+        powershell_script_command(script, "-DryRun", "-EnvFilePath", str(env_file)),
         cwd=repo_root(),
         check=True,
         capture_output=True,
@@ -197,7 +201,7 @@ def test_setup_env_dry_run_still_marks_blank_default_values_prompt_required(tmp_
     script = repo_root() / "scripts" / "setup-env.ps1"
     env_file = tmp_path / ".env.web"
     completed = subprocess.run(
-        [powershell_exe(), "-NoProfile", "-File", str(script), "-DryRun", "-EnvFilePath", str(env_file)],
+        powershell_script_command(script, "-DryRun", "-EnvFilePath", str(env_file)),
         cwd=repo_root(),
         check=True,
         capture_output=True,

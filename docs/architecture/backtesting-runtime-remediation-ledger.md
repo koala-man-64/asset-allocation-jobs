@@ -13,6 +13,7 @@ System health and the UI must use the API metadata fields, not the job name or m
 
 ## Program Status
 - Overall status: Implemented locally; pending commit and release choreography
+- QA gate: Local implementation gates passed; release remains blocked until shared packages `asset-allocation-contracts==3.15.0` and `asset-allocation-runtime-common==3.5.5` resolve in the intended Python 3.14 environment and the control-plane endpoint suite runs with its runtime dependencies installed.
 - Program type: Cross-repo coordinated remediation
 - Routing decision: This is a contracts-repo-first change.
 - Repos in scope: `asset-allocation-contracts`, `asset-allocation-control-plane`, `asset-allocation-runtime-common`, `asset-allocation-jobs`
@@ -29,10 +30,10 @@ System health and the UI must use the API metadata fields, not the job name or m
 | Worker preflight | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | Included in `tests/tasks/test_backtesting_worker.py` and runtime gate | Depends on control-plane readiness endpoint remaining stable |
 | Dedicated runtime quality gate | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `python scripts/run_quality_gate.py test-backtesting-runtime` passed | CI workflow updated but not exercised in GitHub Actions here |
 | Docs and traceability | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | Docs updated; ledger evidence recorded below | PR links and release notes remain `TBD` until commit/publish |
-| Research-safe vNext contracts | `asset-allocation-contracts` | Implemented locally | Uncommitted workspace | `tests/python/test_contract_models.py` -> `76 passed` | Package publication still pending |
-| Research-safe vNext persistence | `asset-allocation-runtime-common` | Implemented locally | Uncommitted workspace | `tests/python/test_backtest_results.py` -> `1 passed` | Package publication still pending |
-| Research-safe vNext control-plane read APIs | `asset-allocation-control-plane` | Implemented locally | Uncommitted workspace | Not fully runnable locally: `oauthlib` missing in this Python env | Additive migration `0047`; endpoint tests updated |
-| Research-safe vNext jobs runtime | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `test-backtesting-runtime` -> `23 passed`; targeted runtime/migration tests -> `37 passed`; `lint-python` passed | Shared dependency compatibility gate blocked by unpublished `3.15.0` / `3.5.5` pins on Python 3.13 |
+| Research-safe vNext contracts | `asset-allocation-contracts` | Implemented locally | Uncommitted workspace | `tests/python` -> `100 passed`; model tests -> `77 passed`; TS typecheck -> passed | Package publication still pending |
+| Research-safe vNext persistence | `asset-allocation-runtime-common` | Implemented locally | Uncommitted workspace | `tests/python` -> `124 passed` | Package publication still pending |
+| Research-safe vNext control-plane read APIs | `asset-allocation-control-plane` | Implemented locally | Uncommitted workspace | `py_compile` of changed modules passed; endpoint suite blocked locally by missing `oauthlib` | Additive migration `0047`; endpoint tests updated |
+| Research-safe vNext jobs runtime | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `python -m pytest -q` -> `944 passed, 3 skipped`; `test-fast` -> `72 passed`; `test-backtesting-runtime` -> `23 passed` | Shared dependency compatibility gate blocked by unpublished `3.15.0` / `3.5.5` pins on Python 3.13 |
 
 ## Execution Log
 
@@ -41,14 +42,17 @@ System health and the UI must use the API metadata fields, not the job name or m
 - Branch / PR: TBD
 - Summary: Added Research-safe vNext request mode, v7 metadata, execution-honesty labels, data-quality event contracts, JSON schemas, TypeScript contracts, and package version `3.15.0`.
 - Test evidence:
-  - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python\test_contract_models.py -q` -> `76 passed`
-  - `npm run typecheck` in `ts/` -> blocked because `tsc` is not installed in the local `node_modules`.
+  - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python -q` -> `100 passed`
+  - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python\test_contract_models.py -q` -> `77 passed`
+  - `npm install` in `ts/` -> passed, `0 vulnerabilities`
+  - `npm run typecheck` in `ts/` -> passed
 - Blockers: `asset-allocation-contracts==3.15.0` must be published before index-based downstream dependency gates can pass.
 
 - Repo: `asset-allocation-runtime-common`
 - Branch / PR: TBD
 - Summary: Bumped `BACKTEST_RESULTS_SCHEMA_VERSION` to `7`, added run-summary metadata persistence, added `core.backtest_data_quality_events` copy support, and retained row-count verification.
 - Test evidence:
+  - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-runtime-common\python;C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python -q` -> `124 passed`
   - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-runtime-common\python;C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python\test_backtest_results.py -q` -> `1 passed`
 - Blockers: `asset-allocation-runtime-common==3.5.5` must be published after the contracts package.
 
@@ -56,6 +60,7 @@ System health and the UI must use the API metadata fields, not the job name or m
 - Branch / PR: TBD
 - Summary: Added vNext metadata fields to backtest read responses, repository accessors for data-quality events, `GET /api/backtests/{run_id}/data-quality-events`, and additive migration `0047_backtest_research_safe_vnext.sql`.
 - Test evidence:
+  - `PYTHONPATH=... python -m py_compile api\endpoints\backtests.py api\service\backtest_contracts_compat.py core\backtest_repository.py` -> passed
   - `PYTHONPATH=... python -m pytest tests\api\test_backtests_endpoints.py -q` -> blocked at collection because `oauthlib` is not installed in the local Python 3.13 environment.
 - Blockers: Local test environment is missing control-plane runtime dependencies.
 
@@ -64,11 +69,14 @@ System health and the UI must use the API metadata fields, not the job name or m
 - Summary: Defaulted runs to strict research integrity, made date-only slow data prior-session-only, allowed timestamped slow data only by `available_at <= bar_ts`, failed strict runs before result publication on missing held/selected execution data, left residual cash when selected names are below `topN`, processed sells before buys, reserved simple flat-bps costs for buys, stamped research-only/simple-bps metadata, added local migration `0042_backtest_research_safe_vnext.sql`, and aligned shared package pins.
 - Test evidence:
   - `PYTHONPATH=... python scripts\run_quality_gate.py lint-python` -> passed
+  - `PYTHONPATH=... python scripts\run_quality_gate.py test-fast` -> `72 passed`
   - `PYTHONPATH=... python scripts\run_quality_gate.py test-backtesting-runtime` -> `23 passed`
+  - `PYTHONPATH=... python scripts\run_quality_gate.py test-control-plane-compat` -> `22 passed`
+  - `PYTHONPATH=... python scripts\run_quality_gate.py test-runtime-common-compat` -> `12 passed`
   - `PYTHONPATH=... python -m pytest tests\core\test_backtest_runtime.py tests\test_postgres_migrations.py -q` -> `37 passed`
-  - `PYTHONPATH=... python scripts\run_quality_gate.py test-fast` -> `66 passed`, `6 failed` on pre-existing/local-environment issues: PowerShell execution policy, missing installed shared package metadata, sibling-source strategy config strictness, and whitespace-sensitive control-plane transport assertion.
+  - `PYTHONPATH=... python -m pytest -q` -> `944 passed, 3 skipped`
   - `PYTHONPATH=... python scripts\workflows\validate_shared_dependency_compatibility.py --repo-root .` -> blocked because `3.15.0` / `3.5.5` are not published and the local interpreter is Python 3.13 while shared packages require Python 3.14.
-- Blockers: Publish contracts/runtime-common packages, then rerun dependency compatibility and full fast gate in the intended Python 3.14 environment.
+- Blockers: Publish contracts/runtime-common packages, then rerun dependency compatibility in the intended Python 3.14 environment.
 
 ### 2026-04-17
 - Summary: Extended the earlier v2 remediation into additive v3 and v4 result schemas: corrected `net_exposure`, added gross-return and cost-drag summary fields, added `position_id` and `trade_role` to trade rows, and added flat-to-flat closed-position analytics plus summary trade-quality metrics.
