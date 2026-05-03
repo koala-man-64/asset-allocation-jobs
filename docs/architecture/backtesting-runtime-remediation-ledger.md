@@ -13,7 +13,7 @@ System health and the UI must use the API metadata fields, not the job name or m
 
 ## Program Status
 - Overall status: Implemented locally; pending commit and release choreography
-- QA gate: Local implementation gates passed; release remains blocked until shared packages `asset-allocation-contracts==3.15.0` and `asset-allocation-runtime-common==3.5.5` resolve in the intended Python 3.14 environment and the control-plane endpoint suite runs with its runtime dependencies installed.
+- QA gate: Local implementation gates passed; release remains blocked until shared packages `asset-allocation-contracts==3.15.0` and `asset-allocation-runtime-common==3.5.6` resolve in the intended Python 3.14 environment and the control-plane endpoint suite runs with its runtime dependencies installed.
 - Program type: Cross-repo coordinated remediation
 - Routing decision: This is a contracts-repo-first change.
 - Repos in scope: `asset-allocation-contracts`, `asset-allocation-control-plane`, `asset-allocation-runtime-common`, `asset-allocation-jobs`
@@ -33,7 +33,7 @@ System health and the UI must use the API metadata fields, not the job name or m
 | Research-safe vNext contracts | `asset-allocation-contracts` | Implemented locally | Uncommitted workspace | `tests/python` -> `100 passed`; model tests -> `77 passed`; TS typecheck -> passed | Package publication still pending |
 | Research-safe vNext persistence | `asset-allocation-runtime-common` | Implemented locally | Uncommitted workspace | `tests/python` -> `124 passed` | Package publication still pending |
 | Research-safe vNext control-plane read APIs | `asset-allocation-control-plane` | Implemented locally | Uncommitted workspace | `py_compile` of changed modules passed; endpoint suite blocked locally by missing `oauthlib` | Additive migration `0047`; endpoint tests updated |
-| Research-safe vNext jobs runtime | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `python -m pytest -q` -> `944 passed, 3 skipped`; `test-fast` -> `72 passed`; `test-backtesting-runtime` -> `23 passed` | Shared dependency compatibility gate blocked by unpublished `3.15.0` / `3.5.5` pins on Python 3.13 |
+| Research-safe vNext jobs runtime | `asset-allocation-jobs` | Implemented locally | Uncommitted workspace | `python -m pytest -q` -> `944 passed, 3 skipped`; `test-fast` -> `72 passed`; `test-backtesting-runtime` -> `23 passed` | Shared dependency compatibility gate targets published `3.15.0` / `3.5.6` pins on Python 3.14 |
 
 ## Execution Log
 
@@ -54,7 +54,7 @@ System health and the UI must use the API metadata fields, not the job name or m
 - Test evidence:
   - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-runtime-common\python;C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python -q` -> `124 passed`
   - `PYTHONPATH=C:\Users\rdpro\Projects\asset-allocation-runtime-common\python;C:\Users\rdpro\Projects\asset-allocation-contracts\python python -m pytest tests\python\test_backtest_results.py -q` -> `1 passed`
-- Blockers: `asset-allocation-runtime-common==3.5.5` must be published after the contracts package.
+- Blockers: `asset-allocation-runtime-common==3.5.6` must be published after the contracts package.
 
 - Repo: `asset-allocation-control-plane`
 - Branch / PR: TBD
@@ -75,7 +75,7 @@ System health and the UI must use the API metadata fields, not the job name or m
   - `PYTHONPATH=... python scripts\run_quality_gate.py test-runtime-common-compat` -> `12 passed`
   - `PYTHONPATH=... python -m pytest tests\core\test_backtest_runtime.py tests\test_postgres_migrations.py -q` -> `37 passed`
   - `PYTHONPATH=... python -m pytest -q` -> `944 passed, 3 skipped`
-  - `PYTHONPATH=... python scripts\workflows\validate_shared_dependency_compatibility.py --repo-root .` -> blocked because `3.15.0` / `3.5.5` are not published and the local interpreter is Python 3.13 while shared packages require Python 3.14.
+  - `PYTHONPATH=... python scripts\workflows\validate_shared_dependency_compatibility.py --repo-root .` -> blocked because `3.15.0` / `3.5.6` needed publication and the local interpreter was Python 3.13 while shared packages require Python 3.14.
 - Blockers: Publish contracts/runtime-common packages, then rerun dependency compatibility in the intended Python 3.14 environment.
 
 ### 2026-04-17
@@ -170,7 +170,7 @@ Exit criteria: runtime gate remains green in CI.
 - A-008 Research-safe vNext Status: Implemented locally
 Owner: contracts/runtime-common/control-plane/jobs
 Work: add v7 metadata and data-quality event contracts, persist/read diagnostics, enforce strict point-in-time and fail-fast data behavior in the jobs runtime, add additive database migrations, align shared dependency pins, and document research-only execution-quality caveats.
-Exit criteria: `asset-allocation-contracts==3.15.0` and `asset-allocation-runtime-common==3.5.5` are published, downstream compatibility gates pass on Python 3.14, and control-plane endpoint tests pass with dependencies installed.
+Exit criteria: `asset-allocation-contracts==3.15.0` and `asset-allocation-runtime-common==3.5.6` are published, downstream compatibility gates pass on Python 3.14, and control-plane endpoint tests pass with dependencies installed.
 Exit criteria: required workflow passes with the new gate.
 - A-008 Docs and traceability Status: Implemented locally
 Owner: jobs
