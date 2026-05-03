@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render deploy/job_*.yaml manifests and apply them to ACA Jobs.")
     parser.add_argument("--deploy-dir", default="deploy", help="Directory containing source job manifests.")
     parser.add_argument("--rendered-dir", required=True, help="Directory to write rendered manifests into.")
+    parser.add_argument("--redacted-dir", help="Optional directory to write redacted rendered manifests into.")
     parser.add_argument("--resource-group", required=True, help="Azure resource group containing the jobs.")
     return parser.parse_args()
 
@@ -42,6 +43,49 @@ def render_manifest(template_text: str, environment: dict[str, str]) -> str:
     for key, value in environment.items():
         rendered = rendered.replace("${" + key + "}", value)
     return rendered
+
+
+def _is_sensitive_env_name(name: str) -> bool:
+    normalized = name.upper()
+    return normalized.endswith(
+        (
+            "_API_KEY",
+            "_CLIENT_SECRET",
+            "_CONNECTION_STRING",
+            "_DSN",
+            "_PASSWORD",
+            "_SECRET",
+            "_SECRET_KEY",
+            "_SCOPE",
+            "_TOKEN",
+        )
+    )
+
+
+def redact_manifest(rendered_text: str) -> str:
+    payload = yaml.safe_load(rendered_text)
+    if not isinstance(payload, dict):
+        raise SystemExit("Rendered manifest did not render to a YAML object.")
+
+    properties = payload.get("properties") if isinstance(payload.get("properties"), dict) else {}
+    configuration = properties.get("configuration") if isinstance(properties.get("configuration"), dict) else {}
+    for secret in configuration.get("secrets") or []:
+        if isinstance(secret, dict) and "value" in secret:
+            secret["value"] = "<redacted>"
+
+    template = properties.get("template") if isinstance(properties.get("template"), dict) else {}
+    containers = template.get("containers") if isinstance(template.get("containers"), list) else []
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for item in container.get("env") or []:
+            if not isinstance(item, dict) or "value" not in item:
+                continue
+            env_name = str(item.get("name") or "")
+            if _is_sensitive_env_name(env_name):
+                item["value"] = "<redacted>"
+
+    return yaml.safe_dump(payload, sort_keys=False)
 
 
 def load_template_environment(template_path: Path | None = None) -> dict[str, str]:
@@ -203,10 +247,19 @@ def manifest_exists(*, job_name: str, resource_group: str) -> bool:
     return completed.returncode == 0
 
 
-def render_and_apply_manifests(*, deploy_dir: Path, rendered_dir: Path, resource_group: str, environment: dict[str, str]) -> None:
+def render_and_apply_manifests(
+    *,
+    deploy_dir: Path,
+    rendered_dir: Path,
+    resource_group: str,
+    environment: dict[str, str],
+    redacted_dir: Path | None = None,
+) -> None:
     resolved_environment = render_environment(environment)
     ensure_control_plane_base_url_policy(resolved_environment)
     rendered_dir.mkdir(parents=True, exist_ok=True)
+    if redacted_dir is not None:
+        redacted_dir.mkdir(parents=True, exist_ok=True)
     for manifest in sorted(deploy_dir.glob("job_*.yaml")):
         template_text = manifest.read_text(encoding="utf-8")
         ensure_required_secrets_present(
@@ -219,6 +272,8 @@ def render_and_apply_manifests(*, deploy_dir: Path, rendered_dir: Path, resource
         ensure_manifest_metadata_valid(manifest_path=manifest, rendered_text=rendered)
         rendered_path = rendered_dir / manifest.name
         rendered_path.write_text(rendered, encoding="utf-8")
+        if redacted_dir is not None:
+            (redacted_dir / manifest.name).write_text(redact_manifest(rendered), encoding="utf-8")
 
         job_name = parse_manifest_job_name(rendered, manifest)
         verb = "update" if manifest_exists(job_name=job_name, resource_group=resource_group) else "create"
@@ -243,6 +298,7 @@ def main() -> None:
     render_and_apply_manifests(
         deploy_dir=Path(args.deploy_dir),
         rendered_dir=Path(args.rendered_dir),
+        redacted_dir=Path(args.redacted_dir) if args.redacted_dir else None,
         resource_group=args.resource_group,
         environment=dict(os.environ),
     )

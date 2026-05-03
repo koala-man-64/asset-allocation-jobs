@@ -24,6 +24,8 @@ jobs:
       name: prod
     env:
       DISPATCH_IMAGE_DIGEST: ${{ github.event.client_payload.image_digest }}
+      DISPATCH_RELEASE_GIT_SHA: ${{ github.event.client_payload.release_git_sha }}
+      DISPATCH_RELEASE_RUN_ID: ${{ github.event.client_payload.release_run_id }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
       ACR_NAME: ${{ vars.ACR_NAME }}
@@ -135,10 +137,19 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "repository_dispatch" ] && [ -n "${DISPATCH_IMAGE_DIGEST}" ]; then
-            {
-              echo "image_digest=${DISPATCH_IMAGE_DIGEST}"
-              echo "image_source=repository_dispatch"
-            } >> "$GITHUB_OUTPUT"
+            if [ -z "${DISPATCH_RELEASE_RUN_ID}" ] || [ -z "${DISPATCH_RELEASE_GIT_SHA}" ]; then
+              echo "repository_dispatch deploys must include image_digest, release_run_id, and release_git_sha" >&2
+              exit 1
+            fi
+            python scripts/workflows/resolve_release_image_digest.py \
+              --repo "${GITHUB_REPOSITORY}" \
+              --branch "${GITHUB_REF_NAME}" \
+              --workflow "release.yml" \
+              --artifact "jobs-release" \
+              --run-id "${DISPATCH_RELEASE_RUN_ID}" \
+              --expected-digest "${DISPATCH_IMAGE_DIGEST}" \
+              --expected-git-sha "${DISPATCH_RELEASE_GIT_SHA}" \
+              --github-output "$GITHUB_OUTPUT"
             exit 0
           fi
           python scripts/workflows/resolve_release_image_digest.py \
@@ -191,7 +202,37 @@ jobs:
           python scripts/workflows/render_and_apply_job_manifests.py \
             --deploy-dir deploy \
             --rendered-dir artifacts/rendered \
+            --redacted-dir artifacts/deploy-support/redacted-manifests \
             --resource-group "${RESOURCE_GROUP}"
+
+      - name: Write deploy provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/deploy-support
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "image_digest": os.environ["DEPLOY_IMAGE_DIGEST"],
+              "image_source": os.environ["DEPLOY_IMAGE_SOURCE"],
+              "release_branch": os.environ["DEPLOY_RELEASE_BRANCH"],
+              "release_git_sha": os.environ["DEPLOY_RELEASE_GIT_SHA"],
+              "release_run_id": os.environ["DEPLOY_RELEASE_RUN_ID"],
+          }
+          Path("artifacts/deploy-support/deploy-provenance.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+        env:
+          DEPLOY_IMAGE_DIGEST: ${{ steps.image.outputs.image_digest }}
+          DEPLOY_IMAGE_SOURCE: ${{ steps.image.outputs.image_source }}
+          DEPLOY_RELEASE_BRANCH: ${{ steps.image.outputs.release_branch || github.ref_name }}
+          DEPLOY_RELEASE_GIT_SHA: ${{ steps.image.outputs.release_git_sha || '' }}
+          DEPLOY_RELEASE_RUN_ID: ${{ steps.image.outputs.release_run_id || '' }}
 
       - name: Verify deployed job images
         shell: bash
@@ -218,12 +259,13 @@ jobs:
           python scripts/workflows/delete_retired_jobs.py \
             --resource-group "${RESOURCE_GROUP}"
 
-      - name: Upload rendered manifests and rollback data
+      - name: Upload deploy support data
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: jobs-deploy-support
           path: |
-            artifacts/rendered/*
+            artifacts/deploy-support/redacted-manifests/*
+            artifacts/deploy-support/deploy-provenance.json
             artifacts/previous-job-images.json
           if-no-files-found: error
           retention-days: 14
@@ -239,7 +281,7 @@ jobs:
             echo "- Release branch: \`${{ steps.image.outputs.release_branch || github.ref_name }}\`"
             echo "- Release run: \`${{ steps.image.outputs.release_run_id || 'not resolved' }}\`"
             echo "- Release git SHA: \`${{ steps.image.outputs.release_git_sha || 'not resolved' }}\`"
-            echo "- Rendered manifests: \`artifacts/rendered/*\`"
+            echo "- Redacted manifests: \`artifacts/deploy-support/redacted-manifests/*\`"
             echo "- Previous job images: \`artifacts/previous-job-images.json\`"
-            echo "- Rollback: send a \`deploy_runtime\` repository dispatch with a previous image digest from \`artifacts/previous-job-images.json\`"
+            echo "- Rollback: send a \`deploy_runtime\` repository dispatch with image digest, release run ID, and release git SHA from a verified release artifact"
           } >> "${GITHUB_STEP_SUMMARY}"

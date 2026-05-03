@@ -3,6 +3,7 @@
 FROM python:3.14-slim-bookworm
 
 WORKDIR /app
+RUN addgroup --system app && adduser --system --ingroup app app
 
 ARG CONTRACTS_VERSION=3.15.1
 ARG RUNTIME_COMMON_VERSION=3.5.7
@@ -24,4 +25,5 @@ COPY monitoring/ monitoring/
 COPY tasks/ tasks/
 RUN pip install --no-cache-dir .
 
+USER app
 CMD ["python", "-c", "print('asset-allocation task image: specify a job command (e.g., python -m tasks.market_data.bronze_market_data)')"]

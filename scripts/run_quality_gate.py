@@ -43,6 +43,14 @@ RUNTIME_COMMON_COMPAT_TESTS = [
     "tests/core/test_control_plane_transport.py",
 ]
 
+REGIME_ROLLOUT_TESTS = [
+    "tests/tasks/test_gold_regime_data.py",
+    "tests/tasks/common/test_regime_publication.py",
+    "tests/monitoring/test_system_health_staleness.py",
+    "tests/test_workflow_runtime_ownership.py",
+    "tests/test_workflow_scripts.py",
+]
+
 
 def resolve_python() -> str:
     candidates = [
@@ -74,6 +82,7 @@ def build_commands(gate: str) -> list[CommandSpec]:
         "test-backtesting-runtime": [([python, "-m", "pytest", "-q", *BACKTESTING_RUNTIME_TESTS], REPO_ROOT)],
         "test-control-plane-compat": [([python, "-m", "pytest", "-q", *CONTROL_PLANE_COMPAT_TESTS], REPO_ROOT)],
         "test-runtime-common-compat": [([python, "-m", "pytest", "-q", *RUNTIME_COMMON_COMPAT_TESTS], REPO_ROOT)],
+        "test-regime-rollout": [([python, "-m", "pytest", "-q", *REGIME_ROLLOUT_TESTS], REPO_ROOT)],
         "test-full": [([python, "-m", "pytest", "-q"], REPO_ROOT)],
     }
     if gate not in gates:

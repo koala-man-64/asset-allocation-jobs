@@ -142,7 +142,7 @@ def test_probe_error_returns_error() -> None:
     assert "403 Forbidden" in str(resolved.error)
 
 
-def test_gold_regime_marker_missing_falls_back_to_domain_artifact(monkeypatch) -> None:
+def test_gold_regime_marker_missing_does_not_use_domain_artifact_fallback(monkeypatch) -> None:
     artifact_time = datetime(2026, 2, 16, 9, 30, tzinfo=timezone.utc)
     store = _DummyStore(blob_last_modified={"regime/_metadata/domain.json": artifact_time})
     monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")
@@ -154,14 +154,14 @@ def test_gold_regime_marker_missing_falls_back_to_domain_artifact(monkeypatch) -
         marker_cfg=_marker_cfg(enabled=True),
     )
 
-    assert resolved.status == "ok"
-    assert resolved.source == "domain-artifact-fallback"
-    assert resolved.last_updated == artifact_time
+    assert resolved.status == "error"
+    assert resolved.source == "marker"
+    assert resolved.last_updated is None
     assert any("Marker missing" in warning for warning in resolved.warnings)
-    assert any("domain artifact fallback" in warning.lower() for warning in resolved.warnings)
+    assert not any("domain artifact fallback" in warning.lower() for warning in resolved.warnings)
 
 
-def test_gold_regime_marker_error_falls_back_to_domain_artifact(monkeypatch) -> None:
+def test_gold_regime_marker_error_does_not_use_domain_artifact_fallback(monkeypatch) -> None:
     artifact_time = datetime(2026, 2, 16, 9, 45, tzinfo=timezone.utc)
     store = _DummyStore(
         marker_error=RuntimeError("403 Forbidden"),
@@ -176,11 +176,11 @@ def test_gold_regime_marker_error_falls_back_to_domain_artifact(monkeypatch) -> 
         marker_cfg=_marker_cfg(enabled=True),
     )
 
-    assert resolved.status == "ok"
-    assert resolved.source == "domain-artifact-fallback"
-    assert resolved.last_updated == artifact_time
+    assert resolved.status == "error"
+    assert resolved.source == "marker"
+    assert resolved.last_updated is None
     assert any("403 Forbidden" in warning for warning in resolved.warnings)
-    assert any("domain artifact fallback" in warning.lower() for warning in resolved.warnings)
+    assert not any("domain artifact fallback" in warning.lower() for warning in resolved.warnings)
 
 
 def test_marker_disabled_returns_error() -> None:

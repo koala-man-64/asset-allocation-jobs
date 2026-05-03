@@ -61,6 +61,12 @@ _FULL_HISTORY_START_DATE = MARKET_HISTORY_START_DATE
 _SNAPSHOT_BATCH_SIZE = 250
 _SNAPSHOT_ASSET_TYPE = "stocks"
 _REGIME_REQUIRED_MARKET_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "ACWI", "^VIX", "^VIX3M"})
+_MASSIVE_MARKET_HISTORY_SYMBOL_ALIASES = {
+    "^VIX": "I:VIX",
+    "^VIX3M": "I:VIX3M",
+}
+_MASSIVE_PROVIDER_SYMBOL_ALIASES = {provider: canonical for canonical, provider in _MASSIVE_MARKET_HISTORY_SYMBOL_ALIASES.items()}
+_REGIME_REQUIRED_EQUITY_MARKET_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "ACWI"})
 _BUCKET_COLUMNS = [
     "symbol",
     "date",
@@ -107,8 +113,30 @@ def _alpha_vantage_enrichment_enabled() -> bool:
 
 
 def _is_regime_required_market_symbol(symbol: object) -> bool:
-    normalized = str(symbol or "").strip().upper()
+    normalized = _canonical_market_symbol(symbol)
     return normalized in _REGIME_REQUIRED_MARKET_SYMBOLS
+
+
+def _canonical_market_symbol(symbol: object) -> str:
+    normalized = str(symbol or "").strip().upper()
+    return _MASSIVE_PROVIDER_SYMBOL_ALIASES.get(normalized, normalized)
+
+
+def _provider_market_history_symbol(symbol: object) -> str:
+    canonical = _canonical_market_symbol(symbol)
+    return _MASSIVE_MARKET_HISTORY_SYMBOL_ALIASES.get(canonical, canonical)
+
+
+def _with_required_market_symbols(symbols: list[str]) -> list[str]:
+    observed = {_canonical_market_symbol(symbol) for symbol in symbols if str(symbol or "").strip()}
+    out = [_canonical_market_symbol(symbol) for symbol in symbols if str(symbol or "").strip()]
+    if not observed.intersection(_REGIME_REQUIRED_EQUITY_MARKET_SYMBOLS):
+        return list(dict.fromkeys(out))
+    for symbol in sorted(_REGIME_REQUIRED_MARKET_SYMBOLS):
+        if symbol not in observed:
+            out.append(symbol)
+            observed.add(symbol)
+    return list(dict.fromkeys(out))
 
 
 def _should_skip_blacklisted_market_symbol(symbol: object) -> bool:
@@ -126,11 +154,33 @@ def _normalize_market_provider_symbols(df_symbols: pd.DataFrame) -> list[str]:
     for raw in raw_symbols:
         if "." in raw:
             continue
-        symbol = str(raw or "").strip().upper()
+        symbol = _canonical_market_symbol(raw)
         if not symbol:
             continue
         symbols.append(symbol)
     return list(dict.fromkeys(symbols))
+
+
+def _validate_bronze_required_market_symbols(publish_session) -> None:
+    if not hasattr(publish_session, "symbol_to_bucket"):
+        return
+    observed = {
+        _canonical_market_symbol(symbol)
+        for symbol in getattr(publish_session, "symbol_to_bucket", {})
+        if str(symbol or "").strip()
+    }
+    missing = sorted(_REGIME_REQUIRED_MARKET_SYMBOLS.difference(observed))
+    if missing:
+        mdc.write_error(
+            "required_symbol_gate layer=bronze domain=market status=blocked "
+            f"missing_symbols={missing} observed_required_symbols={sorted(observed.intersection(_REGIME_REQUIRED_MARKET_SYMBOLS))}"
+        )
+        raise RuntimeError(f"Bronze market publish blocked: missing required regime symbols {missing}")
+
+    mdc.write_line(
+        "required_symbol_gate layer=bronze domain=market status=ok "
+        f"symbols={sorted(_REGIME_REQUIRED_MARKET_SYMBOLS)}"
+    )
 
 
 def _select_promoted_market_reprobe_symbols(
@@ -1280,12 +1330,6 @@ def _download_and_save_raw_with_recovery(
         if treat_no_history_as_unavailable:
             download_kwargs["treat_no_history_as_unavailable"] = True
         try:
-            download_kwargs: dict[str, Any] = {
-                "snapshot_row": snapshot_row,
-                "collected_symbol_frames": collected_symbol_frames,
-                "collected_lock": collected_lock,
-                "existing_symbol_df": existing_symbol_df,
-            }
             alpha_vantage_client = _get_active_alpha_vantage_client()
             if alpha_vantage_client is not None:
                 download_kwargs["alpha_vantage_client"] = alpha_vantage_client
@@ -1332,8 +1376,9 @@ def download_and_save_raw(
         existing_df = pd.DataFrame()
     existing_latest_date = _extract_latest_market_date(existing_df)
     from_date, to_date = _resolve_fetch_window(existing_latest_date=existing_latest_date)
+    provider_symbol = _provider_market_history_symbol(symbol)
     payload = massive_client.get_market_history(
-        symbol=symbol,
+        symbol=provider_symbol,
         from_date=from_date,
         to_date=to_date,
     )
@@ -1348,13 +1393,17 @@ def download_and_save_raw(
                     else "keeping existing bronze data."
                 )
                 mdc.write_warning(
-                    f"Massive returned no market history for {symbol} in range {from_date}..{to_date}; "
+                    f"Massive returned no market history for {symbol} provider_symbol={provider_symbol} "
+                    f"in range {from_date}..{to_date}; "
                     f"{warning_action}"
                 )
                 if treat_no_history_as_unavailable:
                     raise BronzeCoverageUnavailableError(
                         _NO_MARKET_HISTORY_REASON_CODE,
-                        detail=f"Massive returned no market history for {symbol} in range {from_date}..{to_date}.",
+                        detail=(
+                            f"Massive returned no market history for {symbol} provider_symbol={provider_symbol} "
+                            f"in range {from_date}..{to_date}."
+                        ),
                         payload={"symbol": symbol, "from_date": from_date, "to_date": to_date},
                     )
                 merged_df = existing_df
@@ -1363,7 +1412,10 @@ def download_and_save_raw(
                     list_manager.add_to_whitelist(symbol)
                 raise BronzeCoverageUnavailableError(
                     _NO_MARKET_HISTORY_REASON_CODE,
-                    detail=f"Massive returned no market history for {symbol} in range {from_date}..{to_date}.",
+                    detail=(
+                        f"Massive returned no market history for {symbol} provider_symbol={provider_symbol} "
+                        f"in range {from_date}..{to_date}."
+                    ),
                     payload={"symbol": symbol, "from_date": from_date, "to_date": to_date},
                 )
         else:
@@ -1461,7 +1513,7 @@ async def main_async() -> int:
     df_symbols = symbol_availability.get_domain_symbols("market")
     provider_available_count = int(df_symbols["Symbol"].dropna().shape[0]) if "Symbol" in df_symbols.columns else 0
 
-    provider_symbols = _normalize_market_provider_symbols(df_symbols)
+    provider_symbols = _with_required_market_symbols(_normalize_market_provider_symbols(df_symbols))
     symbols: list[str] = []
     blacklist_skipped = 0
     for symbol in provider_symbols:
@@ -1876,6 +1928,7 @@ async def main_async() -> int:
 
     if bucket_publish_error is None:
         try:
+            _validate_bronze_required_market_symbols(publish_session)
             publish_result = finalize_alpha26_bronze_publish(publish_session)
             mdc.write_line(
                 "Bronze market alpha26 buckets written: "

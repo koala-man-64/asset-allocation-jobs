@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from asset_allocation_runtime_common.market_data import layer_bucketing
+import pytest
 from tasks.common.market_reconciliation import (
     collect_bronze_earnings_symbols_from_blob_infos,
     collect_bronze_finance_symbols_from_blob_infos,
@@ -100,6 +101,19 @@ def test_purge_orphan_rows_from_bucket_tables_rewrites_and_deletes() -> None:
     assert stats.deleted_blobs == 2
     assert stats.rows_deleted == 2
     assert stats.errors == 0
+
+
+def test_purge_orphan_rows_from_bucket_tables_blocks_protected_symbol_delete() -> None:
+    with pytest.raises(RuntimeError, match="Required-symbol purge blocked"):
+        purge_orphan_rows_from_bucket_tables(
+            upstream_symbols={"SPY"},
+            downstream_symbols={"SPY", "^VIX"},
+            table_paths_for_symbol=lambda symbol: [f"market-data/buckets/{symbol[0]}"],
+            load_table=lambda _path: pd.DataFrame({"symbol": ["^VIX"]}),
+            store_table=lambda _df, _path: None,
+            delete_prefix=lambda _path: 0,
+            protected_symbols=("^VIX", "^VIX3M"),
+        )
 
 
 def test_collect_delta_silver_finance_symbols_reads_from_layer_index(monkeypatch) -> None:

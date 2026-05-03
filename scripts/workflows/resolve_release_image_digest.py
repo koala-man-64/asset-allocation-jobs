@@ -25,6 +25,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch", required=True, help="Branch whose release workflow should be inspected.")
     parser.add_argument("--workflow", default="release.yml", help="Workflow file name to inspect.")
     parser.add_argument("--artifact", default="jobs-release", help="Artifact name containing the release manifest.")
+    parser.add_argument("--run-id", type=int, help="Specific successful release workflow run to verify.")
+    parser.add_argument("--expected-digest", help="Expected image digest to verify against the release manifest.")
+    parser.add_argument("--expected-git-sha", help="Expected release git SHA to verify against the release manifest.")
     parser.add_argument("--github-output", help="Optional GitHub output file path.")
     parser.add_argument("--token", help="GitHub token. Defaults to GITHUB_TOKEN from the environment.")
     return parser.parse_args()
@@ -70,6 +73,14 @@ def latest_successful_run(*, repo: str, branch: str, workflow: str, token: str) 
     raise SystemExit(f"No successful {workflow} workflow run found for branch {branch}")
 
 
+def successful_run_by_id(*, repo: str, run_id: int, token: str) -> dict[str, Any]:
+    url = f"{API_BASE_URL}/repos/{repo}/actions/runs/{run_id}"
+    run = request_json(url, token)
+    if run.get("conclusion") != "success":
+        raise SystemExit(f"Workflow run {run_id} is not a successful release run")
+    return run
+
+
 def release_artifact(*, repo: str, run_id: int, artifact_name: str, token: str) -> dict[str, Any]:
     query = urlencode({"per_page": 100})
     url = f"{API_BASE_URL}/repos/{repo}/actions/runs/{run_id}/artifacts?{query}"
@@ -98,21 +109,34 @@ def resolve_release_image(
     workflow: str,
     artifact_name: str,
     token: str,
+    run_id: int | None = None,
+    expected_digest: str | None = None,
+    expected_git_sha: str | None = None,
 ) -> dict[str, str]:
-    run = latest_successful_run(repo=repo, branch=branch, workflow=workflow, token=token)
+    run = (
+        successful_run_by_id(repo=repo, run_id=run_id, token=token)
+        if run_id is not None
+        else latest_successful_run(repo=repo, branch=branch, workflow=workflow, token=token)
+    )
     artifact = release_artifact(repo=repo, run_id=int(run["id"]), artifact_name=artifact_name, token=token)
     manifest = read_release_manifest(download_bytes(str(artifact["archive_download_url"]), token))
 
     image_digest = str(manifest.get("image_digest") or "").strip()
     if not image_digest:
         raise SystemExit(f"{MANIFEST_NAME} from run {run['id']} does not contain image_digest")
+    if expected_digest and image_digest != expected_digest:
+        raise SystemExit(f"{MANIFEST_NAME} image_digest does not match the requested dispatch digest")
+
+    release_git_sha = str(manifest.get("git_sha") or run.get("head_sha") or "").strip()
+    if expected_git_sha and release_git_sha != expected_git_sha:
+        raise SystemExit(f"{MANIFEST_NAME} git_sha does not match the requested dispatch git SHA")
 
     return {
         "image_digest": image_digest,
-        "image_source": "latest-successful-release",
+        "image_source": "verified-dispatch-release" if run_id is not None else "latest-successful-release",
         "release_artifact": artifact_name,
         "release_branch": str(run.get("head_branch") or branch),
-        "release_git_sha": str(manifest.get("git_sha") or run.get("head_sha") or ""),
+        "release_git_sha": release_git_sha,
         "release_run_id": str(run["id"]),
         "release_run_html_url": str(run.get("html_url") or ""),
     }
@@ -138,6 +162,9 @@ def main() -> None:
         workflow=args.workflow,
         artifact_name=args.artifact,
         token=require_token(args.token),
+        run_id=args.run_id,
+        expected_digest=args.expected_digest,
+        expected_git_sha=args.expected_git_sha,
     )
     emit_outputs(outputs, args.github_output)
 
