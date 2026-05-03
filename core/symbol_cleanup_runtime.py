@@ -60,6 +60,7 @@ _PLACEHOLDER_TEXT = {
     "not available",
     "not provided",
 }
+_CURRENT_PROFILE_PLACEHOLDER_TEXT = _PLACEHOLDER_TEXT - {"other"}
 _ALLOWED_SECURITY_TYPES = {
     "adr",
     "closed_end_fund",
@@ -77,17 +78,6 @@ _ALLOWED_LISTING_STATUS = {
     "delisted",
     "inactive",
     "suspended",
-}
-_DETERMINISTIC_FIELDS = {
-    "country_of_risk",
-    "exchange_mic",
-    "is_adr",
-    "is_cef",
-    "is_etf",
-    "is_preferred",
-    "listing_status_norm",
-    "security_type_norm",
-    "share_class",
 }
 
 
@@ -121,6 +111,15 @@ def _normalize_string_value(value: object) -> str | None:
     if text is None:
         return None
     return re.sub(r"\s+", " ", text)
+
+
+def _is_effectively_missing(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    normalized = _normalize_string_value(value)
+    return normalized is None or normalized.lower() in _CURRENT_PROFILE_PLACEHOLDER_TEXT
 
 
 def _normalized_optionable(value: object) -> bool | None:
@@ -377,7 +376,7 @@ def build_symbol_cleanup_plan(
         if field_name in context.locked_fields:
             continue
         current_value = current_values.get(field_name)
-        if mode == "fill_missing" and current_value is not None:
+        if mode == "fill_missing" and not _is_effectively_missing(current_value):
             continue
 
         candidate = deterministic_candidates.get(field_name, _UNSET)
@@ -399,7 +398,7 @@ def validate_ai_response(
     requested_fields: list[SymbolEnrichmentField],
     provider_facts: SymbolProviderFacts,
     response: SymbolEnrichmentResolveResponse,
-) -> None:
+) -> SymbolEnrichmentResolveResponse:
     if _normalize_symbol(response.symbol) != _normalize_symbol(provider_facts.symbol):
         raise ValueError(
             f"Resolved symbol mismatch: expected '{provider_facts.symbol}', got '{response.symbol}'."
@@ -407,6 +406,8 @@ def validate_ai_response(
 
     allowed_fields = {cast(str, field) for field in requested_fields}
     response_values = response.profile.model_dump(mode="json")
+    normalized_values: dict[str, Any] = {}
+    populated_fields: set[str] = set()
     for field_name, value in response_values.items():
         if value is None:
             continue
@@ -420,27 +421,46 @@ def validate_ai_response(
                 raise ValueError(
                     f"AI returned placeholder text for '{field_name}' on symbol '{provider_facts.symbol}': '{normalized}'."
                 )
-            if field_name == "security_type_norm" and normalized not in _ALLOWED_SECURITY_TYPES:
-                raise ValueError(f"Unsupported security_type_norm '{normalized}' for symbol '{provider_facts.symbol}'.")
-            if field_name == "listing_status_norm" and normalized not in _ALLOWED_LISTING_STATUS:
-                raise ValueError(f"Unsupported listing_status_norm '{normalized}' for symbol '{provider_facts.symbol}'.")
+            if field_name == "security_type_norm":
+                normalized = normalized.lower()
+                if normalized not in _ALLOWED_SECURITY_TYPES:
+                    raise ValueError(f"Unsupported security_type_norm '{normalized}' for symbol '{provider_facts.symbol}'.")
+            if field_name == "listing_status_norm":
+                normalized = normalized.lower()
+                if normalized not in _ALLOWED_LISTING_STATUS:
+                    raise ValueError(f"Unsupported listing_status_norm '{normalized}' for symbol '{provider_facts.symbol}'.")
+            value = normalized
+        normalized_values[field_name] = value
+        populated_fields.add(field_name)
 
-    if response.profile.exchange_mic is not None:
+    missing_fields = sorted(allowed_fields - populated_fields)
+    if missing_fields:
+        raise ValueError(
+            f"AI did not return requested fields for symbol '{provider_facts.symbol}': {', '.join(missing_fields)}."
+        )
+
+    normalized_response = response.model_copy(
+        update={"profile": SymbolProfileValues.model_validate(normalized_values)}
+    )
+
+    if normalized_response.profile.exchange_mic is not None:
         inferred_mic = _infer_exchange_mic(provider_facts)
-        if inferred_mic is not _UNSET and response.profile.exchange_mic != inferred_mic:
+        if inferred_mic is not _UNSET and normalized_response.profile.exchange_mic != inferred_mic:
             raise ValueError(
                 f"exchange_mic contradiction for symbol '{provider_facts.symbol}': "
-                f"expected '{inferred_mic}', got '{response.profile.exchange_mic}'."
+                f"expected '{inferred_mic}', got '{normalized_response.profile.exchange_mic}'."
             )
 
-    if response.profile.listing_status_norm == "active" and _clean_text(provider_facts.delistingDate):
+    if normalized_response.profile.listing_status_norm == "active" and _clean_text(provider_facts.delistingDate):
         raise ValueError(f"listing_status_norm contradicts delisting date for symbol '{provider_facts.symbol}'.")
 
     for field_name in ("is_etf", "is_cef", "is_preferred", "is_adr"):
         inferred = _infer_flag(provider_facts, field_name)
-        resolved_value = getattr(response.profile, field_name)
+        resolved_value = getattr(normalized_response.profile, field_name)
         if inferred is True and resolved_value is False:
             raise ValueError(f"{field_name} contradicts provider facts for symbol '{provider_facts.symbol}'.")
+
+    return normalized_response
 
 
 def merge_symbol_cleanup_result(

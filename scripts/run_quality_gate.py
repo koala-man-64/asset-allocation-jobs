@@ -22,6 +22,8 @@ FAST_TESTS = [
     "tests/core/test_universe_repository.py",
     "tests/core/test_regime_repository.py",
     "tests/core/test_backtest_repository.py",
+    "tests/core/test_symbol_cleanup_runtime.py",
+    "tests/tasks/test_symbol_cleanup_worker.py",
 ]
 
 BACKTESTING_RUNTIME_TESTS = [

@@ -83,6 +83,9 @@ Symbol enrichment lifecycle state is owned by the control-plane plus shared cont
 - `deploy/job_symbol_cleanup.yaml` is the scheduled weekday worker job that runs at `23:00 UTC` (`0 23 * * 1-5`) and drains queued symbol cleanup work from the control-plane. Operators can still start it manually for repair or replay.
 - `tasks.symbol_cleanup.worker` loads provider facts and current profile state from Postgres, applies deterministic normalization first, then asks the control-plane enrichment endpoint for the remaining AI-owned fields while draining a bounded serial pass of queued work per execution.
 - The worker never streams `/api/ai/chat/stream` directly and never auto-overrides locked fields.
+- Startup preflight validates `POSTGRES_DSN`, the symbol profile tables used by the worker, control-plane config, token acquisition, and authenticated internal control-plane reachability before claiming work.
+- Watch `symbol_cleanup_lifecycle_event` logs for `preflight_ok`, `claim`, `complete`, `fail_reported`, `complete_report_failed`, `fail_report_failed`, and `pass_complete`. A run with stale claimed work, repeated failures, no recent `pass_complete`, or rising backlog needs operator review before widening retries.
+- The job should move to a dedicated least-privilege runtime identity when shared Azure identity ownership is updated; the current repo only adopts the resulting identity variables and manifest values.
 
 ## Backtesting
 
