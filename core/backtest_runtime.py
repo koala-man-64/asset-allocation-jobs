@@ -328,6 +328,37 @@ def _availability_column_for_spec(spec: universe_service.UniverseTableSpec) -> s
     return None
 
 
+def _slow_frame_requires_bar_timestamp(
+    spec: universe_service.UniverseTableSpec,
+    *,
+    research_integrity_mode: str,
+) -> bool:
+    if not _strict_research_integrity(research_integrity_mode):
+        return False
+    return _availability_column_for_spec(spec) is not None or _column_is_datetime_like(spec, spec.as_of_column)
+
+
+def _split_slow_required_columns(
+    table_specs: dict[str, universe_service.UniverseTableSpec],
+    required_columns: dict[str, set[str]],
+    *,
+    research_integrity_mode: str,
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    stable_required: dict[str, set[str]] = {}
+    dynamic_required: dict[str, set[str]] = {}
+    for table_name, columns in required_columns.items():
+        spec = table_specs[table_name]
+        if spec.as_of_kind == "intraday":
+            continue
+        target = (
+            dynamic_required
+            if _slow_frame_requires_bar_timestamp(spec, research_integrity_mode=research_integrity_mode)
+            else stable_required
+        )
+        target[table_name] = set(columns)
+    return stable_required, dynamic_required
+
+
 def _slow_frame_point_in_time_filter(
     spec: universe_service.UniverseTableSpec,
     *,
@@ -473,6 +504,34 @@ def _prepare_slow_snapshot_frames(slow_frames: dict[str, pd.DataFrame]) -> list[
         if not prepared.empty:
             prepared_frames.append(prepared)
     return prepared_frames
+
+
+def _prepared_dynamic_slow_frames_for_timestamp(
+    dsn: str,
+    *,
+    table_specs: dict[str, universe_service.UniverseTableSpec],
+    dynamic_required_columns: dict[str, set[str]],
+    as_of_ts: datetime,
+    bar_size: str | None,
+    research_integrity_mode: str,
+    cache: dict[pd.Timestamp, list[pd.DataFrame]],
+) -> list[pd.DataFrame]:
+    if not dynamic_required_columns:
+        return []
+    cache_key = pd.Timestamp(as_of_ts)
+    cached = cache.get(cache_key)
+    if cached is None:
+        dynamic_slow_frames = _load_slow_frames(
+            dsn,
+            table_specs=table_specs,
+            required_columns=dynamic_required_columns,
+            as_of_ts=as_of_ts,
+            bar_size=bar_size,
+            research_integrity_mode=research_integrity_mode,
+        )
+        cached = _prepare_slow_snapshot_frames(dynamic_slow_frames)
+        cache[cache_key] = cached
+    return [frame.copy() for frame in cached]
 
 
 def _merge_snapshot_frames(ts: pd.Timestamp, frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -1754,20 +1813,26 @@ def execute_backtest_run(
             session_end=session_end,
             bar_size=bar_size,
         )
-        slow_frames = _load_slow_frames(
+        stable_slow_required, dynamic_slow_required = _split_slow_required_columns(
+            table_specs,
+            required_columns,
+            research_integrity_mode=research_integrity_mode,
+        )
+        stable_slow_frames = _load_slow_frames(
             dsn,
             table_specs=table_specs,
-            required_columns=required_columns,
-            as_of_ts=session_schedule[-1],
+            required_columns=stable_slow_required,
+            as_of_ts=session_schedule[0] if strict_research_integrity else session_schedule[-1],
             bar_size=bar_size,
             research_integrity_mode=research_integrity_mode,
         )
         intraday_frames_by_ts = _build_intraday_frames_by_timestamp(intraday_frames)
-        prepared_slow_frames = _prepare_slow_snapshot_frames(slow_frames)
+        prepared_stable_slow_frames = _prepare_slow_snapshot_frames(stable_slow_frames)
+        dynamic_slow_snapshot_cache: dict[pd.Timestamp, list[pd.DataFrame]] = {}
         snapshot_cache: dict[pd.Timestamp, tuple[pd.DataFrame, dict[str, pd.Series]]] = {}
         _maybe_update_heartbeat(repo, run_id=run_id, state=heartbeat_state, phase="session_frames_loaded")
         intraday_row_count = sum(len(frame) for frame in intraday_frames.values())
-        slow_row_count = sum(len(frame) for frame in slow_frames.values())
+        stable_slow_row_count = sum(len(frame) for frame in stable_slow_frames.values())
         _log_stage_timing(
             "session_frames_loaded",
             session_started_at,
@@ -1775,8 +1840,20 @@ def execute_backtest_run(
             session_date=session_date.isoformat(),
             session_bars=len(session_schedule),
             intraday_rows=intraday_row_count,
-            slow_rows=slow_row_count,
+            stable_slow_rows=stable_slow_row_count,
+            dynamic_slow_tables=len(dynamic_slow_required),
         )
+
+        def _dynamic_slow_snapshot_frames(ts: datetime) -> list[pd.DataFrame]:
+            return _prepared_dynamic_slow_frames_for_timestamp(
+                dsn,
+                table_specs=table_specs,
+                dynamic_required_columns=dynamic_slow_required,
+                as_of_ts=ts,
+                bar_size=bar_size,
+                research_integrity_mode=research_integrity_mode,
+                cache=dynamic_slow_snapshot_cache,
+            )
 
         def _session_snapshot_context(ts: datetime) -> tuple[pd.DataFrame, dict[str, pd.Series]]:
             cache_key = pd.Timestamp(ts)
@@ -1785,10 +1862,8 @@ def execute_backtest_run(
                 return cached
             snapshot = _snapshot_for_timestamp(
                 ts,
-                intraday_frames=intraday_frames,
-                slow_frames=slow_frames,
                 intraday_frames_by_ts=intraday_frames_by_ts,
-                prepared_slow_frames=prepared_slow_frames,
+                prepared_slow_frames=prepared_stable_slow_frames + _dynamic_slow_snapshot_frames(ts),
             )
             cached = (snapshot, _build_snapshot_symbol_index(snapshot))
             snapshot_cache[cache_key] = cached

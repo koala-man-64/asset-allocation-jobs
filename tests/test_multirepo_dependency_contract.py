@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 from importlib.metadata import PackageNotFoundError, distribution
+from importlib.util import find_spec
 from pathlib import Path
 import tomllib
 
@@ -28,6 +30,18 @@ def package_pyproject_dependencies(package_name: str) -> list[str]:
     return list(pyproject["project"].get("dependencies", []))
 
 
+def active_import_pyproject_dependencies(package_name: str) -> list[str] | None:
+    module_name = package_name.replace("-", "_")
+    spec = find_spec(module_name)
+    if spec is None or spec.origin is None:
+        return None
+    pyproject_path = Path(spec.origin).resolve().parents[1] / "pyproject.toml"
+    if not pyproject_path.exists():
+        return None
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    return list(pyproject["project"].get("dependencies", []))
+
+
 def shared_dependencies() -> dict[str, str]:
     return {name: version for name, version in project_dependencies().items() if name.startswith("asset-allocation-")}
 
@@ -44,10 +58,12 @@ def dockerfile_build_arg_defaults() -> dict[str, str]:
 
 def installed_exact_dependency_versions(package_name: str) -> dict[str, str]:
     versions: dict[str, str] = {}
-    try:
-        requirements = list(distribution(package_name).requires or [])
-    except PackageNotFoundError:
-        requirements = package_pyproject_dependencies(package_name)
+    requirements = active_import_pyproject_dependencies(package_name)
+    if requirements is None:
+        try:
+            requirements = list(distribution(package_name).requires or [])
+        except PackageNotFoundError:
+            requirements = package_pyproject_dependencies(package_name)
 
     for requirement in requirements:
         requirement_text = requirement.split(";", 1)[0].strip()
@@ -90,6 +106,15 @@ def test_project_dependency_pins_stay_compatible_with_installed_shared_packages(
     assert mismatches == {}
 
 
+def test_runtime_common_backtest_persistence_contract_accepts_v7_data_quality_surface() -> None:
+    from asset_allocation_runtime_common import backtest_results
+
+    signature = inspect.signature(backtest_results.persist_backtest_results)
+
+    assert "data_quality_event_rows" in signature.parameters
+    assert backtest_results.BACKTEST_RESULTS_SCHEMA_VERSION == 7
+
+
 def test_jobs_dockerfile_does_not_copy_sibling_repos() -> None:
     text = (repo_root() / "Dockerfile").read_text(encoding="utf-8")
     assert "COPY asset-allocation-contracts/" not in text
@@ -119,6 +144,7 @@ def test_quality_and_release_workflows_do_not_checkout_sibling_repos() -> None:
         assert "setup-python-jobs" in text
         assert '${{ steps.shared.outputs.contracts_version }}' in text
         assert '${{ steps.shared.outputs.runtime_common_version }}' in text
+    assert "scripts/workflows/validate_shared_dependency_compatibility.py --repo-root ." in quality
 
 
 def test_release_workflow_runs_from_successful_mainline_quality_or_manual_dispatch() -> None:

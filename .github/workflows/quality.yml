@@ -112,6 +112,13 @@ jobs:
           cd asset-allocation-jobs
           python scripts/workflows/resolve_shared_versions.py >> "$GITHUB_OUTPUT"
 
+      - name: Validate shared package compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd asset-allocation-jobs
+          python scripts/workflows/validate_shared_dependency_compatibility.py --repo-root .
+
       - name: Build jobs image smoke
         shell: bash
         run: |
