@@ -17,6 +17,7 @@ If GitHub Security Advisories are not available for this repo, report the issue 
 - Do not commit secrets. `.gitignore` excludes `.env` and `.env.*`, while `.env.template` documents only template-backed local inputs.
 - `docs/ops/env-contract.csv` is the source of truth for GitHub variable and secret names, including workflow-only secrets that stay out of `.env.template`.
 - Azure deployment uses a user-assigned managed identity for registry pulls and platform access.
+- If a deploy artifact is suspected to contain rendered secret values, use `docs/ops/deploy-secret-rotation-2026-05.md` for artifact deletion, credential rotation, and post-rotation validation.
 
 ## Runtime Hardening
 
@@ -40,6 +41,7 @@ If GitHub Security Advisories are not available for this repo, report the issue 
 - `deploy/job_backtests.yaml`
 - `.github/workflows/quality.yml`
 - `.github/workflows/deploy-prod.yml`
+- `docs/ops/deploy-secret-rotation-2026-05.md`
 - `scripts/dependency_governance.py`
 - `tests/test_env_contract.py`
 - `tests/core/test_control_plane_transport.py`

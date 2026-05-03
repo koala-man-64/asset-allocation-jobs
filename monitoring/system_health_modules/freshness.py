@@ -169,11 +169,8 @@ def _probe_marker_last_modified(
 
 
 def _domain_artifact_fallback_blob(*, layer_name: str, domain_name: str) -> Optional[str]:
-    if _normalize_layer_key(layer_name) != "gold":
-        return None
-    if _normalize_domain_key(domain_name) != "regime":
-        return None
-    return "regime/_metadata/domain.json"
+    _ = layer_name, domain_name
+    return None
 
 
 def _resolve_last_updated_with_domain_artifact_fallback(

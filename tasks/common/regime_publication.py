@@ -208,7 +208,6 @@ def finalize_regime_publication(
         published = domain_artifacts.publish_domain_artifact_payload(payload=artifact_payload, client=client)
         if after_artifact_published_fn is not None:
             after_artifact_published_fn(artifact_payload, published or {})
-        save_watermarks_fn(watermark_key, dict(publish_state))
         marker_written = write_marker_fn(
             layer="gold",
             domain="regime",
@@ -217,6 +216,7 @@ def finalize_regime_publication(
         )
         if not marker_written:
             raise RuntimeError("System-health marker write returned False for gold/regime.")
+        save_watermarks_fn(watermark_key, dict(publish_state))
         save_last_success_fn(watermark_key, when=when, metadata=dict(publish_state))
         log_regime_publication_status(publish_state)
         return RegimePublicationFinalizationResult(

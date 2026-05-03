@@ -97,6 +97,13 @@ jobs:
           cd asset-allocation-jobs
           python scripts/run_quality_gate.py test-fast
 
+      - name: Run regime rollout tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd asset-allocation-jobs
+          python scripts/run_quality_gate.py test-regime-rollout
+
       - name: Run backtesting runtime tests
         shell: bash
         run: |

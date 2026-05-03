@@ -149,15 +149,16 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 
 - Capture the pre-deploy image set from `artifacts/previous-job-images.json`.
 - Manual `workflow_dispatch` deploys the latest successful `release.yml` artifact for the selected branch.
-- Roll back to an older image by sending a `deploy_runtime` repository dispatch with the previous known-good image digest from `artifacts/previous-job-images.json`.
+- Roll back to an older image by sending a `deploy_runtime` repository dispatch with `image_digest`, `release_run_id`, and `release_git_sha` from a verified successful `jobs-release` artifact.
 - Re-trigger only the affected jobs after rollback, not the whole stack.
+- If retained deploy artifacts may have exposed rendered secret values, follow `docs/ops/deploy-secret-rotation-2026-05.md` before the next prod deploy.
 - Strategy-compute rollback preserves ACA job names and operator aliases. The publication signal table is additive and should be left in place unless a database backup/restore is already part of the broader rollback.
 
 ## Troubleshoot
 
 - If `quality.yml` fails, verify `ASSET_ALLOCATION_API_BASE_URL` is still set to an internal target, `ASSET_ALLOCATION_API_SCOPE` is present for the HTTP client tests, and any private package indexes are configured in GitHub secrets.
 - If `release.yml` fails to build the image, verify Docker is building with repo-local context `asset-allocation-jobs` and that shared package versions resolve cleanly from `pyproject.toml`.
-- If `deploy-prod.yml` fails during apply, inspect `artifacts/rendered/*` to confirm only `Microsoft.App/jobs` resources were rendered.
+- If `deploy-prod.yml` fails during apply, inspect the workflow logs for render/apply errors. Uploaded support artifacts contain only redacted manifests under `artifacts/deploy-support/redacted-manifests/*`.
 - If `deploy-prod.yml` verifies the wrong image, inspect `artifacts/previous-job-images.json` and the job image queries returned by Azure CLI.
 - If `scripts\ops\trigger_job.py` fails, verify the selected job name exists in `AssetAllocationRG`, `RESOURCE_GROUP` is set, and your Azure CLI session can run `az containerapp job start`.
 - If `results-reconcile-job` does not process regime publication signals, verify `job_results_reconcile.yaml` is deployed with the `*/30 * * * *` schedule, check `core.strategy_publication_reconcile_signals` for stale `pending` or `error` rows, and start it manually with `python scripts\ops\trigger_job.py --job results-reconcile --resource-group AssetAllocationRG` for immediate repair.

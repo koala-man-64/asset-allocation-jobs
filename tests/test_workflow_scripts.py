@@ -296,6 +296,104 @@ def test_resolve_release_image_uses_latest_successful_release_artifact(monkeypat
     assert outputs["release_run_id"] == "11"
 
 
+def test_resolve_release_image_verifies_dispatch_run_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/workflows/resolve_release_image_digest.py", "resolve_release_image_digest")
+
+    def fake_request_json(url: str, token: str) -> dict[str, object]:
+        assert token == "test-token"
+        if "/actions/runs/22/artifacts" in url:
+            return {
+                "artifacts": [
+                    {
+                        "name": "jobs-release",
+                        "expired": False,
+                        "archive_download_url": "https://github.example/artifacts/22.zip",
+                    }
+                ]
+            }
+        if url.endswith("/actions/runs/22"):
+            return {
+                "id": 22,
+                "conclusion": "success",
+                "head_branch": "main",
+                "head_sha": "def456",
+                "html_url": "https://github.example/runs/22",
+            }
+        raise AssertionError(f"Unexpected GitHub API request: {url}")
+
+    monkeypatch.setattr(module, "request_json", fake_request_json)
+
+    import zipfile
+    from io import BytesIO
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "release-manifest.json",
+            '{"image_digest": "registry/image@sha256:feedbeef", "git_sha": "def456"}',
+        )
+    monkeypatch.setattr(module, "download_bytes", lambda url, token: buffer.getvalue())
+
+    outputs = module.resolve_release_image(
+        repo="owner/repo",
+        branch="main",
+        workflow="release.yml",
+        artifact_name="jobs-release",
+        token="test-token",
+        run_id=22,
+        expected_digest="registry/image@sha256:feedbeef",
+        expected_git_sha="def456",
+    )
+
+    assert outputs["image_digest"] == "registry/image@sha256:feedbeef"
+    assert outputs["image_source"] == "verified-dispatch-release"
+    assert outputs["release_run_id"] == "22"
+
+
+def test_resolve_release_image_rejects_dispatch_digest_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/workflows/resolve_release_image_digest.py", "resolve_release_image_digest")
+
+    def fake_request_json(url: str, token: str) -> dict[str, object]:
+        if url.endswith("/actions/runs/22"):
+            return {"id": 22, "conclusion": "success", "head_sha": "def456"}
+        if "/actions/runs/22/artifacts" in url:
+            return {
+                "artifacts": [
+                    {
+                        "name": "jobs-release",
+                        "expired": False,
+                        "archive_download_url": "https://github.example/artifacts/22.zip",
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected GitHub API request: {url}")
+
+    monkeypatch.setattr(module, "request_json", fake_request_json)
+
+    import zipfile
+    from io import BytesIO
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "release-manifest.json",
+            '{"image_digest": "registry/image@sha256:feedbeef", "git_sha": "def456"}',
+        )
+    monkeypatch.setattr(module, "download_bytes", lambda url, token: buffer.getvalue())
+
+    with pytest.raises(SystemExit, match="image_digest does not match"):
+        module.resolve_release_image(
+            repo="owner/repo",
+            branch="main",
+            workflow="release.yml",
+            artifact_name="jobs-release",
+            token="test-token",
+            run_id=22,
+            expected_digest="registry/image@sha256:wrong",
+            expected_git_sha="def456",
+        )
+
+
 def test_build_jobs_image_pushes_and_emits_outputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = load_module("scripts/workflows/build_jobs_image.py", "build_jobs_image")
     commands: list[list[str]] = []
@@ -568,6 +666,66 @@ def test_render_and_apply_manifests_fails_on_blank_secret_values(
     assert not (rendered_dir / "job_secret.yaml").exists()
 
 
+def test_render_and_apply_manifests_writes_redacted_support_manifests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    deploy_dir = tmp_path / "deploy"
+    deploy_dir.mkdir()
+    rendered_dir = tmp_path / "rendered"
+    redacted_dir = tmp_path / "redacted"
+    (deploy_dir / "job_secret.yaml").write_text(
+        "\n".join(
+            [
+                "name: gold-regime-job",
+                "tags:",
+                "  job-category: strategy-compute",
+                "  job-key: regime",
+                "  job-role: publish",
+                "  trigger-owner: schedule",
+                "properties:",
+                "  configuration:",
+                "    secrets:",
+                "    - name: pg-dsn",
+                "      value: ${POSTGRES_DSN}",
+                "  template:",
+                "    containers:",
+                "    - image: ${JOB_IMAGE}",
+                "      env:",
+                "      - name: ASSET_ALLOCATION_API_SCOPE",
+                "        value: ${ASSET_ALLOCATION_API_SCOPE}",
+                "      - name: SAFE_FLAG",
+                "        value: enabled",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "manifest_exists", lambda **_: False)
+    monkeypatch.setattr(module.subprocess, "check_call", lambda command: None)
+
+    module.render_and_apply_manifests(
+        deploy_dir=deploy_dir,
+        rendered_dir=rendered_dir,
+        redacted_dir=redacted_dir,
+        resource_group="rg",
+        environment={
+            "JOB_IMAGE": "registry/image@sha256:1234",
+            "POSTGRES_DSN": "postgres://secret-dsn",
+            "ASSET_ALLOCATION_API_SCOPE": "api://secret-scope",
+        },
+    )
+
+    rendered = (rendered_dir / "job_secret.yaml").read_text(encoding="utf-8")
+    redacted = (redacted_dir / "job_secret.yaml").read_text(encoding="utf-8")
+    assert "postgres://secret-dsn" in rendered
+    assert "api://secret-scope" in rendered
+    assert "postgres://secret-dsn" not in redacted
+    assert "api://secret-scope" not in redacted
+    assert "value: <redacted>" in redacted
+    assert "value: enabled" in redacted
+
+
 def test_render_and_apply_manifests_blocks_public_prod_control_plane_url() -> None:
     module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
 
@@ -645,6 +803,27 @@ def test_deploy_prod_workflow_deletes_retired_quiver_jobs_after_runtime_verify()
     cleanup_index = workflow_text.index("python scripts/workflows/delete_retired_jobs.py")
 
     assert verify_index < cleanup_index
+
+
+def test_deploy_prod_workflow_uploads_only_redacted_manifests() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert "--redacted-dir artifacts/deploy-support/redacted-manifests" in workflow_text
+    upload_step = workflow_text[workflow_text.index("- name: Upload deploy support data") :]
+    assert "artifacts/deploy-support/redacted-manifests/*" in upload_step
+    assert "artifacts/deploy-support/deploy-provenance.json" in upload_step
+    assert "artifacts/rendered/*" not in upload_step
+
+
+def test_deploy_prod_repository_dispatch_requires_release_provenance() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert "DISPATCH_RELEASE_RUN_ID" in workflow_text
+    assert "DISPATCH_RELEASE_GIT_SHA" in workflow_text
+    assert "--run-id \"${DISPATCH_RELEASE_RUN_ID}\"" in workflow_text
+    assert "--expected-digest \"${DISPATCH_IMAGE_DIGEST}\"" in workflow_text
+    assert "--expected-git-sha \"${DISPATCH_RELEASE_GIT_SHA}\"" in workflow_text
+    assert "image_source=repository_dispatch" not in workflow_text
 
 
 def test_verify_deployed_job_images_detects_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -755,6 +934,31 @@ def test_verify_deployed_job_runtime_treats_boolean_like_env_text_case_insensiti
         resource_group="rg",
         expected_image="registry/image@sha256:expected",
     )
+
+
+def test_verify_deployed_job_runtime_rejects_regime_pre_market_schedule() -> None:
+    module = load_module("scripts/workflows/verify_deployed_job_runtime.py", "verify_deployed_job_runtime_policy")
+    rendered_jobs = {
+        "gold-regime-job": yaml.safe_load(
+            """
+name: gold-regime-job
+properties:
+  configuration:
+    triggerType: Schedule
+    scheduleTriggerConfig:
+      cronExpression: "0 21 * * *"
+    replicaRetryLimit: 3
+  template:
+    containers:
+    - image: registry/image@sha256:expected
+"""
+        )
+    }
+
+    errors = module._manifest_runtime_invariant_errors(rendered_jobs)
+
+    assert any("cronExpression invariant mismatch" in error for error in errors)
+    assert any("replicaRetryLimit invariant mismatch" in error for error in errors)
 
 
 def test_verify_deployed_job_runtime_detects_drift_without_printing_env_values(

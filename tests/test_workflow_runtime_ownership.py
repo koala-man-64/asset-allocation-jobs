@@ -212,6 +212,17 @@ def test_strategy_compute_target_jobs_have_required_classifications() -> None:
         ) == classification
 
 
+def test_gold_regime_job_runs_after_market_chain_with_bounded_retry() -> None:
+    payload = yaml.safe_load((repo_root() / "deploy" / "job_gold_regime_data.yaml").read_text(encoding="utf-8"))
+    configuration = payload["properties"]["configuration"]
+
+    assert configuration["triggerType"] == "Schedule"
+    assert configuration["scheduleTriggerConfig"]["cronExpression"] == "30 2 * * 2-6"
+    assert configuration["replicaRetryLimit"] <= 1
+    assert configuration["scheduleTriggerConfig"]["parallelism"] == 1
+    assert configuration["scheduleTriggerConfig"]["replicaCompletionCount"] == 1
+
+
 def test_quiver_job_manifests_define_control_plane_env_vars() -> None:
     deploy_dir = repo_root() / "deploy"
     for manifest_name in QUIVER_PIPELINE_JOB_MANIFESTS:
@@ -401,6 +412,13 @@ def test_dockerfile_uses_repo_local_copy_paths_and_omits_psql_client() -> None:
     text = (repo_root() / "Dockerfile").read_text(encoding="utf-8")
     assert "COPY asset-allocation-jobs/" not in text
     assert "postgresql-client" not in text
+    assert "USER app" in text
+
+
+def test_docker_context_excludes_local_env_files() -> None:
+    text = (repo_root() / ".dockerignore").read_text(encoding="utf-8")
+    assert ".env\n" in text
+    assert ".env.*" in text
 
 
 def test_cost_guardrails_docs_use_local_template_and_cli_entrypoint() -> None:

@@ -485,7 +485,7 @@ def _normalize_macro_inputs(frame: pd.DataFrame) -> pd.DataFrame:
     if "hy_oas_z_20d" not in out.columns:
         out["hy_oas_z_20d"] = pd.NA
     if "rates_event_flag" not in out.columns:
-        out["rates_event_flag"] = False
+        out["rates_event_flag"] = pd.NA
     if "computed_at" not in out.columns:
         out["computed_at"] = pd.NaT
     out = out.dropna(subset=["as_of_date"]).sort_values("as_of_date").drop_duplicates(subset=["as_of_date"], keep="last")
@@ -495,7 +495,7 @@ def _normalize_macro_inputs(frame: pd.DataFrame) -> pd.DataFrame:
     out["curve_2s10s"] = pd.to_numeric(out["curve_2s10s"], errors="coerce")
     out["hy_oas"] = pd.to_numeric(out["hy_oas"], errors="coerce")
     out["hy_oas_z_20d"] = pd.to_numeric(out["hy_oas_z_20d"], errors="coerce")
-    out["rates_event_flag"] = out["rates_event_flag"].fillna(False).astype(bool)
+    out["rates_event_flag"] = out["rates_event_flag"].astype("boolean")
     out["computed_at"] = pd.to_datetime(out["computed_at"], utc=True, errors="coerce")
     out["curve_2s10s"] = out["curve_2s10s"].where(out["curve_2s10s"].notna(), out["rate_10y"] - out["rate_2y"])
     if out["hy_oas"].notna().any() and not out["hy_oas_z_20d"].notna().any():
@@ -603,6 +603,58 @@ def _publish_window_warnings(window: _RegimePublishWindow) -> list[str]:
     ]
 
 
+def _max_frame_date(frame: pd.DataFrame, column: str):
+    if frame.empty or column not in frame.columns:
+        return None
+    parsed = pd.to_datetime(frame[column], errors="coerce").dropna()
+    if parsed.empty:
+        return None
+    return parsed.max().date()
+
+
+def _assert_regime_publish_frames_ready(
+    *,
+    published_inputs: pd.DataFrame,
+    published_macro_inputs: pd.DataFrame,
+    history: pd.DataFrame,
+    latest: pd.DataFrame,
+    transitions: pd.DataFrame,
+    active_models: list[tuple[str, int]],
+    published_as_of_date: date,
+) -> None:
+    if published_inputs.empty:
+        _fail_fast("Gold regime fast-fail: refusing to publish with no regime input rows.")
+    if published_macro_inputs.empty:
+        _fail_fast("Gold regime fast-fail: refusing to publish with no macro input rows.")
+    if history.empty:
+        _fail_fast("Gold regime fast-fail: refusing to publish with no regime history rows.")
+    if latest.empty:
+        _fail_fast("Gold regime fast-fail: refusing to publish with no regime latest rows.")
+    if not active_models:
+        _fail_fast("Gold regime fast-fail: refusing to publish with no active models.")
+
+    if "inputs_complete_flag" not in published_inputs.columns:
+        _fail_fast("Gold regime fast-fail: published inputs are missing inputs_complete_flag.")
+    incomplete_count = int((~published_inputs["inputs_complete_flag"].fillna(False).astype(bool)).sum())
+    if incomplete_count:
+        _fail_fast(
+            "Gold regime fast-fail: refusing to publish incomplete regime input rows. "
+            f"incomplete_rows={incomplete_count}"
+        )
+
+    for frame_name, frame in (("history", history), ("latest", latest)):
+        max_date = _max_frame_date(frame, "as_of_date")
+        if max_date != published_as_of_date:
+            _fail_fast(
+                "Gold regime fast-fail: output date mismatch before publication. "
+                f"frame={frame_name} expected_as_of_date={published_as_of_date.isoformat()} "
+                f"observed_max_as_of_date={max_date.isoformat() if max_date else 'none'}"
+            )
+
+    if transitions is None:
+        _fail_fast("Gold regime fast-fail: transitions frame is None.")
+
+
 def _load_market_series(dsn: str) -> pd.DataFrame:
     with connect(dsn) as conn:
         frame = pd.read_sql_query(
@@ -663,8 +715,11 @@ def _load_macro_inputs(dsn: str) -> pd.DataFrame:
                 """,
                 conn,
             )
-        except Exception:
-            catalyst_frame = pd.DataFrame(columns=["as_of_date", "rates_event_flag"])
+        except Exception as exc:
+            raise RuntimeError(
+                "Gold regime macro input load failed: catalyst source gold.economic_catalyst_entity_daily "
+                f"is unavailable ({type(exc).__name__}: {exc})."
+            ) from exc
 
     macro_inputs = _normalize_macro_inputs(macro_frame)
     catalyst_inputs = _normalize_macro_inputs(catalyst_frame)
@@ -686,7 +741,7 @@ def _load_macro_inputs(dsn: str) -> pd.DataFrame:
             suffixes=("", "_macro"),
         )
     )
-    combined["rates_event_flag"] = combined["rates_event_flag_macro"].fillna(combined["rates_event_flag"]).fillna(False)
+    combined["rates_event_flag"] = combined["rates_event_flag_macro"].combine_first(combined["rates_event_flag"])
     combined = combined.drop(columns=["rates_event_flag_macro"], errors="ignore")
     combined["computed_at"] = pd.to_datetime(combined.get("computed_at"), utc=True, errors="coerce")
     return _normalize_macro_inputs(combined)
@@ -1024,9 +1079,15 @@ def main() -> int:
     for revision in active_revisions:
         model_name = str(revision["name"])
         model_version = int(revision["version"])
+        revision_config = revision.get("config")
+        if not isinstance(revision_config, dict) or not revision_config:
+            raise ValueError(
+                "Active regime model revision has no explicit config: "
+                f"model_name={model_name} model_version={model_version}"
+            )
         revision_inputs, resolved_config = _build_revision_inputs(
             published_inputs,
-            config=revision.get("config") or {},
+            config=revision_config,
         )
         mdc.write_line(
             "Gold regime active revision: "
@@ -1055,14 +1116,14 @@ def main() -> int:
         else pd.DataFrame(columns=_TRANSITIONS_COLUMNS)
     )
 
-    _replace_postgres_tables(
-        dsn,
-        macro_inputs=published_macro_inputs,
-        inputs=published_inputs,
+    _assert_regime_publish_frames_ready(
+        published_inputs=published_inputs,
+        published_macro_inputs=published_macro_inputs,
         history=history,
         latest=latest,
         transitions=transitions,
         active_models=active_models,
+        published_as_of_date=publish_window.published_as_of_date,
     )
     _write_storage_parquet_outputs(
         gold_container=gold_container,
@@ -1084,6 +1145,15 @@ def main() -> int:
         ],
         downstream_triggered=False,
         warnings=publish_window_warnings,
+    )
+    _replace_postgres_tables(
+        dsn,
+        macro_inputs=published_macro_inputs,
+        inputs=published_inputs,
+        history=history,
+        latest=latest,
+        transitions=transitions,
+        active_models=active_models,
     )
     finalization = finalize_regime_publication(
         gold_container=gold_container,

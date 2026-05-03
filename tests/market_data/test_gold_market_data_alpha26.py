@@ -1157,7 +1157,8 @@ def test_run_alpha26_market_gold_blocks_publication_when_critical_symbol_verific
     captured_index: dict = {}
     messages = _capture_log_messages(monkeypatch)
     written_paths: list[str] = []
-    cursor = _FakeCursor(fetchall_rows=[("SPY", 10), ("^VIX", 10)])
+    today = pd.Timestamp.utcnow().date()
+    cursor = _FakeCursor(fetchall_rows=[("SPY", 10, today), ("^VIX", 10, today)])
 
     monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", ["S", "V"])
     monkeypatch.setattr(gold.layer_bucketing, "load_layer_symbol_index", lambda **_kwargs: pd.DataFrame())
@@ -1260,7 +1261,8 @@ def test_run_alpha26_market_gold_completes_when_critical_symbol_verification_pas
         DataPaths.get_silver_market_bucket_path(bucket): bucket
         for bucket in bucket_symbols
     }
-    cursor = _FakeCursor(fetchall_rows=[(symbol, 10) for symbol in REGIME_REQUIRED_MARKET_SYMBOLS])
+    today = pd.Timestamp.utcnow().date()
+    cursor = _FakeCursor(fetchall_rows=[(symbol, 10, today) for symbol in REGIME_REQUIRED_MARKET_SYMBOLS])
 
     monkeypatch.setattr(gold.layer_bucketing, "ALPHABET_BUCKETS", list(bucket_symbols))
     monkeypatch.setattr(gold.layer_bucketing, "load_layer_symbol_index", lambda **_kwargs: pd.DataFrame())

@@ -16,6 +16,7 @@ from asset_allocation_contracts.paths import DataPaths
 from asset_allocation_runtime_common.market_data import bronze_bucketing
 from asset_allocation_runtime_common.market_data import domain_artifacts
 from asset_allocation_runtime_common.market_data import layer_bucketing
+from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from tasks.common.backfill import (
     apply_backfill_start_cutoff,
     filter_by_date,
@@ -70,6 +71,7 @@ _BRONZE_TO_SILVER_REQUIRED_COLUMNS = {
     "close",
     "volume",
 }
+_REGIME_REQUIRED_MARKET_SYMBOL_SET = frozenset(REGIME_REQUIRED_MARKET_SYMBOLS)
 
 
 def _empty_alpha26_market_frame() -> pd.DataFrame:
@@ -840,6 +842,7 @@ def _run_market_reconciliation(*, bronze_blob_list: list[dict]) -> tuple[int, in
         store_table=_store_silver_market_bucket,
         delete_prefix=silver_client.delete_prefix,
         vacuum_table=_vacuum_silver_market_bucket,
+        protected_symbols=_REGIME_REQUIRED_MARKET_SYMBOL_SET,
     )
     deleted_blobs = purge_stats.deleted_blobs
     if orphan_symbols:

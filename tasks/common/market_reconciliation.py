@@ -123,11 +123,22 @@ def purge_orphan_rows_from_bucket_tables(
     delete_prefix: Callable[[str], int],
     symbol_column_candidates: Sequence[str] = ("symbol", "Symbol"),
     vacuum_table: Optional[Callable[[str], None]] = None,
+    protected_symbols: Sequence[str] = (),
 ) -> tuple[list[str], BucketRewriteStats]:
+    normalized_upstream = {str(symbol).strip().upper() for symbol in upstream_symbols if str(symbol).strip()}
+    normalized_downstream = {str(symbol).strip().upper() for symbol in downstream_symbols if str(symbol).strip()}
+    protected = {str(symbol).strip().upper() for symbol in protected_symbols if str(symbol).strip()}
+    protected_orphans = sorted(protected.intersection(normalized_downstream).difference(normalized_upstream))
+    if protected_orphans:
+        raise RuntimeError(
+            "Required-symbol purge blocked: "
+            f"missing_upstream_symbols={protected_orphans}"
+        )
+
     orphan_symbols = sorted(
         {
             str(symbol).strip().upper()
-            for symbol in downstream_symbols.difference(upstream_symbols)
+            for symbol in normalized_downstream.difference(normalized_upstream)
             if str(symbol).strip()
         }
     )

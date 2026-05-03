@@ -144,6 +144,7 @@ _SILVER_MARKET_SCHEMA: tuple[str, ...] = tuple(SILVER_MARKET_COLUMNS)
 _GOLD_MARKET_SILVER_SOURCE_COLUMNS: tuple[str, ...] = tuple(GOLD_MARKET_SILVER_SOURCE_COLUMNS)
 _BUCKET_PROGRESS_LOG_INTERVAL = 100
 _REGIME_REQUIRED_MARKET_SYMBOL_SET = frozenset(REGIME_REQUIRED_MARKET_SYMBOLS)
+_DEFAULT_REQUIRED_SYMBOL_MAX_AGE_DAYS = 5
 _MARKET_CHUNK_SYMBOL_LIMIT = 25
 _MARKET_CHUNK_ROW_LIMIT = 100_000
 
@@ -585,6 +586,7 @@ def _run_market_reconciliation(*, silver_container: str, gold_container: str) ->
         store_table=lambda df, path: _store_gold_market_bucket(df, path, gold_container=gold_container),
         delete_prefix=gold_client.delete_prefix,
         vacuum_table=lambda path: _vacuum_gold_market_bucket(path, gold_container=gold_container),
+        protected_symbols=_REGIME_REQUIRED_MARKET_SYMBOL_SET,
     )
     deleted_blobs = purge_stats.deleted_blobs
     if orphan_symbols:
@@ -1217,6 +1219,28 @@ def _normalize_market_symbol(value: object) -> str:
     return str(value or "").strip().upper()
 
 
+def _required_market_symbol_max_age_days() -> int:
+    raw = str(os.environ.get("GOLD_MARKET_REQUIRED_SYMBOL_MAX_AGE_DAYS") or "").strip()
+    if not raw:
+        return _DEFAULT_REQUIRED_SYMBOL_MAX_AGE_DAYS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("GOLD_MARKET_REQUIRED_SYMBOL_MAX_AGE_DAYS must be an integer.") from exc
+    if value < 0:
+        raise ValueError("GOLD_MARKET_REQUIRED_SYMBOL_MAX_AGE_DAYS must be non-negative.")
+    return value
+
+
+def _coerce_observation_date(value: object):
+    if value is None:
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
+
+
 def _is_regime_required_market_symbol(value: object) -> bool:
     return _normalize_market_symbol(value) in _REGIME_REQUIRED_MARKET_SYMBOL_SET
 
@@ -1244,7 +1268,7 @@ def _verify_postgres_critical_market_symbols(
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT symbol, COUNT(*) AS row_count
+                    SELECT symbol, COUNT(*) AS row_count, MAX(date) AS latest_date
                     FROM gold.market_data
                     WHERE symbol = ANY(%s)
                     GROUP BY symbol
@@ -1262,23 +1286,43 @@ def _verify_postgres_critical_market_symbols(
             f"for {required_symbols}: {type(exc).__name__}: {exc}"
         ) from exc
 
-    observed_symbols = {
-        _normalize_market_symbol(symbol)
-        for symbol, row_count in rows
-        if int(row_count or 0) > 0
-    }
+    today = datetime.now(timezone.utc).date()
+    max_age_days = _required_market_symbol_max_age_days()
+    observed_latest_dates: dict[str, object] = {}
+    for row in rows:
+        symbol = _normalize_market_symbol(row[0] if len(row) > 0 else "")
+        row_count = int(row[1] or 0) if len(row) > 1 else 0
+        latest_date = row[2] if len(row) > 2 else None
+        if symbol and row_count > 0:
+            observed_latest_dates[symbol] = latest_date
+    observed_symbols = set(observed_latest_dates)
     missing_symbols = sorted(set(required_symbols).difference(observed_symbols))
+    stale_symbols: list[str] = []
+    latest_dates: dict[str, str] = {}
+    for symbol, latest_date_raw in observed_latest_dates.items():
+        latest_date = _coerce_observation_date(latest_date_raw)
+        if latest_date is None:
+            stale_symbols.append(symbol)
+            latest_dates[symbol] = "unparseable"
+            continue
+        latest_dates[symbol] = latest_date.isoformat()
+        if (today - latest_date).days > max_age_days:
+            stale_symbols.append(symbol)
 
-    if missing_sync or missing_symbols:
+    if missing_sync or missing_symbols or stale_symbols:
         mdc.write_line(
             "postgres_gold_critical_symbol_status "
             "domain=market status=failed "
             f"missing_symbols={missing_symbols or ['none']} "
+            f"stale_symbols={sorted(stale_symbols) or ['none']} "
+            f"latest_dates={latest_dates or {}} "
+            f"max_age_days={max_age_days} "
             f"missing_sync={missing_sync or ['none']}"
         )
         raise ValueError(
             "Gold market critical-symbol verification failed: "
             f"missing_symbols={missing_symbols or ['none']} "
+            f"stale_symbols={sorted(stale_symbols) or ['none']} "
             f"missing_sync={missing_sync or ['none']}"
         )
 
@@ -1286,6 +1330,8 @@ def _verify_postgres_critical_market_symbols(
         "postgres_gold_critical_symbol_status "
         "domain=market status=ok "
         f"symbols={list(required_symbols)} "
+        f"latest_dates={latest_dates} "
+        f"max_age_days={max_age_days} "
         f"buckets={sorted(set(required_buckets.values()))}"
     )
 

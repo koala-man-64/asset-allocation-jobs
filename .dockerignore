@@ -8,6 +8,7 @@ Data
 Symbols
 Tests
 .env
+.env.*
 .github
 *.md
 !README.md

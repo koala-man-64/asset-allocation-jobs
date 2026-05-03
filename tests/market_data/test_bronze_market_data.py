@@ -381,8 +381,26 @@ def test_download_allows_regime_required_symbol_even_when_blacklisted():
         )
 
         mock_massive.get_market_history.assert_called_once()
+        assert mock_massive.get_market_history.call_args.kwargs["symbol"] == "I:VIX"
         mock_list_manager.add_to_whitelist.assert_called_once_with(symbol)
         assert symbol in collected_frames
+
+
+def test_with_required_market_symbols_schedules_canonical_vix_aliases() -> None:
+    symbols = bronze._with_required_market_symbols(["AAPL", "SPY", "I:VIX"])
+
+    assert "AAPL" in symbols
+    assert "^VIX" in symbols
+    assert "^VIX3M" in symbols
+    assert "I:VIX" not in symbols
+
+
+def test_bronze_required_symbol_gate_blocks_incomplete_publish_session() -> None:
+    class Session:
+        symbol_to_bucket = {"SPY": "S", "^VIX": "V"}
+
+    with pytest.raises(RuntimeError, match="missing required regime symbols"):
+        bronze._validate_bronze_required_market_symbols(Session())
 
 
 def test_validate_environment_requires_common_container(monkeypatch: pytest.MonkeyPatch):

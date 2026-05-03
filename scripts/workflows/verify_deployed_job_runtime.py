@@ -10,6 +10,16 @@ import yaml
 
 
 _BOOLEAN_TEXT = {"true": "true", "false": "false"}
+_REQUIRED_MARKET_RUNTIME = {
+    "bronze-market-job": {"triggerType": "schedule", "cronExpression": "0 22 * * 1-5"},
+    "silver-market-job": {"triggerType": "manual"},
+    "gold-market-job": {"triggerType": "manual"},
+    "gold-regime-job": {
+        "triggerType": "schedule",
+        "cronExpression": "30 2 * * 2-6",
+        "maxReplicaRetryLimit": 1,
+    },
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -180,14 +190,44 @@ def _compare_manifest_to_live(
     return errors
 
 
+def _manifest_runtime_invariant_errors(rendered_jobs: dict[str, dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    for job_name, expected in _REQUIRED_MARKET_RUNTIME.items():
+        rendered = rendered_jobs.get(job_name)
+        if rendered is None:
+            continue
+        configuration = _configuration(rendered)
+        trigger_type = _normalize(configuration.get("triggerType")).lower()
+        expected_trigger = str(expected.get("triggerType") or "").lower()
+        if trigger_type != expected_trigger:
+            errors.append(f"{job_name}: triggerType invariant mismatch: expected {expected_trigger}, found {trigger_type}")
+        expected_cron = expected.get("cronExpression")
+        if expected_cron is not None:
+            actual_cron = _cron(configuration)
+            if actual_cron != expected_cron:
+                errors.append(f"{job_name}: cronExpression invariant mismatch: expected {expected_cron}, found {actual_cron}")
+        max_retry = expected.get("maxReplicaRetryLimit")
+        if max_retry is not None:
+            try:
+                actual_retry = int(configuration.get("replicaRetryLimit"))
+            except (TypeError, ValueError):
+                errors.append(f"{job_name}: replicaRetryLimit invariant mismatch: expected <= {max_retry}, found invalid")
+                continue
+            if actual_retry > int(max_retry):
+                errors.append(f"{job_name}: replicaRetryLimit invariant mismatch: expected <= {max_retry}, found {actual_retry}")
+    return errors
+
+
 def verify_deployed_job_runtime(*, rendered_dir: Path, resource_group: str, expected_image: str) -> None:
     errors: list[str] = []
+    rendered_jobs: dict[str, dict[str, Any]] = {}
     for manifest in sorted(rendered_dir.glob("job_*.yaml")):
         rendered = _load_yaml(manifest)
         job_name = str(rendered.get("name") or "").strip()
         if not job_name:
             errors.append(f"{manifest}: missing job name")
             continue
+        rendered_jobs[job_name] = rendered
         live = query_job_runtime(job_name=job_name, resource_group=resource_group)
         errors.extend(
             _compare_manifest_to_live(
@@ -197,6 +237,7 @@ def verify_deployed_job_runtime(*, rendered_dir: Path, resource_group: str, expe
                 expected_image=expected_image,
             )
         )
+    errors.extend(_manifest_runtime_invariant_errors(rendered_jobs))
 
     if errors:
         raise SystemExit("Deployed job runtime drift detected:\n" + "\n".join(errors))
