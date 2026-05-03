@@ -32,6 +32,16 @@ def shared_dependencies() -> dict[str, str]:
     return {name: version for name, version in project_dependencies().items() if name.startswith("asset-allocation-")}
 
 
+def dockerfile_build_arg_defaults() -> dict[str, str]:
+    defaults: dict[str, str] = {}
+    for line in (repo_root() / "Dockerfile").read_text(encoding="utf-8").splitlines():
+        if not line.startswith("ARG ") or "=" not in line:
+            continue
+        name, value = line.removeprefix("ARG ").split("=", 1)
+        defaults[name] = value
+    return defaults
+
+
 def installed_exact_dependency_versions(package_name: str) -> dict[str, str]:
     versions: dict[str, str] = {}
     try:
@@ -86,6 +96,14 @@ def test_jobs_dockerfile_does_not_copy_sibling_repos() -> None:
     assert "COPY asset-allocation-runtime-common/" not in text
     assert '"asset-allocation-contracts==${CONTRACTS_VERSION}"' in text
     assert '"asset-allocation-runtime-common==${RUNTIME_COMMON_VERSION}"' in text
+
+
+def test_jobs_dockerfile_shared_package_defaults_match_repo_pins() -> None:
+    shared = shared_dependencies()
+    defaults = dockerfile_build_arg_defaults()
+
+    assert defaults["CONTRACTS_VERSION"] == shared["asset-allocation-contracts"]
+    assert defaults["RUNTIME_COMMON_VERSION"] == shared["asset-allocation-runtime-common"]
 
 
 def test_quality_and_release_workflows_do_not_checkout_sibling_repos() -> None:
