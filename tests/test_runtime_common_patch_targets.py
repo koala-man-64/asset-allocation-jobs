@@ -6,6 +6,7 @@ import asset_allocation_runtime_common.foundation.debug_symbols as foundation_de
 import asset_allocation_runtime_common.foundation.runtime_config as foundation_runtime_config
 import asset_allocation_runtime_common.market_data.core as market_core
 import asset_allocation_runtime_common.market_data.delta_core as market_delta_core
+import core.ranking_engine.service as local_ranking_service
 
 from tests.test_support.runtime_common import owner_module_for
 
@@ -34,6 +35,18 @@ def test_runtime_common_wrapper_owner_modules_are_stable() -> None:
         owner_module_for(foundation_runtime_config.apply_runtime_config_to_env).__name__
         == "asset_allocation_runtime_common.shared_core.runtime_config"
     )
+    assert (
+        owner_module_for(local_ranking_service.materialize_strategy_rankings).__name__
+        == "asset_allocation_runtime_common.ranking_engine.service"
+    )
+
+
+def test_jobs_ranking_service_module_is_runtime_common_compatibility_shim() -> None:
+    text = (Path(__file__).resolve().parents[1] / "core" / "ranking_engine" / "service.py").read_text(encoding="utf-8")
+
+    assert "from asset_allocation_runtime_common.ranking_engine.service import *" in text
+    assert "def materialize_strategy_rankings" not in text
+    assert "def _load_source_date_bounds" not in text
 
 
 def test_tests_do_not_use_stale_runtime_common_patch_prefixes() -> None:

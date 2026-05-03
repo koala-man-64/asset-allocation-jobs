@@ -11,11 +11,17 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 CommandSpec = tuple[list[str], pathlib.Path]
 
+PLATINUM_RANKING_TESTS = [
+    "tests/tasks/test_platinum_rankings.py",
+    "tests/core/ranking_engine/test_service.py",
+]
+
 FAST_TESTS = [
     "tests/test_env_contract.py",
     "tests/test_workflow_runtime_ownership.py",
     "tests/test_azure_provisioning_scripts.py",
     "tests/test_multirepo_dependency_contract.py",
+    *PLATINUM_RANKING_TESTS,
     "tests/core/test_control_plane_transport.py",
     "tests/core/test_strategy_repository.py",
     "tests/core/test_ranking_repository.py",
@@ -79,6 +85,7 @@ def build_commands(gate: str) -> list[CommandSpec]:
         "format-python": [([python, "-m", "ruff", "format", "."], REPO_ROOT)],
         "lint-fix-python": [([python, "-m", "ruff", "check", "--fix", "."], REPO_ROOT)],
         "test-fast": [([python, "-m", "pytest", "-q", *FAST_TESTS], REPO_ROOT)],
+        "test-platinum-rankings": [([python, "-m", "pytest", "-q", *PLATINUM_RANKING_TESTS], REPO_ROOT)],
         "test-backtesting-runtime": [([python, "-m", "pytest", "-q", *BACKTESTING_RUNTIME_TESTS], REPO_ROOT)],
         "test-control-plane-compat": [([python, "-m", "pytest", "-q", *CONTROL_PLANE_COMPAT_TESTS], REPO_ROOT)],
         "test-runtime-common-compat": [([python, "-m", "pytest", "-q", *RUNTIME_COMMON_COMPAT_TESTS], REPO_ROOT)],

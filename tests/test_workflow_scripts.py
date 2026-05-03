@@ -1256,6 +1256,34 @@ def test_check_fast_gate_runs_ruff_before_fast_tests(monkeypatch: pytest.MonkeyP
         (["/python", "-m", "ruff", "check", "."], module.REPO_ROOT),
         (["/python", "-m", "pytest", "-q", *module.FAST_TESTS], module.REPO_ROOT),
     ]
+    assert "tests/tasks/test_platinum_rankings.py" in module.FAST_TESTS
+    assert "tests/core/ranking_engine/test_service.py" in module.FAST_TESTS
+
+
+def test_test_fast_gate_includes_platinum_ranking_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/run_quality_gate.py", "run_quality_gate_test_fast")
+
+    monkeypatch.setattr(module, "resolve_python", lambda: "/python")
+
+    commands = module.build_commands("test-fast")
+
+    assert commands == [(["/python", "-m", "pytest", "-q", *module.FAST_TESTS], module.REPO_ROOT)]
+    assert "tests/tasks/test_platinum_rankings.py" in commands[0][0]
+    assert "tests/core/ranking_engine/test_service.py" in commands[0][0]
+
+
+def test_platinum_rankings_gate_runs_only_focused_ranking_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/run_quality_gate.py", "run_quality_gate_platinum")
+
+    monkeypatch.setattr(module, "resolve_python", lambda: "/python")
+
+    assert module.build_commands("test-platinum-rankings") == [
+        (["/python", "-m", "pytest", "-q", *module.PLATINUM_RANKING_TESTS], module.REPO_ROOT)
+    ]
+    assert module.PLATINUM_RANKING_TESTS == [
+        "tests/tasks/test_platinum_rankings.py",
+        "tests/core/ranking_engine/test_service.py",
+    ]
 
 
 def test_check_fast_gate_stops_after_first_failure(monkeypatch: pytest.MonkeyPatch) -> None:

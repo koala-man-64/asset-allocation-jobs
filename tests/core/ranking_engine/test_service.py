@@ -11,6 +11,7 @@ from asset_allocation_runtime_common.ranking_engine.naming import build_scoped_i
 from asset_allocation_runtime_common.ranking_engine.service import (
     _MaterializationContext,
     _ResolvedDateRange,
+    _SourceCoverage,
     _apply_transforms,
     _compute_rankings_dataframe,
     _evaluate_universe_mask,
@@ -22,6 +23,19 @@ from asset_allocation_runtime_common.ranking_engine.service import (
 )
 from asset_allocation_runtime_common.ranking_engine.contracts import RankingSchemaConfig
 from asset_allocation_runtime_common.strategy_engine.contracts import StrategyConfig
+
+
+def _coverage(*, expected_dates: tuple[date, ...], ready_dates: tuple[date, ...]) -> _SourceCoverage:
+    return _SourceCoverage(
+        source_start_date=expected_dates[0],
+        source_end_date=expected_dates[-1],
+        expected_dates=expected_dates,
+        ready_dates=ready_dates,
+        table_ready_dates={},
+        column_ready_dates={},
+    )
+
+
 def _build_strategy_config(*, ranking_schema_name: str = "quality") -> StrategyConfig:
     return StrategyConfig.model_validate(
         {
@@ -323,8 +337,11 @@ def test_normalize_loaded_column_preserves_supported_types() -> None:
 def test_resolve_date_range_defaults_to_watermark_plus_one_day(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         service_module,
-        "_load_source_date_bounds",
-        lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
+        "_load_source_coverage",
+        lambda _dsn, **_kwargs: _coverage(
+            expected_dates=tuple(date(2026, 3, day) for day in range(1, 11)),
+            ready_dates=tuple(date(2026, 3, day) for day in range(1, 11)),
+        ),
     )
     monkeypatch.setattr(
         service_module,
@@ -354,8 +371,11 @@ def test_resolve_date_range_defaults_to_watermark_plus_one_day(monkeypatch: pyte
 def test_resolve_date_range_returns_noop_when_output_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         service_module,
-        "_load_source_date_bounds",
-        lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
+        "_load_source_coverage",
+        lambda _dsn, **_kwargs: _coverage(
+            expected_dates=tuple(date(2026, 3, day) for day in range(1, 11)),
+            ready_dates=tuple(date(2026, 3, day) for day in range(1, 11)),
+        ),
     )
     monkeypatch.setattr(
         service_module,
@@ -386,8 +406,11 @@ def test_resolve_date_range_returns_noop_when_output_is_current(monkeypatch: pyt
 def test_resolve_date_range_rejects_invalid_explicit_range(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         service_module,
-        "_load_source_date_bounds",
-        lambda _dsn, **_kwargs: (date(2026, 3, 1), date(2026, 3, 10)),
+        "_load_source_coverage",
+        lambda _dsn, **_kwargs: _coverage(
+            expected_dates=tuple(date(2026, 3, day) for day in range(1, 11)),
+            ready_dates=tuple(date(2026, 3, day) for day in range(1, 11)),
+        ),
     )
     monkeypatch.setattr(service_module, "_get_ranking_watermark", lambda _dsn, _strategy_name: None)
 
@@ -605,9 +628,14 @@ def test_compute_rankings_dataframe_excludes_null_piotroski_rows(monkeypatch) ->
 
 
 class _FakeCursor:
-    def __init__(self, fetchone_results: list[tuple[object, ...] | None] | None = None) -> None:
+    def __init__(
+        self,
+        fetchone_results: list[tuple[object, ...] | None] | None = None,
+        fetchall_results: list[list[tuple[object, ...]]] | None = None,
+    ) -> None:
         self.execute_calls: list[tuple[str, tuple[object, ...] | None]] = []
         self._fetchone_results = list(fetchone_results or [])
+        self._fetchall_results = list(fetchall_results or [])
 
     def __enter__(self) -> "_FakeCursor":
         return self
@@ -622,6 +650,11 @@ class _FakeCursor:
         if self._fetchone_results:
             return self._fetchone_results.pop(0)
         return None
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        if self._fetchall_results:
+            return self._fetchall_results.pop(0)
+        return []
 
 
 class _FakeConnection:
@@ -667,13 +700,19 @@ class _TransactionalConnection:
 
 
 def test_load_source_date_bounds_raises_when_no_candidate_dates(monkeypatch: pytest.MonkeyPatch) -> None:
-    cursor = _FakeCursor(fetchone_results=[(None, None)])
+    cursor = _FakeCursor(fetchall_results=[[], []])
     monkeypatch.setattr(service_module, "connect", lambda _dsn: _FakeConnection(cursor))
 
     with pytest.raises(ValueError, match="No ranking source data is available"):
         _load_source_date_bounds(
             "postgresql://test",
-            table_specs={"market_data": type("Spec", (), {"as_of_column": "date"})()},
+            table_specs={
+                "market_data": type(
+                    "Spec",
+                    (),
+                    {"as_of_column": "date", "columns": {"close": object()}},
+                )()
+            },
             required_columns={"market_data": {"close"}},
         )
 

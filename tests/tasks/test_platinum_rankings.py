@@ -115,6 +115,7 @@ def test_main_claims_and_materializes_each_pending_window(monkeypatch: pytest.Mo
 
 
 def test_main_marks_failed_claim_and_returns_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    markers: list[dict[str, object]] = []
     _FakeRankingRepository.work_items = [
         {
             "strategyName": "alpha",
@@ -127,7 +128,11 @@ def test_main_marks_failed_claim_and_returns_non_zero(monkeypatch: pytest.Monkey
     ]
     monkeypatch.setattr(platinum_rankings, "_configure_job_logging", lambda: None)
     monkeypatch.setattr(platinum_rankings, "RankingRepository", _FakeRankingRepository)
-    monkeypatch.setattr(platinum_rankings, "write_system_health_marker", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        platinum_rankings,
+        "write_system_health_marker",
+        lambda **kwargs: markers.append(kwargs) or True,
+    )
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://test")
     monkeypatch.setattr(
         platinum_rankings,
@@ -139,9 +144,125 @@ def test_main_marks_failed_claim_and_returns_non_zero(monkeypatch: pytest.Monkey
 
     assert result == 1
     assert _FakeRankingRepository.failures == [("alpha", "boom")]
+    assert markers == []
+
+
+def test_main_suppresses_marker_when_later_claim_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    markers: list[dict[str, object]] = []
+    _FakeRankingRepository.work_items = [
+        {
+            "strategyName": "alpha",
+            "claimToken": "claim-1",
+            "startDate": "2026-03-01",
+            "endDate": "2026-03-03",
+            "dependencyFingerprint": "fp-1",
+            "dependencyState": {"domains": {}},
+        },
+        {
+            "strategyName": "zeta",
+            "claimToken": "claim-2",
+            "startDate": "2026-03-04",
+            "endDate": "2026-03-05",
+            "dependencyFingerprint": "fp-2",
+            "dependencyState": {"domains": {}},
+        },
+    ]
+    monkeypatch.setattr(platinum_rankings, "_configure_job_logging", lambda: None)
+    monkeypatch.setattr(platinum_rankings, "RankingRepository", _FakeRankingRepository)
+    monkeypatch.setattr(
+        platinum_rankings,
+        "write_system_health_marker",
+        lambda **kwargs: markers.append(kwargs) or True,
+    )
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql://test")
+
+    def fake_materialize(_dsn: str, **kwargs: object) -> dict[str, object]:
+        strategy_name = str(kwargs["strategy_name"])
+        if strategy_name == "zeta":
+            raise RuntimeError("zeta failed")
+        return {
+            "strategyName": strategy_name,
+            "rankingSchemaName": "quality",
+            "outputTableName": "platinum_table",
+            "rowCount": 1,
+            "dateCount": 1,
+            "runId": f"run-{strategy_name}",
+            "status": "success",
+            "startDate": str(kwargs["start_date"]),
+            "endDate": str(kwargs["end_date"]),
+            "previousWatermark": None,
+            "currentWatermark": str(kwargs["end_date"]),
+            "reason": None,
+        }
+
+    monkeypatch.setattr(platinum_rankings, "materialize_strategy_rankings", fake_materialize)
+
+    result = platinum_rankings.main()
+
+    assert result == 1
+    assert _FakeRankingRepository.completions == [("alpha", "claim-1", "run-alpha")]
+    assert _FakeRankingRepository.failures == [("zeta", "zeta failed")]
+    assert markers == []
+
+
+def test_main_suppresses_marker_when_later_claim_has_invalid_date_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markers: list[dict[str, object]] = []
+    _FakeRankingRepository.work_items = [
+        {
+            "strategyName": "alpha",
+            "claimToken": "claim-1",
+            "startDate": "2026-03-01",
+            "endDate": "2026-03-03",
+        },
+        {
+            "strategyName": "zeta",
+            "claimToken": "claim-2",
+            "startDate": "",
+            "endDate": "2026-03-05",
+        },
+    ]
+    monkeypatch.setattr(platinum_rankings, "_configure_job_logging", lambda: None)
+    monkeypatch.setattr(platinum_rankings, "RankingRepository", _FakeRankingRepository)
+    monkeypatch.setattr(
+        platinum_rankings,
+        "write_system_health_marker",
+        lambda **kwargs: markers.append(kwargs) or True,
+    )
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql://test")
+
+    def fake_materialize(_dsn: str, **kwargs: object) -> dict[str, object]:
+        strategy_name = str(kwargs["strategy_name"])
+        return {
+            "strategyName": strategy_name,
+            "rankingSchemaName": "quality",
+            "outputTableName": "platinum_table",
+            "rowCount": 1,
+            "dateCount": 1,
+            "runId": f"run-{strategy_name}",
+            "status": "success",
+            "startDate": str(kwargs["start_date"]),
+            "endDate": str(kwargs["end_date"]),
+            "previousWatermark": None,
+            "currentWatermark": str(kwargs["end_date"]),
+            "reason": None,
+        }
+
+    monkeypatch.setattr(platinum_rankings, "materialize_strategy_rankings", fake_materialize)
+
+    result = platinum_rankings.main()
+
+    assert result == 1
+    assert _FakeRankingRepository.completions == [("alpha", "claim-1", "run-alpha")]
+    assert _FakeRankingRepository.failures == [
+        ("zeta", "Ranking refresh work item was missing a valid date window.")
+    ]
+    assert markers == []
 
 
 def test_main_returns_zero_when_no_refresh_work_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    markers: list[dict[str, object]] = []
     _FakeRankingRepository.work_items = []
     monkeypatch.setattr(platinum_rankings, "_configure_job_logging", lambda: None)
     monkeypatch.setattr(platinum_rankings, "RankingRepository", _FakeRankingRepository)
@@ -150,10 +271,15 @@ def test_main_returns_zero_when_no_refresh_work_exists(monkeypatch: pytest.Monke
         "materialize_strategy_rankings",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("materialize should not be called")),
     )
-    monkeypatch.setattr(platinum_rankings, "write_system_health_marker", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        platinum_rankings,
+        "write_system_health_marker",
+        lambda **kwargs: markers.append(kwargs) or True,
+    )
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://test")
 
     assert platinum_rankings.main() == 0
+    assert markers == []
 
 
 def test_main_requires_postgres_dsn(monkeypatch: pytest.MonkeyPatch) -> None:

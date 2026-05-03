@@ -118,14 +118,6 @@ def main() -> int:
             },
         )
 
-    if completed_count > 0:
-        write_system_health_marker(
-            layer="platinum",
-            domain="rankings",
-            job_name="platinum-rankings-job",
-            metadata={"completedCount": completed_count},
-        )
-
     if failures:
         logger.error(
             "Ranking materialization completed with failures.",
@@ -137,6 +129,13 @@ def main() -> int:
             },
         )
         return 1
+    if completed_count > 0:
+        write_system_health_marker(
+            layer="platinum",
+            domain="rankings",
+            job_name="platinum-rankings-job",
+            metadata={"completedCount": completed_count},
+        )
     return 0
 
 

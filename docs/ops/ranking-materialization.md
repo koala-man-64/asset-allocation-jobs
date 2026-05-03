@@ -75,20 +75,25 @@ Relevant environment variables:
 - `POSTGRES_DSN`
 - `ASSET_ALLOCATION_API_BASE_URL`
 - `ASSET_ALLOCATION_API_SCOPE`
+- `RANKING_MATERIALIZATION_CHUNK_DATES` (optional runtime-common override; default `31`, valid range `1..366`)
 
 Behavior:
 
-- The worker scans saved strategies and materializes each strategy that references an existing ranking schema.
-- The worker uses the strategy payload returned from the list endpoint when it already contains `config`, and only fetches per-strategy detail when that config is missing.
-- If `start_date` and `end_date` are omitted, the worker defaults incrementally:
+- Production materialization logic lives in `asset-allocation-runtime-common`; this repo owns the ACA worker, package pin, Docker image, and control-plane claim loop.
+- The worker claims one pending ranking refresh at a time, materializes the claimed strategy/date window, calls `complete` on success or `fail` on error, then continues until no work remains.
+- If any claimed item fails, the worker exits non-zero after processing the rest of the claim stream.
+- The system-health marker is written only after a clean invocation with at least one completed item. Mixed success/failure runs do not refresh freshness monitoring.
+- If `start_date` and `end_date` are omitted, runtime-common defaults incrementally:
   - `start_date = ranking_watermark + 1 day` when a watermark exists
-  - otherwise `start_date = earliest available source date`
-  - `end_date = latest available source date`
+  - otherwise `start_date = earliest source-active date`
+  - `end_date = latest contiguous complete source-ready date`
 - If the ranking watermark is already current, the worker records a `noop` run and does not rewrite platinum rows or advance the watermark.
-- If the referenced gold tables have no candidate source dates, the worker fails explicitly and does not advance the watermark.
+- Runtime-common requires every selected gold table to be ready for a date before materializing it. Non-null readiness is required for `missingValuePolicy="exclude"` ranking factors and universe operators that cannot match nulls; `missingValuePolicy="zero"` factors and `is_null` universe checks do not block readiness.
+- Explicit claim windows fail fast when they contain source-active dates that are not fully ready. The worker does not silently clamp an incomplete claim and report success.
+- If the referenced gold tables have no source dates, the worker fails explicitly and does not advance the watermark.
+- Backfills are processed in bounded ready-date chunks so the worker does not load the full requested window into pandas at once.
 - Each strategy run writes platinum rows, marks the run `success`, and updates the watermark in a single database transaction.
-- The worker continues materializing later strategies after a per-strategy failure, then exits non-zero if any strategy failed.
-- The worker does not accept ranking-specific deploy-time environment overrides.
+- Watermark updates are monotonic; historical backfills cannot lower `core.ranking_watermarks.last_ranked_date`.
 - Universe configs cannot be deleted while they are still referenced by saved strategies or ranking schemas.
 
 ## Verification
@@ -125,4 +130,12 @@ Check watermarks:
 SELECT strategy_name, ranking_schema_name, ranking_schema_version, output_table_name, last_ranked_date, updated_at
 FROM core.ranking_watermarks
 ORDER BY strategy_name;
+```
+
+Local verification:
+
+```powershell
+python scripts/run_quality_gate.py test-platinum-rankings
+python scripts/run_quality_gate.py test-fast
+python -m pytest tests/tasks/test_platinum_rankings.py tests/core/ranking_engine/test_service.py tests/test_workflow_runtime_ownership.py -q
 ```

@@ -138,6 +138,12 @@ Path: `Postgres table platinum.<strategy_output_table>`
 | `score` | number | Weighted composite score used to order symbols before rank assignment. |
 | `last_updated_date` | date | Date the row was last materialized into platinum. |
 
+### Ranking Materialization Operational Semantics
+
+`core.ranking_runs` and `core.ranking_watermarks` are the durable source of truth for ranking materialization state. The platinum rankings system-health marker is only an operational freshness signal and is emitted only after a clean worker invocation with at least one completed claim.
+
+Runtime materialization is owned by `asset-allocation-runtime-common`. It advances `core.ranking_watermarks.last_ranked_date` only after successful platinum writes, only through source-ready dates, and never backward during historical backfills.
+
 ## Strategies
 
 ### Strategy Storage

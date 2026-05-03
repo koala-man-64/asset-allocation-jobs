@@ -54,6 +54,8 @@ If the new signal endpoint or scheduled reconciler is unhealthy:
 
 ## Validation
 
+- `python scripts/run_quality_gate.py test-platinum-rankings`
+- `python scripts/run_quality_gate.py test-fast`
 - `python -m pytest tests/test_workflow_runtime_ownership.py tests/test_workflow_scripts.py -q`
 - `python -m pytest tests/tasks/common/test_regime_publication.py tests/tasks/test_gold_regime_data.py -q`
 - `python -m pytest tests/test_postgres_migrations.py::test_strategy_publication_reconcile_migration_creates_idempotent_signal_table -q`
