@@ -386,6 +386,8 @@ def test_results_reconcile_job_is_scheduled_reconciler_and_not_dry_run() -> None
     assert 'cronExpression: "*/30 * * * *"' in text
     assert "manualTriggerConfig:" not in text
     assert "RESULTS_RECONCILE_DRY_RUN" not in text
+    assert "name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS" in text
+    assert 'value: "600"' in text
 
 
 def test_symbol_cleanup_job_is_scheduled_and_points_to_worker_module() -> None:

@@ -45,6 +45,8 @@ properties:
         value: ${ASSET_ALLOCATION_API_BASE_URL}
       - name: ASSET_ALLOCATION_API_SCOPE
         value: ${ASSET_ALLOCATION_API_SCOPE}
+      - name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS
+        value: "600"
       image: ${JOB_IMAGE}
       imageType: ContainerImage
       name: results-reconcile-job
