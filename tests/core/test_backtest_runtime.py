@@ -21,8 +21,10 @@ from core.backtest_runtime import (
     _maybe_update_heartbeat,
     _regime_context_for_session,
     _periods_per_year_from_bar_size,
+    _prepared_dynamic_slow_frames_for_timestamp,
     _rolling_window_periods,
     _score_snapshot,
+    _split_slow_required_columns,
     _slow_frame_point_in_time_filter,
     _compute_rolling_metrics,
     _compute_summary,
@@ -202,6 +204,197 @@ def test_slow_frame_point_in_time_filter_allows_timestamped_availability_only_wh
     assert where_sql == '"available_at" <= %s'
     assert params == [as_of_ts]
     assert order_columns == ['"available_at"', '"as_of_date"']
+
+
+def test_split_slow_required_columns_keeps_date_only_tables_stable_and_timestamped_tables_dynamic() -> None:
+    table_specs = {
+        "market_data": universe_service.UniverseTableSpec(
+            name="market_data",
+            as_of_column="as_of_ts",
+            as_of_kind="intraday",
+            columns={
+                "as_of_ts": universe_service.UniverseColumnSpec("as_of_ts", "timestamp with time zone", "datetime", []),
+                "close": universe_service.UniverseColumnSpec("close", "double precision", "number", []),
+            },
+        ),
+        "fundamentals_daily": universe_service.UniverseTableSpec(
+            name="fundamentals_daily",
+            as_of_column="as_of_date",
+            as_of_kind="daily",
+            columns={
+                "as_of_date": universe_service.UniverseColumnSpec("as_of_date", "date", "date", []),
+                "metric": universe_service.UniverseColumnSpec("metric", "double precision", "number", []),
+            },
+        ),
+        "filings_daily": universe_service.UniverseTableSpec(
+            name="filings_daily",
+            as_of_column="as_of_date",
+            as_of_kind="daily",
+            columns={
+                "as_of_date": universe_service.UniverseColumnSpec("as_of_date", "date", "date", []),
+                "available_at": universe_service.UniverseColumnSpec(
+                    "available_at",
+                    "timestamp with time zone",
+                    "datetime",
+                    [],
+                ),
+                "filing_score": universe_service.UniverseColumnSpec("filing_score", "double precision", "number", []),
+            },
+        ),
+        "news_features": universe_service.UniverseTableSpec(
+            name="news_features",
+            as_of_column="published_at",
+            as_of_kind="daily",
+            columns={
+                "published_at": universe_service.UniverseColumnSpec(
+                    "published_at",
+                    "timestamp with time zone",
+                    "datetime",
+                    [],
+                ),
+                "sentiment": universe_service.UniverseColumnSpec("sentiment", "double precision", "number", []),
+            },
+        ),
+    }
+    required = {
+        "market_data": {"close"},
+        "fundamentals_daily": {"metric"},
+        "filings_daily": {"filing_score"},
+        "news_features": {"sentiment"},
+    }
+
+    stable, dynamic = _split_slow_required_columns(table_specs, required, research_integrity_mode="strict")
+
+    assert stable == {"fundamentals_daily": {"metric"}}
+    assert dynamic == {"filings_daily": {"filing_score"}, "news_features": {"sentiment"}}
+
+
+def test_split_slow_required_columns_preserves_legacy_session_level_replay() -> None:
+    table_specs = {
+        "filings_daily": universe_service.UniverseTableSpec(
+            name="filings_daily",
+            as_of_column="as_of_date",
+            as_of_kind="daily",
+            columns={
+                "as_of_date": universe_service.UniverseColumnSpec("as_of_date", "date", "date", []),
+                "available_at": universe_service.UniverseColumnSpec(
+                    "available_at",
+                    "timestamp with time zone",
+                    "datetime",
+                    [],
+                ),
+                "filing_score": universe_service.UniverseColumnSpec("filing_score", "double precision", "number", []),
+            },
+        )
+    }
+
+    stable, dynamic = _split_slow_required_columns(
+        table_specs,
+        {"filings_daily": {"filing_score"}},
+        research_integrity_mode="legacy_replay",
+    )
+
+    assert stable == {"filings_daily": {"filing_score"}}
+    assert dynamic == {}
+
+
+def test_dynamic_slow_frames_are_loaded_by_current_bar_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    table_specs = {
+        "filings_daily": universe_service.UniverseTableSpec(
+            name="filings_daily",
+            as_of_column="as_of_date",
+            as_of_kind="daily",
+            columns={
+                "as_of_date": universe_service.UniverseColumnSpec("as_of_date", "date", "date", []),
+                "available_at": universe_service.UniverseColumnSpec(
+                    "available_at",
+                    "timestamp with time zone",
+                    "datetime",
+                    [],
+                ),
+                "filing_score": universe_service.UniverseColumnSpec("filing_score", "double precision", "number", []),
+            },
+        )
+    }
+    requested_as_of: list[datetime] = []
+
+    def _fake_load_slow_frames(*_args, as_of_ts: datetime, **_kwargs) -> dict[str, pd.DataFrame]:
+        requested_as_of.append(as_of_ts)
+        if as_of_ts < datetime(2026, 3, 3, 14, 37, tzinfo=timezone.utc):
+            return {"filings_daily": pd.DataFrame(columns=["as_of", "symbol", "filings_daily__filing_score"])}
+        return {
+            "filings_daily": pd.DataFrame(
+                [
+                    {
+                        "as_of": pd.Timestamp("2026-03-02"),
+                        "symbol": "AAPL",
+                        "filings_daily__filing_score": 0.88,
+                    }
+                ]
+            )
+        }
+
+    monkeypatch.setattr("core.backtest_runtime._load_slow_frames", _fake_load_slow_frames)
+    cache: dict[pd.Timestamp, list[pd.DataFrame]] = {}
+
+    early_frames = _prepared_dynamic_slow_frames_for_timestamp(
+        "postgresql://test",
+        table_specs=table_specs,
+        dynamic_required_columns={"filings_daily": {"filing_score"}},
+        as_of_ts=datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
+        bar_size="5m",
+        research_integrity_mode="strict",
+        cache=cache,
+    )
+    late_frames = _prepared_dynamic_slow_frames_for_timestamp(
+        "postgresql://test",
+        table_specs=table_specs,
+        dynamic_required_columns={"filings_daily": {"filing_score"}},
+        as_of_ts=datetime(2026, 3, 3, 14, 40, tzinfo=timezone.utc),
+        bar_size="5m",
+        research_integrity_mode="strict",
+        cache=cache,
+    )
+    cached_late_frames = _prepared_dynamic_slow_frames_for_timestamp(
+        "postgresql://test",
+        table_specs=table_specs,
+        dynamic_required_columns={"filings_daily": {"filing_score"}},
+        as_of_ts=datetime(2026, 3, 3, 14, 40, tzinfo=timezone.utc),
+        bar_size="5m",
+        research_integrity_mode="strict",
+        cache=cache,
+    )
+
+    assert requested_as_of == [
+        datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
+        datetime(2026, 3, 3, 14, 40, tzinfo=timezone.utc),
+    ]
+    assert early_frames == []
+    assert late_frames[0]["filings_daily__filing_score"].tolist() == [0.88]
+    assert cached_late_frames[0]["filings_daily__filing_score"].tolist() == [0.88]
+
+
+def test_strict_intraday_snapshot_does_not_see_slow_value_before_available_at() -> None:
+    early_snapshot = _snapshot_for_timestamp(
+        datetime(2026, 3, 3, 14, 35, tzinfo=timezone.utc),
+        prepared_slow_frames=[],
+    )
+    late_snapshot = _snapshot_for_timestamp(
+        datetime(2026, 3, 3, 14, 40, tzinfo=timezone.utc),
+        prepared_slow_frames=[
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "AAPL",
+                        "filings_daily__filing_score": 0.88,
+                    }
+                ]
+            )
+        ],
+    )
+
+    assert "filings_daily__filing_score" not in early_snapshot.columns
+    assert late_snapshot.loc[0, "filings_daily__filing_score"] == 0.88
 
 
 def test_validate_backtest_submission_rejects_intraday_coverage_gaps(monkeypatch: pytest.MonkeyPatch) -> None:

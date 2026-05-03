@@ -5,8 +5,8 @@ FROM python:3.14-slim-bookworm
 WORKDIR /app
 RUN addgroup --system app && adduser --system --ingroup app app
 
-ARG CONTRACTS_VERSION=3.15.0
-ARG RUNTIME_COMMON_VERSION=3.5.6
+ARG CONTRACTS_VERSION=3.15.1
+ARG RUNTIME_COMMON_VERSION=3.5.7
 
 COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
