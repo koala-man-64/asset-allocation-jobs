@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import sys
 from importlib.metadata import PackageNotFoundError, distribution
 from importlib.util import find_spec
 from pathlib import Path
 import tomllib
+
+from scripts.workflows.validate_shared_dependency_compatibility import validate_repo_shared_dependency_compatibility
 
 
 def repo_root() -> Path:
@@ -90,20 +93,8 @@ def test_python_dependency_manifests_stay_in_sync() -> None:
     assert f"asset-allocation-runtime-common=={shared['asset-allocation-runtime-common']}" in lockfile
 
 
-def test_project_dependency_pins_stay_compatible_with_installed_shared_packages() -> None:
-    project = project_dependencies()
-    mismatches: dict[str, dict[str, tuple[str, str]]] = {}
-
-    for package_name in ("asset-allocation-contracts", "asset-allocation-runtime-common"):
-        overlaps = {
-            name: (project[name], installed_version)
-            for name, installed_version in installed_exact_dependency_versions(package_name).items()
-            if name in project and project[name] != installed_version
-        }
-        if overlaps:
-            mismatches[package_name] = overlaps
-
-    assert mismatches == {}
+def test_project_dependency_pins_resolve_from_configured_package_index() -> None:
+    validate_repo_shared_dependency_compatibility(repo_root=repo_root(), python_exe=sys.executable)
 
 
 def test_runtime_common_backtest_persistence_contract_accepts_v7_data_quality_surface() -> None:

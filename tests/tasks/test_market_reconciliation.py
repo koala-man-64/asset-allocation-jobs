@@ -12,6 +12,8 @@ from tasks.common.market_reconciliation import (
     enforce_backfill_cutoff_on_bucket_tables,
     purge_orphan_rows_from_bucket_tables,
 )
+from tasks.common.market_refresh_scope import ReconciliationScope
+from tasks.market_data import gold_market_data, silver_market_data
 import tasks.common.market_reconciliation as reconciliation
 import pandas as pd
 
@@ -114,6 +116,53 @@ def test_purge_orphan_rows_from_bucket_tables_blocks_protected_symbol_delete() -
             delete_prefix=lambda _path: 0,
             protected_symbols=("^VIX", "^VIX3M"),
         )
+
+
+def test_silver_market_reconciliation_skips_global_purge_for_scoped_intraday(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(silver_market_data.mdc, "write_line", lambda message: calls.append(str(message)))
+    monkeypatch.setattr(
+        silver_market_data,
+        "purge_orphan_rows_from_bucket_tables",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("global purge must be skipped")),
+    )
+
+    orphan_count, deleted_blobs = silver_market_data._run_market_reconciliation(
+        bronze_blob_list=[],
+        scope=ReconciliationScope(
+            mode="scoped",
+            touched_symbols=frozenset({"AAPL"}),
+            touched_buckets=frozenset({"A"}),
+            protected_symbols=frozenset({"^VIX", "^VIX3M"}),
+        ),
+    )
+
+    assert (orphan_count, deleted_blobs) == (0, 0)
+    assert any("status=skipped reason=scoped_intraday" in message for message in calls)
+
+
+def test_gold_market_reconciliation_skips_global_purge_for_scoped_intraday(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(gold_market_data.mdc, "write_line", lambda message: calls.append(str(message)))
+    monkeypatch.setattr(
+        gold_market_data,
+        "_resolve_gold_market_reconciliation_clients",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("storage clients must not be resolved")),
+    )
+
+    orphan_count, deleted_blobs = gold_market_data._run_market_reconciliation(
+        silver_container="silver",
+        gold_container="gold",
+        scope=ReconciliationScope(
+            mode="scoped",
+            touched_symbols=frozenset({"AAPL"}),
+            touched_buckets=frozenset({"A"}),
+            protected_symbols=frozenset({"^VIX", "^VIX3M"}),
+        ),
+    )
+
+    assert (orphan_count, deleted_blobs) == (0, 0)
+    assert any("status=skipped reason=scoped_intraday" in message for message in calls)
 
 
 def test_collect_delta_silver_finance_symbols_reads_from_layer_index(monkeypatch) -> None:

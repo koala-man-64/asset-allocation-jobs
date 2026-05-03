@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from tasks.intraday_monitor import refresh_worker, worker
+from tasks.common.secret_redaction import redact_text
 from tasks.market_data import gold_market_data as gold
 from tasks.market_data import silver_market_data as silver
 
@@ -199,6 +200,263 @@ def test_intraday_refresh_worker_scopes_symbols_and_restores_debug_env(
     assert refresh_worker.main() == 0
     assert debug_values == ["AAPL,MSFT", "AAPL,MSFT", "AAPL,MSFT"]
     assert os.environ.get("DEBUG_SYMBOLS") == "SPY"
+    assert os.environ.get("MARKET_REFRESH_SCOPE_MODE") is None
+    assert os.environ.get("MARKET_REFRESH_SCOPE_SYMBOLS") is None
+
+
+def test_intraday_monitor_partial_claim_returns_nonzero_without_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str, dict | None]] = []
+
+    def _handle(method: str, path: str, json_body: dict | None):
+        requests.append((method, path, json_body))
+        if path == "/api/internal/intraday-monitor/claim":
+            return {
+                "run": {
+                    "runId": "run-1",
+                    "watchlistId": "watch-1",
+                    "status": "claimed",
+                    "symbolCount": 1,
+                },
+                "watchlist": None,
+                "claimToken": None,
+            }
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr(worker, "preflight_dependencies", lambda: None)
+    monkeypatch.setattr(worker.ControlPlaneTransport, "from_env", lambda: _FakeTransport(_handle))
+
+    assert worker.main() == 1
+    assert [path for _, path, _ in requests] == ["/api/internal/intraday-monitor/claim"]
+
+
+def test_intraday_refresh_partial_claim_returns_nonzero_without_complete_or_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str, dict | None]] = []
+
+    def _handle(method: str, path: str, json_body: dict | None):
+        requests.append((method, path, json_body))
+        if path == "/api/internal/intraday-refresh/claim":
+            return {
+                "batch": {
+                    "batchId": "batch-1",
+                    "runId": "run-1",
+                    "watchlistId": "watch-1",
+                    "domain": "market",
+                    "bucketLetter": "A",
+                    "status": "claimed",
+                    "symbols": ["AAPL"],
+                    "symbolCount": 1,
+                },
+                "claimToken": None,
+            }
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr(refresh_worker, "preflight_dependencies", lambda: None)
+    monkeypatch.setattr(refresh_worker.ControlPlaneTransport, "from_env", lambda: _FakeTransport(_handle))
+
+    assert refresh_worker.main() == 1
+    assert [path for _, path, _ in requests] == ["/api/internal/intraday-refresh/claim"]
+
+
+def test_intraday_refresh_rejects_unsupported_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[tuple[str, str, dict | None]] = []
+
+    def _handle(method: str, path: str, json_body: dict | None):
+        requests.append((method, path, json_body))
+        if path == "/api/internal/intraday-refresh/claim":
+            return {
+                "batch": {
+                    "batchId": "batch-1",
+                    "runId": "run-1",
+                    "watchlistId": "watch-1",
+                    "domain": "finance",
+                    "bucketLetter": "A",
+                    "status": "claimed",
+                    "symbols": ["AAPL"],
+                    "symbolCount": 1,
+                },
+                "claimToken": "claim-1",
+            }
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr(refresh_worker, "preflight_dependencies", lambda: None)
+    monkeypatch.setattr(refresh_worker.ControlPlaneTransport, "from_env", lambda: _FakeTransport(_handle))
+
+    assert refresh_worker.main() == 1
+    assert [path for _, path, _ in requests] == ["/api/internal/intraday-refresh/claim"]
+
+
+def test_intraday_monitor_complete_transport_failure_does_not_call_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    requests: list[tuple[str, str, dict | None]] = []
+
+    def _handle(method: str, path: str, json_body: dict | None):
+        requests.append((method, path, json_body))
+        if path == "/api/internal/intraday-monitor/claim":
+            return {
+                "run": {
+                    "runId": "run-1",
+                    "watchlistId": "watch-1",
+                    "status": "claimed",
+                    "forceRefresh": False,
+                    "symbolCount": 1,
+                },
+                "watchlist": {
+                    "watchlistId": "watch-1",
+                    "name": "Core",
+                    "symbolCount": 1,
+                    "pollIntervalMinutes": 5,
+                    "refreshCooldownMinutes": 15,
+                    "autoRefreshEnabled": True,
+                    "marketSession": "us_equities_regular",
+                    "symbols": ["AAPL"],
+                },
+                "currentSymbolStatuses": [],
+                "claimToken": "claim-1",
+            }
+        if path == "/api/internal/intraday-monitor/runs/run-1/complete":
+            raise TimeoutError("POST /complete?claimToken=secret-token timed out")
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr(worker, "preflight_dependencies", lambda: None)
+    monkeypatch.setattr(worker.ControlPlaneTransport, "from_env", lambda: _FakeTransport(_handle))
+    monkeypatch.setattr(
+        worker,
+        "_fetch_snapshot_rows",
+        lambda _symbols: {"AAPL": {"ticker": "AAPL", "last_trade": {"price": 1.0, "timestamp": now.isoformat()}}},
+    )
+
+    assert worker.main() == 1
+    assert "/api/internal/intraday-monitor/runs/run-1/fail" not in [path for _, path, _ in requests]
+
+
+def test_intraday_refresh_complete_transport_failure_does_not_call_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str, dict | None]] = []
+
+    def _handle(method: str, path: str, json_body: dict | None):
+        requests.append((method, path, json_body))
+        if path == "/api/internal/intraday-refresh/claim":
+            return {
+                "batch": {
+                    "batchId": "batch-1",
+                    "runId": "run-1",
+                    "watchlistId": "watch-1",
+                    "domain": "market",
+                    "bucketLetter": "A",
+                    "status": "claimed",
+                    "symbols": ["AAPL"],
+                    "symbolCount": 1,
+                },
+                "claimToken": "claim-1",
+            }
+        if path == "/api/internal/intraday-refresh/batches/batch-1/complete":
+            raise TimeoutError("POST /complete?claimToken=secret-token timed out")
+        raise AssertionError(f"Unexpected request: {method} {path}")
+
+    monkeypatch.setattr(refresh_worker, "preflight_dependencies", lambda: None)
+    monkeypatch.setattr(refresh_worker.ControlPlaneTransport, "from_env", lambda: _FakeTransport(_handle))
+    monkeypatch.setattr(refresh_worker, "_run_market_refresh_pipeline", lambda _symbols: None)
+
+    assert refresh_worker.main() == 1
+    assert "/api/internal/intraday-refresh/batches/batch-1/fail" not in [path for _, path, _ in requests]
+
+
+@pytest.mark.parametrize(
+    ("row", "issue"),
+    [
+        ({"ticker": "AAPL", "last_trade": {"price": 1.0}}, "missing_or_unparseable_timestamp"),
+        ({"ticker": "AAPL", "last_trade": {"price": 1.0, "timestamp": "not-a-date"}}, "missing_or_unparseable_timestamp"),
+        (
+            {
+                "ticker": "AAPL",
+                "last_trade": {
+                    "price": 1.0,
+                    "timestamp": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+                },
+            },
+            "stale_timestamp",
+        ),
+        (
+            {
+                "ticker": "AAPL",
+                "last_trade": {
+                    "price": 1.0,
+                    "timestamp": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                },
+            },
+            "future_timestamp",
+        ),
+    ],
+)
+def test_intraday_monitor_snapshot_timestamp_issues_fail_symbol_without_observed_at_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    row: dict,
+    issue: str,
+) -> None:
+    now = datetime.now(UTC)
+    run = worker.IntradayMonitorRunSummary(
+        runId="run-1",
+        watchlistId="watch-1",
+        status="claimed",
+        forceRefresh=False,
+        symbolCount=1,
+    )
+    watchlist = worker.IntradayWatchlistDetail(
+        watchlistId="watch-1",
+        name="Core",
+        symbolCount=1,
+        pollIntervalMinutes=5,
+        refreshCooldownMinutes=15,
+        autoRefreshEnabled=True,
+        marketSession="us_equities_regular",
+        symbols=["AAPL"],
+    )
+    current = worker.IntradaySymbolStatus(
+        watchlistId="watch-1",
+        symbol="AAPL",
+        monitorStatus="observed",
+        lastSnapshotAt=now - timedelta(minutes=30),
+        lastSuccessfulMarketRefreshAt=now - timedelta(hours=1),
+    )
+    monkeypatch.setattr(worker, "_fetch_snapshot_rows", lambda _symbols: {"AAPL": row})
+
+    statuses, events, refresh_symbols = worker._build_completion_payload(
+        run=run,
+        watchlist=watchlist,
+        current_statuses=[current],
+    )
+
+    assert statuses[0].monitorStatus == "failed"
+    assert statuses[0].lastSnapshotAt == current.lastSnapshotAt
+    assert issue in str(statuses[0].lastError)
+    assert refresh_symbols == ["AAPL"]
+    assert any(event.eventType == "snapshot_timestamp_invalid" for event in events)
+
+
+def test_redaction_removes_secrets_from_error_text() -> None:
+    raw = (
+        "postgresql://user:pass@example/db?sslmode=require "
+        "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=storage-key; "
+        "Bearer eyJsecret "
+        "https://example.test/path?api_key=provider-key&claimToken=claim-secret "
+        "client_secret=client-secret"
+    )
+
+    redacted = redact_text(raw)
+
+    assert "pass" not in redacted
+    assert "storage-key" not in redacted
+    assert "eyJsecret" not in redacted
+    assert "provider-key" not in redacted
+    assert "claim-secret" not in redacted
+    assert "client-secret" not in redacted
 
 
 def test_silver_merge_preserves_untouched_bucket_rows(monkeypatch: pytest.MonkeyPatch) -> None:

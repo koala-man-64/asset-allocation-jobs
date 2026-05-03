@@ -40,6 +40,10 @@ class BronzeAlpha26PublishSession:
     symbol_to_bucket: dict[str, str] = field(default_factory=dict)
     written_buckets: set[str] = field(default_factory=set)
     total_bytes: int = 0
+    scope_mode: str = "full_domain"
+    touched_buckets: set[str] = field(default_factory=set)
+    active_symbol_to_bucket: dict[str, str] = field(default_factory=dict)
+    active_bucket_paths: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _normalize_publish_args(
@@ -150,6 +154,10 @@ def start_alpha26_bronze_publish(
     job_name: str,
     run_id: str,
     metadata: Optional[Dict[str, Any]] = None,
+    scope_mode: str = "full_domain",
+    touched_buckets: Optional[Iterable[str]] = None,
+    active_symbol_to_bucket: Optional[Dict[str, str]] = None,
+    active_bucket_paths: Optional[Iterable[dict[str, Any]]] = None,
 ) -> BronzeAlpha26PublishSession:
     normalized_domain, normalized_root_prefix, normalized_run_id = _normalize_publish_args(
         domain=domain,
@@ -167,6 +175,18 @@ def start_alpha26_bronze_publish(
         metadata=dict(metadata or {}),
         bucket_columns=tuple(str(column) for column in bucket_columns),
         codec=bronze_bucketing.alpha26_codec(),
+        scope_mode=str(scope_mode or "full_domain").strip().lower(),
+        touched_buckets={
+            str(bucket or "").strip().upper()
+            for bucket in (touched_buckets or [])
+            if str(bucket or "").strip().upper() in bronze_bucketing.ALPHABET_BUCKETS
+        },
+        active_symbol_to_bucket={
+            str(symbol or "").strip().upper(): str(bucket or "").strip().upper()
+            for symbol, bucket in (active_symbol_to_bucket or {}).items()
+            if str(symbol or "").strip() and str(bucket or "").strip().upper() in bronze_bucketing.ALPHABET_BUCKETS
+        },
+        active_bucket_paths=[dict(entry) for entry in (active_bucket_paths or []) if isinstance(entry, dict)],
     )
     mdc.write_line(
         f"Bronze {normalized_domain} commit started: run_id={normalized_run_id} data_prefix={session.run_prefix}"
@@ -188,6 +208,14 @@ def write_alpha26_bronze_bucket(
         raise ValueError(f"Bucket already written for session: {clean_bucket}")
 
     prepared_frame = frame if isinstance(frame, pd.DataFrame) and not frame.empty else pd.DataFrame(columns=list(session.bucket_columns))
+    if session.scope_mode == "intraday" and session.touched_buckets and clean_bucket not in session.touched_buckets:
+        session.written_buckets.add(clean_bucket)
+        mdc.write_line(
+            f"Bronze {session.domain} bucket write skipped for scoped run: "
+            f"run_id={session.run_id} bucket={clean_bucket} reason=untouched_bucket"
+        )
+        return {"bucket": clean_bucket, "name": None, "size": 0, "skipped": True}
+
     payload = prepared_frame.to_parquet(index=False, compression=session.codec)
     path = bronze_bucketing.bucket_blob_path(session.run_prefix, clean_bucket)
     mdc.write_line(
@@ -230,21 +258,59 @@ def write_alpha26_bronze_bucket(
     return entry
 
 
+def _active_bucket_entries_by_bucket(session: BronzeAlpha26PublishSession) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for entry in session.active_bucket_paths:
+        name = str(entry.get("name") or "").strip()
+        bucket = bronze_bucketing.parse_bucket_from_blob_name(name)
+        if bucket:
+            out[bucket] = dict(entry)
+    return out
+
+
+def _manifest_bucket_paths(session: BronzeAlpha26PublishSession) -> list[dict[str, Any]]:
+    if session.scope_mode != "intraday":
+        return list(session.bucket_paths)
+
+    by_bucket = _active_bucket_entries_by_bucket(session)
+    for entry in session.bucket_paths:
+        bucket = str(entry.get("bucket") or "").strip().upper()
+        if bucket:
+            by_bucket[bucket] = dict(entry)
+    return [by_bucket[bucket] for bucket in bronze_bucketing.ALPHABET_BUCKETS if bucket in by_bucket]
+
+
+def _effective_symbol_to_bucket(session: BronzeAlpha26PublishSession) -> dict[str, str]:
+    if session.scope_mode != "intraday":
+        return dict(session.symbol_to_bucket)
+    if not session.active_symbol_to_bucket:
+        raise RuntimeError(
+            f"Bronze {session.domain} scoped publish blocked: prior active symbol index is missing."
+        )
+    merged = dict(session.active_symbol_to_bucket)
+    merged.update(session.symbol_to_bucket)
+    return merged
+
+
 def finalize_alpha26_bronze_publish(session: BronzeAlpha26PublishSession) -> PublishResult:
+    effective_symbol_to_bucket = _effective_symbol_to_bucket(session)
+    manifest_bucket_paths = _manifest_bucket_paths(session)
     index_path = bronze_bucketing.write_symbol_index(
         domain=session.domain,
-        symbol_to_bucket=session.symbol_to_bucket,
+        symbol_to_bucket=effective_symbol_to_bucket,
     )
     aggregate_summary = domain_artifacts.aggregate_summaries(
         session.bucket_summaries,
-        symbol_count_override=len(session.symbol_to_bucket),
+        symbol_count_override=len(effective_symbol_to_bucket),
         date_column=session.date_column,
     )
     manifest_metadata = {
         **dict(session.metadata or {}),
         **aggregate_summary,
-        "fileCount": len(session.bucket_paths),
+        "fileCount": len(manifest_bucket_paths),
         "totalBytes": session.total_bytes,
+        "scopeMode": session.scope_mode,
+        "touchedBuckets": sorted(session.touched_buckets),
     }
     finance_subfolder_counts = _aggregate_finance_subdomains(session.bucket_summaries)
     if finance_subfolder_counts:
@@ -254,7 +320,7 @@ def finalize_alpha26_bronze_publish(session: BronzeAlpha26PublishSession) -> Pub
         domain=session.domain,
         producer_job_name=session.job_name,
         data_prefix=session.run_prefix,
-        bucket_paths=session.bucket_paths,
+        bucket_paths=manifest_bucket_paths,
         index_path=index_path,
         metadata=manifest_metadata,
         run_id=session.run_id,
@@ -285,7 +351,7 @@ def finalize_alpha26_bronze_publish(session: BronzeAlpha26PublishSession) -> Pub
         domain=session.domain,
         date_column=session.date_column,
         client=session.storage_client,
-        symbol_count_override=len(session.symbol_to_bucket),
+        symbol_count_override=len(effective_symbol_to_bucket),
         symbol_index_path=index_path,
         job_name=session.job_name,
         job_run_id=session.run_id,
@@ -293,7 +359,7 @@ def finalize_alpha26_bronze_publish(session: BronzeAlpha26PublishSession) -> Pub
         manifest_path=manifest_path,
         active_data_prefix=session.run_prefix,
         total_bytes_override=session.total_bytes,
-        file_count_override=len(session.bucket_paths),
+        file_count_override=len(manifest_bucket_paths),
     )
     mdc.write_line(
         "Bronze {domain} commit completed: run_id={run_id} data_prefix={prefix} manifest_path={manifest_path} "
@@ -302,19 +368,19 @@ def finalize_alpha26_bronze_publish(session: BronzeAlpha26PublishSession) -> Pub
             run_id=session.run_id,
             prefix=session.run_prefix,
             manifest_path=manifest_path or "n/a",
-            written_symbols=len(session.symbol_to_bucket),
+            written_symbols=len(effective_symbol_to_bucket),
             index_path=index_path or "n/a",
         )
     )
     return PublishResult(
         run_id=session.run_id,
         data_prefix=session.run_prefix,
-        bucket_paths=session.bucket_paths,
+        bucket_paths=manifest_bucket_paths,
         index_path=index_path,
         manifest_path=manifest_path,
-        written_symbols=len(session.symbol_to_bucket),
+        written_symbols=len(effective_symbol_to_bucket),
         total_bytes=session.total_bytes,
-        file_count=len(session.bucket_paths),
+        file_count=len(manifest_bucket_paths),
     )
 
 
@@ -330,6 +396,10 @@ def publish_alpha26_bronze_domain(
     job_name: str,
     run_id: str,
     metadata: Optional[Dict[str, Any]] = None,
+    scope_mode: str = "full_domain",
+    touched_buckets: Optional[Iterable[str]] = None,
+    active_symbol_to_bucket: Optional[Dict[str, str]] = None,
+    active_bucket_paths: Optional[Iterable[dict[str, Any]]] = None,
 ) -> PublishResult:
     prepared_frames = _normalize_bucket_frames(bucket_frames=bucket_frames, bucket_columns=bucket_columns)
     session = start_alpha26_bronze_publish(
@@ -341,6 +411,10 @@ def publish_alpha26_bronze_domain(
         job_name=job_name,
         run_id=run_id,
         metadata=metadata,
+        scope_mode=scope_mode,
+        touched_buckets=touched_buckets,
+        active_symbol_to_bucket=active_symbol_to_bucket,
+        active_bucket_paths=active_bucket_paths,
     )
     for bucket in bronze_bucketing.ALPHABET_BUCKETS:
         bucket_symbol_map = {

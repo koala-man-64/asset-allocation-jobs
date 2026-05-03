@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from monitoring import system_health
+from monitoring.system_health_modules.job_queries import INTRADAY_MANAGED_JOB_METRIC_QUERIES
 
 
 class _DummyStore:
@@ -221,3 +222,21 @@ def test_resolve_domain_schedule_defaults_to_manual_trigger_when_metadata_missin
     )
     assert cron == ""
     assert frequency == "Manual trigger"
+
+
+def test_intraday_managed_job_metric_queries_cover_required_operational_views() -> None:
+    expected = {
+        "claim_outcomes",
+        "completion_unknown",
+        "refresh_duration_p50_p95",
+        "stage_durations",
+        "oldest_claim_age",
+        "payload_p95",
+        "lock_conflicts",
+    }
+
+    assert expected.issubset(INTRADAY_MANAGED_JOB_METRIC_QUERIES)
+    joined = "\n".join(INTRADAY_MANAGED_JOB_METRIC_QUERIES.values())
+    assert "intraday_monitor_metric" in joined
+    assert "intraday_refresh_metric" in joined
+    assert "completion_unknown" in joined

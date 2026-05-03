@@ -34,3 +34,15 @@ def test_sqlalchemy_present_and_consistent_across_runtime_manifests() -> None:
 def test_sqlalchemy_declared_in_pyproject_runtime_dependencies() -> None:
     text = PYPROJECT.read_text(encoding="utf-8").lower()
     assert '"sqlalchemy==' in text, "pyproject runtime dependencies must include pinned sqlalchemy"
+
+
+def test_shared_package_pins_match_intraday_remediation_compatibility_set() -> None:
+    expected = {
+        "asset-allocation-contracts": "3.15.2",
+        "asset-allocation-runtime-common": "3.5.7",
+    }
+
+    for package_name, expected_version in expected.items():
+        assert _get_pinned_version(REQUIREMENTS, package_name) == expected_version
+        assert _get_pinned_version(REQUIREMENTS_LOCK, package_name) == expected_version
+        assert f'"{package_name}=={expected_version}"' in PYPROJECT.read_text(encoding="utf-8")

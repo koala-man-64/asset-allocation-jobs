@@ -44,10 +44,22 @@ properties:
         value: ${JOB_STARTUP_API_CONTAINER_APPS}
       - name: AZURE_CLIENT_ID
         value: ${ACR_PULL_IDENTITY_CLIENT_ID}
+      - name: AZURE_STORAGE_ACCOUNT_NAME
+        value: ${AZURE_STORAGE_ACCOUNT_NAME}
+      - name: AZURE_CONTAINER_COMMON
+        value: ${AZURE_CONTAINER_COMMON}
+      - name: SYSTEM_HEALTH_ARM_SUBSCRIPTION_ID
+        value: ${AZURE_SUBSCRIPTION_ID}
+      - name: SYSTEM_HEALTH_ARM_RESOURCE_GROUP
+        value: ${RESOURCE_GROUP}
       - name: ASSET_ALLOCATION_API_BASE_URL
         value: ${ASSET_ALLOCATION_API_BASE_URL}
       - name: ASSET_ALLOCATION_API_SCOPE
         value: ${ASSET_ALLOCATION_API_SCOPE}
+      - name: MASSIVE_TIMEOUT_SECONDS
+        value: "60"
+      - name: INTRADAY_SNAPSHOT_MAX_AGE_SECONDS
+        value: "900"
       - name: POSTGRES_DSN
         secretRef: pg-dsn
       image: ${JOB_IMAGE}

@@ -247,6 +247,50 @@ def test_intraday_refresh_manifest_keeps_market_refresh_in_process() -> None:
     assert "TRIGGER_NEXT_JOB_NAME" not in text
 
 
+def test_intraday_monitor_manifest_has_lock_storage_and_arm_wake_parity() -> None:
+    text = (repo_root() / "deploy" / "job_intraday_monitor.yaml").read_text(encoding="utf-8")
+    for required in (
+        "name: AZURE_STORAGE_ACCOUNT_NAME",
+        "value: ${AZURE_STORAGE_ACCOUNT_NAME}",
+        "name: AZURE_CONTAINER_COMMON",
+        "value: ${AZURE_CONTAINER_COMMON}",
+        "name: SYSTEM_HEALTH_ARM_SUBSCRIPTION_ID",
+        "value: ${AZURE_SUBSCRIPTION_ID}",
+        "name: SYSTEM_HEALTH_ARM_RESOURCE_GROUP",
+        "value: ${RESOURCE_GROUP}",
+        "name: MASSIVE_TIMEOUT_SECONDS",
+        'value: "60"',
+        "name: INTRADAY_SNAPSHOT_MAX_AGE_SECONDS",
+        'value: "900"',
+    ):
+        assert required in text
+
+
+def test_job_start_rbac_uses_least_privilege_starter_role() -> None:
+    text = (repo_root() / "scripts" / "ensure_job_start_rbac.ps1").read_text(encoding="utf-8")
+    assert "--role \"Contributor\"" not in text
+    assert "roleDefinitionName=='Contributor'" not in text
+    assert "Microsoft.App/containerApps/start/action" in text
+    assert "Microsoft.App/jobs/start/action" in text
+    assert "Microsoft.App/containerApps/read" in text
+    assert "Microsoft.App/jobs/read" in text
+
+
+def test_fast_quality_gate_includes_intraday_remediation_suite() -> None:
+    text = (repo_root() / "scripts" / "run_quality_gate.py").read_text(encoding="utf-8")
+    assert "INTRADAY_REMEDIATION_TESTS" in text
+    for path in (
+        "tests/tasks/test_intraday_monitor_workers.py",
+        "tests/tasks/test_market_reconciliation.py",
+        "tests/tasks/test_blob_freshness.py",
+        "tests/monitoring/test_system_health_staleness.py",
+        "tests/test_workflow_runtime_ownership.py",
+        "tests/test_env_contract.py",
+        "tests/tools/test_python_runtime_dependency_manifests.py",
+    ):
+        assert path in text
+
+
 def test_market_job_manifests_use_contract_storage_account_variable() -> None:
     deploy_dir = repo_root() / "deploy"
     for manifest_name in MARKET_PIPELINE_JOB_MANIFESTS:

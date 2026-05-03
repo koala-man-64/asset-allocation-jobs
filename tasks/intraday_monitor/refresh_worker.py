@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
+import time
 from contextlib import contextmanager
+from datetime import UTC, datetime
+from typing import Callable
 
 from asset_allocation_runtime_common.control_plane_transport import ControlPlaneTransport
 from asset_allocation_runtime_common.shared_core import config as runtime_config
 
+from tasks.common.intraday_runtime import market_layer_lock, require_intraday_lock_prerequisites
 from tasks.common.intraday_contracts_compat import (
     IntradayRefreshClaimRequest,
     IntradayRefreshClaimResponse,
     IntradayRefreshCompleteRequest,
     IntradayRefreshFailRequest,
 )
+from tasks.common.market_refresh_scope import (
+    SCOPE_MODE_ENV,
+    SCOPE_SYMBOLS_ENV,
+    normalize_scope_symbols,
+)
+from tasks.common.secret_redaction import safe_exception_message
 from tasks.market_data import bronze_market_data, silver_market_data, gold_market_data
 
 logger = logging.getLogger("asset-allocation.tasks.intraday-refresh")
@@ -35,22 +46,32 @@ def _log_lifecycle(phase: str, **fields: object) -> None:
     logger.info("intraday_refresh_event %s", " ".join(parts))
 
 
-def _normalize_symbols(symbols: list[str]) -> list[str]:
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for raw_symbol in symbols:
-        symbol = str(raw_symbol or "").strip().upper()
-        if not symbol or symbol in seen:
+def _log_metric(phase: str, **fields: object) -> None:
+    parts = [f"phase={phase}"]
+    for key, value in fields.items():
+        if value is None:
             continue
-        seen.add(symbol)
-        normalized.append(symbol)
-    return normalized
+        text = str(value).strip()
+        if not text:
+            continue
+        parts.append(f"{key}={text}")
+    logger.info("intraday_refresh_metric %s", " ".join(parts))
+
+
+def _age_seconds(value: datetime | None, *, now: datetime | None = None) -> int | None:
+    if value is None:
+        return None
+    observed = now or datetime.now(UTC)
+    timestamp = value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return max(0, int((observed - timestamp).total_seconds()))
 
 
 @contextmanager
-def _scoped_debug_symbols(symbols: list[str]):
-    normalized = _normalize_symbols(symbols)
+def _scoped_market_refresh_symbols(symbols: list[str]):
+    normalized = list(normalize_scope_symbols(symbols))
     prior_env = os.environ.get("DEBUG_SYMBOLS")
+    prior_scope_mode = os.environ.get(SCOPE_MODE_ENV)
+    prior_scope_symbols = os.environ.get(SCOPE_SYMBOLS_ENV)
     had_runtime_symbols = "DEBUG_SYMBOLS" in runtime_config.__dict__
     prior_runtime_symbols = list(getattr(runtime_config, "DEBUG_SYMBOLS", []) or [])
     prior_settings_symbols = list(getattr(runtime_config.settings, "DEBUG_SYMBOLS", []) or [])
@@ -60,6 +81,8 @@ def _scoped_debug_symbols(symbols: list[str]):
     prior_bronze_symbols = list(getattr(bronze_market_data.cfg, "DEBUG_SYMBOLS", []) or [])
 
     scoped_value = ",".join(normalized)
+    os.environ[SCOPE_MODE_ENV] = "intraday"
+    os.environ[SCOPE_SYMBOLS_ENV] = scoped_value
     os.environ["DEBUG_SYMBOLS"] = scoped_value
     runtime_config.settings.DEBUG_SYMBOLS = list(normalized)
     runtime_config.DEBUG_SYMBOLS = list(normalized)
@@ -68,6 +91,14 @@ def _scoped_debug_symbols(symbols: list[str]):
     try:
         yield normalized
     finally:
+        if prior_scope_mode is None:
+            os.environ.pop(SCOPE_MODE_ENV, None)
+        else:
+            os.environ[SCOPE_MODE_ENV] = prior_scope_mode
+        if prior_scope_symbols is None:
+            os.environ.pop(SCOPE_SYMBOLS_ENV, None)
+        else:
+            os.environ[SCOPE_SYMBOLS_ENV] = prior_scope_symbols
         if prior_env is None:
             os.environ.pop("DEBUG_SYMBOLS", None)
         else:
@@ -87,6 +118,9 @@ def _scoped_debug_symbols(symbols: list[str]):
             silver_market_data.cfg.__dict__.pop("DEBUG_SYMBOLS", None)
 
 
+_scoped_debug_symbols = _scoped_market_refresh_symbols
+
+
 def preflight_dependencies() -> None:
     transport = ControlPlaneTransport.from_env()
     try:
@@ -95,17 +129,55 @@ def preflight_dependencies() -> None:
         transport.close()
 
 
+def _validate_refresh_claim(claim: IntradayRefreshClaimResponse):
+    if claim.batch is None and claim.claimToken is None:
+        return None
+    if claim.batch is None or claim.claimToken is None:
+        raise ValueError("Malformed intraday refresh claim: batch and claimToken must both be present.")
+
+    batch = claim.batch
+    domain = str(getattr(batch, "domain", "") or "").strip().lower()
+    if domain != "market":
+        raise ValueError(f"Unsupported intraday refresh domain: {domain or 'missing'}.")
+    if str(getattr(batch, "status", "") or "").strip().lower() != "claimed":
+        raise ValueError(f"Malformed intraday refresh claim: batch status must be claimed for {batch.batchId}.")
+
+    symbols = list(normalize_scope_symbols(list(batch.symbols)))
+    if not symbols:
+        raise ValueError(f"Malformed intraday refresh claim: batch {batch.batchId} contains no symbols.")
+    if int(batch.symbolCount or 0) != len(symbols):
+        raise ValueError(
+            f"Malformed intraday refresh claim: batch {batch.batchId} symbolCount={batch.symbolCount} "
+            f"does not match unique symbols={len(symbols)}."
+        )
+
+    bucket = str(batch.bucketLetter or "").strip().upper()
+    if len(bucket) != 1:
+        raise ValueError(f"Malformed intraday refresh claim: batch {batch.batchId} bucketLetter is invalid.")
+    return batch, str(claim.claimToken), symbols
+
+
+def _run_stage(stage: str, run: Callable[[], int]) -> None:
+    started = time.perf_counter()
+    with market_layer_lock(stage) as lock_outcome:
+        exit_code = run()
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    _log_metric(
+        "stage",
+        stage=stage,
+        duration_ms=duration_ms,
+        exit_code=exit_code,
+        lock_outcome=lock_outcome,
+    )
+    if exit_code != 0:
+        raise RuntimeError(f"{stage.title()} market refresh failed with exit code {exit_code}.")
+
+
 def _run_market_refresh_pipeline(symbols: list[str]) -> None:
-    with _scoped_debug_symbols(symbols):
-        bronze_exit = bronze_market_data.main()
-        if bronze_exit != 0:
-            raise RuntimeError(f"Bronze market refresh failed with exit code {bronze_exit}.")
-        silver_exit = silver_market_data.main()
-        if silver_exit != 0:
-            raise RuntimeError(f"Silver market refresh failed with exit code {silver_exit}.")
-        gold_exit = gold_market_data.main()
-        if gold_exit != 0:
-            raise RuntimeError(f"Gold market refresh failed with exit code {gold_exit}.")
+    with _scoped_market_refresh_symbols(symbols):
+        _run_stage("bronze", bronze_market_data.main)
+        _run_stage("silver", silver_market_data.main)
+        _run_stage("gold", gold_market_data.main)
 
 
 def main() -> int:
@@ -117,57 +189,104 @@ def main() -> int:
         return 1
 
     with ControlPlaneTransport.from_env() as transport:
-        claim = IntradayRefreshClaimResponse.model_validate(
-            transport.request_json(
-                "POST",
-                "/api/internal/intraday-refresh/claim",
-                json_body=IntradayRefreshClaimRequest(executionName=execution_name).model_dump(
-                    mode="json",
-                    exclude_none=True,
-                ),
+        try:
+            claim = IntradayRefreshClaimResponse.model_validate(
+                transport.request_json(
+                    "POST",
+                    "/api/internal/intraday-refresh/claim",
+                    json_body=IntradayRefreshClaimRequest(executionName=execution_name).model_dump(
+                        mode="json",
+                        exclude_none=True,
+                    ),
+                )
             )
-        )
-        if claim.batch is None or not claim.claimToken:
+        except Exception as exc:
+            logger.error("Intraday refresh claim failed: %s", safe_exception_message(exc, phase="claim"))
+            _log_metric("claim", status="failed", error_type=type(exc).__name__)
+            return 1
+        try:
+            active_claim = _validate_refresh_claim(claim)
+        except Exception as exc:
+            logger.error("Malformed intraday refresh claim: %s", safe_exception_message(exc, phase="claim"))
+            _log_metric("claim", status="malformed", error_type=type(exc).__name__)
+            return 1
+
+        if active_claim is None:
             logger.info("No queued intraday refresh batches found.")
+            _log_metric("claim", status="no_work")
             return 0
 
-        batch = claim.batch
+        batch, claim_token, symbols = active_claim
         _log_lifecycle(
             "claim",
             batch_id=batch.batchId,
             watchlist_id=batch.watchlistId,
             bucket=batch.bucketLetter,
-            symbol_count=len(batch.symbols),
+            symbol_count=len(symbols),
             execution_name=execution_name,
+        )
+        _log_metric(
+            "claim",
+            status="claimed",
+            symbol_count=len(symbols),
+            batch_age_seconds=_age_seconds(batch.createdAt),
         )
 
         try:
-            _run_market_refresh_pipeline(list(batch.symbols))
-            transport.request_json(
-                "POST",
-                f"/api/internal/intraday-refresh/batches/{batch.batchId}/complete",
-                json_body=IntradayRefreshCompleteRequest(claimToken=claim.claimToken).model_dump(mode="json"),
+            pipeline_started = time.perf_counter()
+            _run_market_refresh_pipeline(symbols)
+            _log_metric(
+                "pipeline",
+                status="ok",
+                duration_ms=int((time.perf_counter() - pipeline_started) * 1000),
+                symbol_count=len(symbols),
             )
-            _log_lifecycle(
-                "complete",
-                batch_id=batch.batchId,
-                watchlist_id=batch.watchlistId,
-                symbol_count=len(batch.symbols),
-            )
-            return 0
         except Exception as exc:
-            logger.exception("Intraday refresh batch failed: batch_id=%s", batch.batchId)
+            error = safe_exception_message(exc, phase="pipeline")
+            logger.error("Intraday refresh batch failed: batch_id=%s error=%s", batch.batchId, error)
             try:
                 transport.request_json(
                     "POST",
                     f"/api/internal/intraday-refresh/batches/{batch.batchId}/fail",
                     json_body=IntradayRefreshFailRequest(
-                        claimToken=claim.claimToken,
-                        error=str(exc),
+                        claimToken=claim_token,
+                        error=error,
                     ).model_dump(mode="json"),
                 )
-            except Exception:
-                logger.exception("Intraday refresh failure reporting failed: batch_id=%s", batch.batchId)
+            except Exception as fail_exc:
+                logger.error(
+                    "Intraday refresh failure reporting failed: batch_id=%s error=%s",
+                    batch.batchId,
+                    safe_exception_message(fail_exc, phase="fail_report"),
+                )
+            _log_metric("pipeline", status="failed", error_type=type(exc).__name__, symbol_count=len(symbols))
+            return 1
+
+        try:
+            complete_payload = IntradayRefreshCompleteRequest(claimToken=claim_token)
+            complete_body = complete_payload.model_dump(mode="json")
+            payload_bytes = len(json.dumps(complete_body, separators=(",", ":")).encode("utf-8"))
+            transport.request_json(
+                "POST",
+                f"/api/internal/intraday-refresh/batches/{batch.batchId}/complete",
+                json_body=complete_body,
+            )
+            _log_lifecycle(
+                "complete",
+                batch_id=batch.batchId,
+                watchlist_id=batch.watchlistId,
+                symbol_count=len(symbols),
+            )
+            _log_metric("complete", status="ok", symbol_count=len(symbols), payload_bytes=payload_bytes)
+            return 0
+        except Exception as exc:
+            logger.error(
+                "Intraday refresh completion status unknown: batch_id=%s error=%s",
+                batch.batchId,
+                safe_exception_message(exc, phase="complete"),
+            )
+            _log_lifecycle("completion_unknown", batch_id=batch.batchId, error_type=type(exc).__name__)
+            _log_metric("complete", status="unknown", error_type=type(exc).__name__, symbol_count=len(symbols))
             return 1
 
 
@@ -177,6 +296,7 @@ if __name__ == "__main__":
     from asset_allocation_runtime_common.market_data import core as mdc
 
     job_name = "intraday-market-refresh-job"
+    require_intraday_lock_prerequisites(job_name)
     with mdc.JobLock(job_name, conflict_policy="fail"):
         ensure_api_awake_from_env(required=True)
         raise SystemExit(

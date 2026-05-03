@@ -13,7 +13,7 @@ function Write-Usage {
 Usage: ensure_job_start_rbac.ps1 [-ResourceGroup <rg>] [-JobName <job>] [-SubscriptionId <sub>] [-EnvFile <path>]
 
 Ensures Container App Job identities can start downstream jobs and wake
-container apps by granting Contributor at the resource group scope.
+container apps by assigning a least-privilege starter role at the resource group scope.
 "@
 }
 
@@ -137,8 +137,61 @@ if ($jobNames.Count -eq 0) {
 }
 
 $rgScope = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroup"
+$starterRoleName = "Asset Allocation Container App Starter"
+$starterRoleActions = @(
+  "Microsoft.App/containerApps/read",
+  "Microsoft.App/containerApps/start/action",
+  "Microsoft.App/jobs/read",
+  "Microsoft.App/jobs/start/action",
+  "Microsoft.App/managedEnvironments/read",
+  "Microsoft.Resources/subscriptions/resourceGroups/read"
+)
+
+function Ensure-StarterRoleDefinition {
+  param(
+    [string]$RoleName,
+    [string]$Scope,
+    [string[]]$Actions
+  )
+
+  $existingRoleId = ""
+  try {
+    $existingRoleId = (az role definition list --name $RoleName --query "[0].id" -o tsv --only-show-errors) -replace "`r", ""
+  } catch {
+    $existingRoleId = ""
+  }
+  if (-not [string]::IsNullOrWhiteSpace($existingRoleId) -and $existingRoleId -ne "None") {
+    return
+  }
+
+  $roleDefinition = [ordered]@{
+    Name = $RoleName
+    IsCustom = $true
+    Description = "Start and read Asset Allocation Container Apps and Container App Jobs."
+    Actions = $Actions
+    NotActions = @()
+    DataActions = @()
+    NotDataActions = @()
+    AssignableScopes = @($Scope)
+  }
+  $tempPath = [System.IO.Path]::GetTempFileName()
+  try {
+    $roleDefinition | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tempPath -Encoding UTF8
+    az role definition create --role-definition $tempPath --only-show-errors 1>$null
+    Write-Host "Created custom starter role '$RoleName' scoped to $Scope."
+  } finally {
+    Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+  }
+}
 
 $failed = 0
+
+try {
+  Ensure-StarterRoleDefinition -RoleName $starterRoleName -Scope $rgScope -Actions $starterRoleActions
+} catch {
+  Write-Error "Failed to ensure starter role definition '$starterRoleName': $($_.Exception.Message)"
+  exit 1
+}
 
 foreach ($job in $jobNames) {
   $jobName = $job.ToString().Trim()
@@ -169,7 +222,7 @@ foreach ($job in $jobNames) {
 
   $existing = "0"
   try {
-    $existing = (az role assignment list --assignee-object-id $principalId --scope $rgScope --query "[?roleDefinitionName=='Contributor'] | length(@)" -o tsv --only-show-errors) -replace "`r", ""
+    $existing = (az role assignment list --assignee-object-id $principalId --scope $rgScope --query "[?roleDefinitionName=='$starterRoleName'] | length(@)" -o tsv --only-show-errors) -replace "`r", ""
     if ([string]::IsNullOrWhiteSpace($existing)) { $existing = "0" }
   } catch {
     $existing = "0"
@@ -180,16 +233,16 @@ foreach ($job in $jobNames) {
       az role assignment create `
         --assignee-object-id $principalId `
         --assignee-principal-type ServicePrincipal `
-        --role "Contributor" `
+        --role $starterRoleName `
         --scope $rgScope `
         --only-show-errors 1>$null
-      Write-Host "Granted Contributor at RG scope to $jobName identity ($principalId)."
+      Write-Host "Granted $starterRoleName at RG scope to $jobName identity ($principalId)."
     } catch {
-      Write-Warning "Failed to grant Contributor at RG scope for $jobName ($principalId): $($_.Exception.Message)"
+      Write-Warning "Failed to grant $starterRoleName at RG scope for $jobName ($principalId): $($_.Exception.Message)"
       $failed += 1
     }
   } else {
-    Write-Host "Contributor already present at RG scope for $jobName identity ($principalId)."
+    Write-Host "$starterRoleName already present at RG scope for $jobName identity ($principalId)."
   }
 }
 

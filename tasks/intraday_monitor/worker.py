@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
+import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -18,11 +21,22 @@ from tasks.common.intraday_contracts_compat import (
     IntradaySymbolStatus,
     IntradayWatchlistDetail,
 )
+from tasks.common.intraday_runtime import require_intraday_lock_prerequisites
+from tasks.common.secret_redaction import safe_exception_message
 
 logger = logging.getLogger("asset-allocation.tasks.intraday-monitor")
 
 _SNAPSHOT_BATCH_SIZE = 250
 _SNAPSHOT_ASSET_TYPE = "stocks"
+_SNAPSHOT_MAX_AGE_ENV = "INTRADAY_SNAPSHOT_MAX_AGE_SECONDS"
+_DEFAULT_SNAPSHOT_MAX_AGE_SECONDS = 900
+_SNAPSHOT_FUTURE_SKEW_SECONDS = 60
+
+
+@dataclass(frozen=True)
+class SnapshotObservation:
+    timestamp: datetime | None
+    price: float | None
 
 
 def _execution_name() -> str | None:
@@ -40,6 +54,26 @@ def _log_lifecycle(phase: str, **fields: object) -> None:
             continue
         parts.append(f"{key}={text}")
     logger.info("intraday_monitor_event %s", " ".join(parts))
+
+
+def _log_metric(phase: str, **fields: object) -> None:
+    parts = [f"phase={phase}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        parts.append(f"{key}={text}")
+    logger.info("intraday_monitor_metric %s", " ".join(parts))
+
+
+def _age_seconds(value: datetime | None, *, now: datetime | None = None) -> int | None:
+    if value is None:
+        return None
+    observed = now or datetime.now(UTC)
+    timestamp = value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return max(0, int((observed - timestamp).total_seconds()))
 
 
 def _safe_close(client: object) -> None:
@@ -136,7 +170,7 @@ def _extract_snapshot_observation(
     payload: dict[str, Any],
     *,
     observed_at: datetime,
-) -> tuple[datetime, float | None]:
+) -> SnapshotObservation:
     candidate_blocks: list[dict[str, Any]] = []
     for key in ("last_trade", "lastTrade", "session", "day", "daily_bar", "bar"):
         nested = payload.get(key)
@@ -157,7 +191,31 @@ def _extract_snapshot_observation(
         if price is not None and timestamp is not None:
             break
 
-    return timestamp or observed_at, price
+    return SnapshotObservation(timestamp=timestamp, price=price)
+
+
+def _snapshot_max_age_seconds() -> int:
+    raw = str(os.environ.get(_SNAPSHOT_MAX_AGE_ENV) or "").strip()
+    if not raw:
+        return _DEFAULT_SNAPSHOT_MAX_AGE_SECONDS
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{_SNAPSHOT_MAX_AGE_ENV} must be an integer number of seconds.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{_SNAPSHOT_MAX_AGE_ENV} must be greater than zero.")
+    return parsed
+
+
+def _snapshot_timestamp_issue(timestamp: datetime | None, *, observed_at: datetime) -> str | None:
+    if timestamp is None:
+        return "missing_or_unparseable_timestamp"
+    normalized = timestamp.astimezone(UTC) if timestamp.tzinfo is not None else timestamp.replace(tzinfo=UTC)
+    if normalized > observed_at + timedelta(seconds=_SNAPSHOT_FUTURE_SKEW_SECONDS):
+        return "future_timestamp"
+    if normalized < observed_at - timedelta(seconds=_snapshot_max_age_seconds()):
+        return "stale_timestamp"
+    return None
 
 
 def _fetch_snapshot_rows(symbols: list[str]) -> dict[str, dict[str, Any]]:
@@ -203,7 +261,14 @@ def _build_completion_payload(
 ) -> tuple[list[IntradaySymbolStatus], list[IntradayMonitorEvent], list[str]]:
     observed_at = datetime.now(UTC)
     current_status_by_symbol = {item.symbol: item for item in current_statuses}
+    fetch_started = time.perf_counter()
     snapshot_rows = _fetch_snapshot_rows(list(watchlist.symbols))
+    _log_metric(
+        "snapshot_fetch",
+        duration_ms=int((time.perf_counter() - fetch_started) * 1000),
+        requested_symbols=len(watchlist.symbols),
+        returned_symbols=len(snapshot_rows),
+    )
 
     symbol_statuses: list[IntradaySymbolStatus] = []
     events: list[IntradayMonitorEvent] = []
@@ -212,13 +277,22 @@ def _build_completion_payload(
     for raw_symbol in watchlist.symbols:
         symbol = _normalize_symbol(raw_symbol)
         current_status = current_status_by_symbol.get(symbol)
+        queue_refresh = _refresh_due(
+            run=run,
+            watchlist=watchlist,
+            current_status=current_status,
+            observed_at=observed_at,
+        )
         snapshot_row = snapshot_rows.get(symbol)
         if snapshot_row is None:
+            if queue_refresh:
+                refresh_symbols.append(symbol)
             symbol_statuses.append(
                 IntradaySymbolStatus(
                     watchlistId=watchlist.watchlistId,
                     symbol=symbol,
                     monitorStatus="failed",
+                    lastSnapshotAt=current_status.lastSnapshotAt if current_status is not None else None,
                     lastSuccessfulMarketRefreshAt=(
                         current_status.lastSuccessfulMarketRefreshAt if current_status is not None else None
                     ),
@@ -234,18 +308,49 @@ def _build_completion_payload(
                     eventType="snapshot_missing",
                     severity="warning",
                     message="Snapshot payload missing for symbol.",
-                    details={"symbol": symbol},
+                    details={"symbol": symbol, "queuedRefresh": queue_refresh},
                 )
             )
             continue
 
-        last_snapshot_at, last_observed_price = _extract_snapshot_observation(snapshot_row, observed_at=observed_at)
-        queue_refresh = _refresh_due(
-            run=run,
-            watchlist=watchlist,
-            current_status=current_status,
-            observed_at=observed_at,
-        )
+        observation = _extract_snapshot_observation(snapshot_row, observed_at=observed_at)
+        timestamp_issue = _snapshot_timestamp_issue(observation.timestamp, observed_at=observed_at)
+        if timestamp_issue is not None:
+            if queue_refresh:
+                refresh_symbols.append(symbol)
+            message = f"Snapshot timestamp is not usable: {timestamp_issue}."
+            symbol_statuses.append(
+                IntradaySymbolStatus(
+                    watchlistId=watchlist.watchlistId,
+                    symbol=symbol,
+                    monitorStatus="failed",
+                    lastSnapshotAt=current_status.lastSnapshotAt if current_status is not None else None,
+                    lastObservedPrice=observation.price,
+                    lastSuccessfulMarketRefreshAt=(
+                        current_status.lastSuccessfulMarketRefreshAt if current_status is not None else None
+                    ),
+                    lastRunId=run.runId,
+                    lastError=message,
+                )
+            )
+            events.append(
+                IntradayMonitorEvent(
+                    runId=run.runId,
+                    watchlistId=watchlist.watchlistId,
+                    symbol=symbol,
+                    eventType="snapshot_timestamp_invalid",
+                    severity="warning",
+                    message=message,
+                    details={
+                        "symbol": symbol,
+                        "queuedRefresh": queue_refresh,
+                        "timestampIssue": timestamp_issue,
+                        "snapshotAt": observation.timestamp.isoformat() if observation.timestamp else None,
+                    },
+                )
+            )
+            continue
+
         monitor_status = "refresh_queued" if queue_refresh else "observed"
         if queue_refresh:
             refresh_symbols.append(symbol)
@@ -255,8 +360,8 @@ def _build_completion_payload(
                 watchlistId=watchlist.watchlistId,
                 symbol=symbol,
                 monitorStatus=monitor_status,
-                lastSnapshotAt=last_snapshot_at,
-                lastObservedPrice=last_observed_price,
+                lastSnapshotAt=observation.timestamp,
+                lastObservedPrice=observation.price,
                 lastSuccessfulMarketRefreshAt=(
                     current_status.lastSuccessfulMarketRefreshAt if current_status is not None else None
                 ),
@@ -275,7 +380,7 @@ def _build_completion_payload(
                 details={
                     "symbol": symbol,
                     "queuedRefresh": queue_refresh,
-                    "observedPrice": last_observed_price,
+                    "observedPrice": observation.price,
                 },
             )
         )
@@ -307,31 +412,76 @@ def preflight_dependencies() -> None:
         transport.close()
 
 
+def _validate_monitor_claim(claim: IntradayMonitorClaimResponse):
+    if claim.run is None and claim.watchlist is None and claim.claimToken is None:
+        return None
+    if claim.run is None or claim.watchlist is None or claim.claimToken is None:
+        raise ValueError("Malformed intraday monitor claim: run, watchlist, and claimToken must all be present.")
+
+    run = claim.run
+    watchlist = claim.watchlist
+    if str(run.status or "").strip().lower() != "claimed":
+        raise ValueError(f"Malformed intraday monitor claim: run status must be claimed for {run.runId}.")
+    if run.watchlistId != watchlist.watchlistId:
+        raise ValueError(
+            f"Malformed intraday monitor claim: run watchlistId={run.watchlistId} "
+            f"does not match watchlist={watchlist.watchlistId}."
+        )
+
+    symbols = [_normalize_symbol(symbol) for symbol in watchlist.symbols]
+    if not symbols:
+        raise ValueError(f"Malformed intraday monitor claim: watchlist {watchlist.watchlistId} contains no symbols.")
+    if int(run.symbolCount or 0) != len(symbols):
+        raise ValueError(
+            f"Malformed intraday monitor claim: run {run.runId} symbolCount={run.symbolCount} "
+            f"does not match symbols={len(symbols)}."
+        )
+    if int(watchlist.symbolCount or 0) != len(symbols):
+        raise ValueError(
+            f"Malformed intraday monitor claim: watchlist {watchlist.watchlistId} symbolCount={watchlist.symbolCount} "
+            f"does not match symbols={len(symbols)}."
+        )
+
+    return run, watchlist, str(claim.claimToken)
+
+
 def main() -> int:
     execution_name = _execution_name()
     try:
         preflight_dependencies()
-    except Exception:
-        logger.exception("Intraday monitor preflight failed.")
+    except Exception as exc:
+        logger.error("Intraday monitor preflight failed: %s", safe_exception_message(exc, phase="preflight"))
         return 1
 
     with ControlPlaneTransport.from_env() as transport:
-        claim = IntradayMonitorClaimResponse.model_validate(
-            transport.request_json(
-                "POST",
-                "/api/internal/intraday-monitor/claim",
-                json_body=IntradayMonitorClaimRequest(executionName=execution_name).model_dump(
-                    mode="json",
-                    exclude_none=True,
-                ),
+        try:
+            claim = IntradayMonitorClaimResponse.model_validate(
+                transport.request_json(
+                    "POST",
+                    "/api/internal/intraday-monitor/claim",
+                    json_body=IntradayMonitorClaimRequest(executionName=execution_name).model_dump(
+                        mode="json",
+                        exclude_none=True,
+                    ),
+                )
             )
-        )
-        if claim.run is None or claim.watchlist is None or not claim.claimToken:
+        except Exception as exc:
+            logger.error("Intraday monitor claim failed: %s", safe_exception_message(exc, phase="claim"))
+            _log_metric("claim", status="failed", error_type=type(exc).__name__)
+            return 1
+        try:
+            active_claim = _validate_monitor_claim(claim)
+        except Exception as exc:
+            logger.error("Malformed intraday monitor claim: %s", safe_exception_message(exc, phase="claim"))
+            _log_metric("claim", status="malformed", error_type=type(exc).__name__)
+            return 1
+
+        if active_claim is None:
             logger.info("No queued intraday monitor runs found.")
+            _log_metric("claim", status="no_work")
             return 0
 
-        run = claim.run
-        watchlist = claim.watchlist
+        run, watchlist, claim_token = active_claim
         _log_lifecycle(
             "claim",
             run_id=run.runId,
@@ -340,23 +490,62 @@ def main() -> int:
             symbol_count=len(watchlist.symbols),
             force_refresh=run.forceRefresh,
         )
+        _log_metric(
+            "claim",
+            status="claimed",
+            symbol_count=len(watchlist.symbols),
+            queue_age_seconds=_age_seconds(run.queuedAt),
+        )
 
         try:
+            build_started = time.perf_counter()
             symbol_statuses, events, refresh_symbols = _build_completion_payload(
                 run=run,
                 watchlist=watchlist,
                 current_statuses=list(claim.currentSymbolStatuses),
             )
             complete_payload = IntradayMonitorCompleteRequest(
-                claimToken=claim.claimToken,
+                claimToken=claim_token,
                 symbolStatuses=symbol_statuses,
                 events=events,
                 refreshSymbols=refresh_symbols,
             )
+            complete_body = complete_payload.model_dump(mode="json", exclude_none=True)
+            payload_bytes = len(json.dumps(complete_body, separators=(",", ":")).encode("utf-8"))
+            _log_metric(
+                "build_completion",
+                status="ok",
+                duration_ms=int((time.perf_counter() - build_started) * 1000),
+                observed_symbol_count=len(symbol_statuses),
+                refresh_symbol_count=len(refresh_symbols),
+                payload_bytes=payload_bytes,
+            )
+        except Exception as exc:
+            error = safe_exception_message(exc, phase="snapshot_poll")
+            logger.error("Intraday monitor run failed: run_id=%s error=%s", run.runId, error)
+            try:
+                transport.request_json(
+                    "POST",
+                    f"/api/internal/intraday-monitor/runs/{run.runId}/fail",
+                    json_body=IntradayMonitorFailRequest(
+                        claimToken=claim_token,
+                        error=error,
+                    ).model_dump(mode="json"),
+                )
+            except Exception as fail_exc:
+                logger.error(
+                    "Intraday monitor failure reporting failed: run_id=%s error=%s",
+                    run.runId,
+                    safe_exception_message(fail_exc, phase="fail_report"),
+                )
+            _log_metric("build_completion", status="failed", error_type=type(exc).__name__)
+            return 1
+
+        try:
             transport.request_json(
                 "POST",
                 f"/api/internal/intraday-monitor/runs/{run.runId}/complete",
-                json_body=complete_payload.model_dump(mode="json", exclude_none=True),
+                json_body=complete_body,
             )
             _log_lifecycle(
                 "complete",
@@ -365,20 +554,22 @@ def main() -> int:
                 observed_symbol_count=len(symbol_statuses),
                 refresh_symbol_count=len(refresh_symbols),
             )
+            _log_metric(
+                "complete",
+                status="ok",
+                observed_symbol_count=len(symbol_statuses),
+                refresh_symbol_count=len(refresh_symbols),
+                payload_bytes=payload_bytes,
+            )
             return 0
         except Exception as exc:
-            logger.exception("Intraday monitor run failed: run_id=%s", run.runId)
-            try:
-                transport.request_json(
-                    "POST",
-                    f"/api/internal/intraday-monitor/runs/{run.runId}/fail",
-                    json_body=IntradayMonitorFailRequest(
-                        claimToken=claim.claimToken,
-                        error=str(exc),
-                    ).model_dump(mode="json"),
-                )
-            except Exception:
-                logger.exception("Intraday monitor failure reporting failed: run_id=%s", run.runId)
+            logger.error(
+                "Intraday monitor completion status unknown: run_id=%s error=%s",
+                run.runId,
+                safe_exception_message(exc, phase="complete"),
+            )
+            _log_lifecycle("completion_unknown", run_id=run.runId, error_type=type(exc).__name__)
+            _log_metric("complete", status="unknown", error_type=type(exc).__name__)
             return 1
 
 
@@ -388,6 +579,7 @@ if __name__ == "__main__":
     from asset_allocation_runtime_common.market_data import core as mdc
 
     job_name = "intraday-monitor-job"
+    require_intraday_lock_prerequisites(job_name)
     with mdc.JobLock(job_name, conflict_policy="fail"):
         ensure_api_awake_from_env(required=True)
         raise SystemExit(

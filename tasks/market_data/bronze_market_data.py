@@ -28,6 +28,7 @@ from asset_allocation_runtime_common.market_data import symbol_availability
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.market_data.pipeline import ListManager
 from asset_allocation_runtime_common.market_data import bronze_bucketing
+from asset_allocation_runtime_common.foundation import run_manifests
 from tasks.common.bronze_alpha26_publish import (
     finalize_alpha26_bronze_publish,
     start_alpha26_bronze_publish,
@@ -45,6 +46,7 @@ from tasks.common.bronze_symbol_policy import (
     validate_bronze_storage_clients,
 )
 from tasks.common.job_status import resolve_job_run_status
+from tasks.common.market_refresh_scope import current_market_refresh_scope
 from tasks.market_data import config as cfg
 
 
@@ -164,9 +166,11 @@ def _normalize_market_provider_symbols(df_symbols: pd.DataFrame) -> list[str]:
 def _validate_bronze_required_market_symbols(publish_session) -> None:
     if not hasattr(publish_session, "symbol_to_bucket"):
         return
+    symbol_to_bucket = dict(getattr(publish_session, "active_symbol_to_bucket", {}) or {})
+    symbol_to_bucket.update(dict(getattr(publish_session, "symbol_to_bucket", {}) or {}))
     observed = {
         _canonical_market_symbol(symbol)
-        for symbol in getattr(publish_session, "symbol_to_bucket", {})
+        for symbol in symbol_to_bucket
         if str(symbol or "").strip()
     }
     missing = sorted(_REGIME_REQUIRED_MARKET_SYMBOLS.difference(observed))
@@ -264,6 +268,26 @@ def _validate_environment() -> None:
         bronze_client=bronze_client,
         common_client=common_client,
     )
+
+
+def _load_active_bronze_symbol_to_bucket_map() -> dict[str, str]:
+    existing = bronze_bucketing.load_symbol_index("market")
+    if existing is None or existing.empty or "symbol" not in existing.columns or "bucket" not in existing.columns:
+        return {}
+    out: dict[str, str] = {}
+    for row in existing[["symbol", "bucket"]].to_dict(orient="records"):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        bucket = str(row.get("bucket") or "").strip().upper()
+        if symbol and bucket in bronze_bucketing.ALPHABET_BUCKETS:
+            out[symbol] = bucket
+    return out
+
+
+def _load_active_bronze_bucket_paths() -> list[dict[str, Any]]:
+    manifest = run_manifests.load_latest_bronze_alpha26_manifest("market")
+    if not isinstance(manifest, dict):
+        return []
+    return run_manifests.manifest_blobs(manifest)
 
 
 def _utc_today() -> datetime.date:
@@ -1522,11 +1546,24 @@ async def main_async() -> int:
             continue
         symbols.append(symbol)
 
-    debug_mode = bool(hasattr(cfg, "DEBUG_SYMBOLS") and cfg.DEBUG_SYMBOLS)
-    debug_symbol_set = {str(symbol or "").strip().upper() for symbol in getattr(cfg, "DEBUG_SYMBOLS", []) if str(symbol or "").strip()}
+    refresh_scope = current_market_refresh_scope()
+    debug_mode = refresh_scope.is_scoped
+    debug_symbol_set = set(refresh_scope.symbols)
+    active_symbol_to_bucket: dict[str, str] = {}
+    active_bucket_paths: list[dict[str, Any]] = []
     debug_filtered = 0
     if debug_mode:
-        mdc.write_line(f"DEBUG MODE: Restricting to {cfg.DEBUG_SYMBOLS}")
+        active_symbol_to_bucket = _load_active_bronze_symbol_to_bucket_map()
+        active_bucket_paths = _load_active_bronze_bucket_paths()
+        if not active_symbol_to_bucket:
+            raise RuntimeError("Bronze market scoped refresh blocked: prior active Bronze symbol index is missing.")
+        if not active_bucket_paths:
+            raise RuntimeError("Bronze market scoped refresh blocked: prior active Bronze manifest is missing.")
+        mdc.write_line(
+            "Bronze market scoped refresh: "
+            f"scope_mode={refresh_scope.mode} symbols={list(refresh_scope.symbols)} "
+            f"prior_active_symbols={len(active_symbol_to_bucket)} prior_active_buckets={len(active_bucket_paths)}"
+        )
         filtered_symbols = [s for s in symbols if s in debug_symbol_set]
         debug_filtered = len(symbols) - len(filtered_symbols)
         symbols = filtered_symbols
@@ -1588,6 +1625,18 @@ async def main_async() -> int:
         storage_client=bronze_client,
         job_name="bronze-market-job",
         run_id=run_id,
+        metadata={
+            "jobStatus": "running",
+            "providerAvailableCount": provider_available_count,
+            "blacklistSkipped": blacklist_skipped,
+            "debugFiltered": debug_filtered,
+            "scopeMode": refresh_scope.mode,
+            "scopeSymbolCount": len(refresh_scope.symbols),
+        },
+        scope_mode="intraday" if refresh_scope.is_scoped else "full_domain",
+        touched_buckets=refresh_scope.buckets,
+        active_symbol_to_bucket=active_symbol_to_bucket,
+        active_bucket_paths=active_bucket_paths,
     )
 
     progress = {
@@ -1991,18 +2040,20 @@ def main() -> int:
 if __name__ == "__main__":
     from tasks.common.job_entrypoint import run_logged_job
     from tasks.common.job_trigger import ensure_api_awake_from_env, trigger_next_job_from_env
+    from tasks.common.intraday_runtime import market_layer_lock
     from tasks.common.system_health_markers import write_system_health_marker
 
     job_name = "bronze-market-job"
     with mdc.JobLock(job_name, conflict_policy="fail"):
-        ensure_api_awake_from_env(required=True)
-        raise SystemExit(
-            run_logged_job(
-                job_name=job_name,
-                run=main,
-                on_success=(
-                    lambda: write_system_health_marker(layer="bronze", domain="market", job_name=job_name),
-                    trigger_next_job_from_env,
-                ),
+        with market_layer_lock("bronze", conflict_policy="fail", enabled=True):
+            ensure_api_awake_from_env(required=True)
+            raise SystemExit(
+                run_logged_job(
+                    job_name=job_name,
+                    run=main,
+                    on_success=(
+                        lambda: write_system_health_marker(layer="bronze", domain="market", job_name=job_name),
+                        trigger_next_job_from_env,
+                    ),
+                )
             )
-        )

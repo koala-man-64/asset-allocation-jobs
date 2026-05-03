@@ -12,6 +12,63 @@ logger = logging.getLogger("asset_allocation.monitoring.system_health")
 
 RETRY_SYMBOL_METADATA_JOB_NAMES = frozenset({"bronze-finance-job", "bronze-market-job"})
 RETRY_SYMBOL_LOG_MESSAGE = "Retry-on-next-run candidates (not promoted):"
+INTRADAY_MANAGED_JOB_METRIC_QUERIES = {
+    "claim_outcomes": """
+union isfuzzy=true ContainerAppConsoleLogs_CL, ContainerAppConsoleLogs
+| extend msg = tostring(column_ifexists('Log_s', column_ifexists('Log', column_ifexists('Message', ''))))
+| where msg has_any ('intraday_monitor_metric', 'intraday_refresh_metric')
+| where msg has 'phase=claim'
+| summarize count() by metric=extract(@"(intraday_[a-z_]+_metric)", 1, msg), status=extract(@"status=([^ ]+)", 1, msg), bin(TimeGenerated, 5m)
+""".strip(),
+    "completion_unknown": """
+union isfuzzy=true ContainerAppConsoleLogs_CL, ContainerAppConsoleLogs
+| extend msg = tostring(column_ifexists('Log_s', column_ifexists('Log', column_ifexists('Message', ''))))
+| where msg has_any ('intraday_monitor_event', 'intraday_refresh_event')
+| where msg has 'phase=completion_unknown'
+| summarize count() by bin(TimeGenerated, 5m)
+""".strip(),
+    "refresh_duration_p50_p95": """
+union isfuzzy=true ContainerAppConsoleLogs_CL, ContainerAppConsoleLogs
+| extend msg = tostring(column_ifexists('Log_s', column_ifexists('Log', column_ifexists('Message', ''))))
+| where msg has 'intraday_refresh_metric' and msg has 'phase=pipeline'
+| extend duration_ms = todouble(extract(@"duration_ms=([0-9]+)", 1, msg))
+| where isnotnull(duration_ms)
+| summarize p50=percentile(duration_ms, 50), p95=percentile(duration_ms, 95) by bin(TimeGenerated, 15m)
+""".strip(),
+    "stage_durations": """
+union isfuzzy=true ContainerAppConsoleLogs_CL, ContainerAppConsoleLogs
+| extend msg = tostring(column_ifexists('Log_s', column_ifexists('Log', column_ifexists('Message', ''))))
+| where msg has 'intraday_refresh_metric' and msg has 'phase=stage'
+| extend stage = extract(@"stage=([^ ]+)", 1, msg), duration_ms = todouble(extract(@"duration_ms=([0-9]+)", 1, msg))
+| where isnotnull(duration_ms)
+| summarize p50=percentile(duration_ms, 50), p95=percentile(duration_ms, 95) by stage, bin(TimeGenerated, 15m)
+""".strip(),
+    "oldest_claim_age": """
+union isfuzzy=true ContainerAppConsoleLogs_CL, ContainerAppConsoleLogs
+| extend msg = tostring(column_ifexists('Log_s', column_ifexists('Log', column_ifexists('Message', ''))))
+| where msg has_any ('intraday_monitor_metric', 'intraday_refresh_metric') and msg has 'phase=claim'
+| extend queue_age_seconds = todouble(extract(@"queue_age_seconds=([0-9]+)", 1, msg)),
+         batch_age_seconds = todouble(extract(@"batch_age_seconds=([0-9]+)", 1, msg))
+| extend age_seconds = coalesce(queue_age_seconds, batch_age_seconds)
+| where isnotnull(age_seconds)
+| summarize oldest_age_seconds=max(age_seconds) by bin(TimeGenerated, 15m)
+""".strip(),
+    "payload_p95": """
+union isfuzzy=true ContainerAppConsoleLogs_CL, ContainerAppConsoleLogs
+| extend msg = tostring(column_ifexists('Log_s', column_ifexists('Log', column_ifexists('Message', ''))))
+| where msg has_any ('intraday_monitor_metric', 'intraday_refresh_metric')
+| extend payload_bytes = todouble(extract(@"payload_bytes=([0-9]+)", 1, msg))
+| where isnotnull(payload_bytes)
+| summarize p95_payload_bytes=percentile(payload_bytes, 95) by bin(TimeGenerated, 15m)
+""".strip(),
+    "lock_conflicts": """
+union isfuzzy=true ContainerAppConsoleLogs_CL, ContainerAppConsoleLogs
+| extend msg = tostring(column_ifexists('Log_s', column_ifexists('Log', column_ifexists('Message', ''))))
+| where msg has_any ('market-bronze', 'market-silver', 'market-gold', 'JobLock')
+| where msg has_any ('conflict', 'lock')
+| summarize count() by bin(TimeGenerated, 5m)
+""".strip(),
+}
 
 
 def _escape_kql_literal(value: str) -> str:

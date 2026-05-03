@@ -22,7 +22,6 @@ import pandas as pd
 from asset_allocation_contracts.market_history import GOLD_MARKET_SILVER_SOURCE_COLUMNS, SILVER_MARKET_COLUMNS
 from asset_allocation_contracts.paths import DataPaths
 from asset_allocation_runtime_common.foundation.postgres import PostgresError, connect
-from asset_allocation_runtime_common.shared_core.config import parse_debug_symbols
 
 from tasks.common.watermarks import load_watermarks, save_watermarks
 from tasks.common.backfill import apply_backfill_start_cutoff, get_backfill_range
@@ -45,6 +44,7 @@ from tasks.common.market_reconciliation import (
     enforce_backfill_cutoff_on_bucket_tables,
     purge_orphan_rows_from_bucket_tables,
 )
+from tasks.common.market_refresh_scope import ReconciliationScope, current_market_refresh_scope, current_reconciliation_scope
 from asset_allocation_runtime_common.market_data.gold_sync_contracts import (
     bucket_sync_is_current,
     load_domain_sync_state,
@@ -150,11 +150,7 @@ _MARKET_CHUNK_ROW_LIMIT = 100_000
 
 
 def _configured_scope_symbols() -> set[str]:
-    return {
-        str(symbol or "").strip().upper()
-        for symbol in parse_debug_symbols(os.environ.get("DEBUG_SYMBOLS") or "")
-        if str(symbol or "").strip()
-    }
+    return set(current_market_refresh_scope().symbols)
 
 
 def _normalize_market_schema_columns(columns: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
@@ -555,7 +551,12 @@ def _vacuum_gold_market_bucket(path: str, *, gold_container: str) -> None:
     )
 
 
-def _run_market_reconciliation(*, silver_container: str, gold_container: str) -> tuple[int, int]:
+def _run_market_reconciliation(
+    *,
+    silver_container: str,
+    gold_container: str,
+    scope: ReconciliationScope | None = None,
+) -> tuple[int, int]:
     """Reconcile gold market tables with silver source symbols and backfill policy.
 
     Returns:
@@ -565,6 +566,16 @@ def _run_market_reconciliation(*, silver_container: str, gold_container: str) ->
 
     from asset_allocation_runtime_common.market_data import core as mdc
     from asset_allocation_contracts.paths import DataPaths
+
+    reconciliation_scope = scope or current_reconciliation_scope(protected_symbols=_REGIME_REQUIRED_MARKET_SYMBOL_SET)
+    if reconciliation_scope.is_scoped:
+        mdc.write_line(
+            "reconciliation_result layer=gold domain=market "
+            "status=skipped reason=scoped_intraday "
+            f"touched_symbols={len(reconciliation_scope.touched_symbols)} "
+            f"touched_buckets={len(reconciliation_scope.touched_buckets)}"
+        )
+        return 0, 0
 
     silver_client, gold_client = _resolve_gold_market_reconciliation_clients(
         silver_container=silver_container,
@@ -1410,9 +1421,22 @@ def _run_alpha26_market_gold(
     watermarks_dirty = False
     bucket_results: list[BucketExecutionResult] = []
     index_path: Optional[str] = None
+    scoped_buckets = {layer_bucketing.bucket_letter(symbol) for symbol in scoped_symbols}
 
     # Each bucket maps to one silver source table and one gold destination table.
     for bucket in layer_bucketing.ALPHABET_BUCKETS:
+        if scoped_buckets and bucket not in scoped_buckets:
+            bucket_results.append(
+                BucketExecutionResult(
+                    bucket=bucket,
+                    status="skipped_scoped_untouched",
+                    symbols_written=0,
+                    watermark_updated=False,
+                )
+            )
+            _log_bucket_progress(bucket=bucket, stage="skipped_scoped_untouched")
+            continue
+
         silver_path = DataPaths.get_silver_market_bucket_path(bucket)
         gold_path = DataPaths.get_gold_market_bucket_path(bucket)
         watermark_key = f"bucket::{bucket}"
@@ -2133,11 +2157,13 @@ def main() -> int:
     reconciliation_orphans = 0
     reconciliation_deleted_blobs = 0
     reconciliation_failed = 0
+    reconciliation_scope = current_reconciliation_scope(protected_symbols=_REGIME_REQUIRED_MARKET_SYMBOL_SET)
     if failed == 0 and retry_pending_buckets == 0:
         try:
             reconciliation_orphans, reconciliation_deleted_blobs = _run_market_reconciliation(
                 silver_container=job_cfg.silver_container,
                 gold_container=job_cfg.gold_container,
+                scope=reconciliation_scope,
             )
         except Exception as exc:
             reconciliation_failed = 1
@@ -2168,6 +2194,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     from asset_allocation_runtime_common.market_data import core as mdc
+    from tasks.common.intraday_runtime import market_layer_lock
     from tasks.common.job_entrypoint import run_logged_job
     from tasks.common.job_trigger import ensure_api_awake_from_env, trigger_next_job_from_env
     from tasks.common.system_health_markers import write_system_health_marker
@@ -2175,15 +2202,16 @@ if __name__ == "__main__":
     job_name = "gold-market-job"
 
     with mdc.JobLock(job_name, conflict_policy="wait_then_fail", wait_timeout_seconds=90):
-        # Ensure the API dependency is awake before running the batch job.
-        ensure_api_awake_from_env(required=True)
-        raise SystemExit(
-            run_logged_job(
-                job_name=job_name,
-                run=main,
-                on_success=(
-                    lambda: write_system_health_marker(layer="gold", domain="market", job_name=job_name),
-                    trigger_next_job_from_env,
-                ),
+        with market_layer_lock("gold", enabled=True):
+            # Ensure the API dependency is awake before running the batch job.
+            ensure_api_awake_from_env(required=True)
+            raise SystemExit(
+                run_logged_job(
+                    job_name=job_name,
+                    run=main,
+                    on_success=(
+                        lambda: write_system_health_marker(layer="gold", domain="market", job_name=job_name),
+                        trigger_next_job_from_env,
+                    ),
+                )
             )
-        )

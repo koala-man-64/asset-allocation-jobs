@@ -16,9 +16,18 @@ PLATINUM_RANKING_TESTS = [
     "tests/core/ranking_engine/test_service.py",
 ]
 
-FAST_TESTS = [
-    "tests/test_env_contract.py",
+INTRADAY_REMEDIATION_TESTS = [
+    "tests/tasks/test_intraday_monitor_workers.py",
+    "tests/tasks/test_market_reconciliation.py",
+    "tests/tasks/test_blob_freshness.py",
+    "tests/monitoring/test_system_health_staleness.py",
     "tests/test_workflow_runtime_ownership.py",
+    "tests/test_env_contract.py",
+    "tests/tools/test_python_runtime_dependency_manifests.py",
+]
+
+FAST_TESTS = [
+    *INTRADAY_REMEDIATION_TESTS,
     "tests/test_azure_provisioning_scripts.py",
     "tests/test_multirepo_dependency_contract.py",
     *PLATINUM_RANKING_TESTS,

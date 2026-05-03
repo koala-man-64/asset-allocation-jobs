@@ -41,6 +41,7 @@ from tasks.common.market_reconciliation import (
     enforce_backfill_cutoff_on_bucket_tables,
     purge_orphan_rows_from_bucket_tables,
 )
+from tasks.common.market_refresh_scope import ReconciliationScope, current_market_refresh_scope, current_reconciliation_scope
 
 # Suppress warnings
 
@@ -116,11 +117,7 @@ def _coerce_alpha26_market_bucket_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _debug_symbol_scope() -> set[str]:
-    return {
-        str(symbol or "").strip().upper()
-        for symbol in (getattr(cfg, "DEBUG_SYMBOLS", []) or [])
-        if str(symbol or "").strip()
-    }
+    return set(current_market_refresh_scope().symbols)
 
 
 def _normalize_market_schema_columns(columns: Sequence[str] | None) -> tuple[str, ...]:
@@ -826,7 +823,21 @@ def _validate_all_silver_market_bucket_schemas() -> None:
     )
 
 
-def _run_market_reconciliation(*, bronze_blob_list: list[dict]) -> tuple[int, int]:
+def _run_market_reconciliation(
+    *,
+    bronze_blob_list: list[dict],
+    scope: ReconciliationScope | None = None,
+) -> tuple[int, int]:
+    reconciliation_scope = scope or current_reconciliation_scope(protected_symbols=_REGIME_REQUIRED_MARKET_SYMBOL_SET)
+    if reconciliation_scope.is_scoped:
+        mdc.write_line(
+            "reconciliation_result layer=silver domain=market "
+            "status=skipped reason=scoped_intraday "
+            f"touched_symbols={len(reconciliation_scope.touched_symbols)} "
+            f"touched_buckets={len(reconciliation_scope.touched_buckets)}"
+        )
+        return 0, 0
+
     if silver_client is None:
         raise RuntimeError("Silver market reconciliation requires silver storage client.")
 
@@ -1005,10 +1016,12 @@ def main():
     reconciliation_orphans = 0
     reconciliation_deleted_blobs = 0
     reconciliation_failed = 0
+    reconciliation_scope = current_reconciliation_scope(protected_symbols=_REGIME_REQUIRED_MARKET_SYMBOL_SET)
     if failed == 0:
         try:
             reconciliation_orphans, reconciliation_deleted_blobs = _run_market_reconciliation(
-                bronze_blob_list=blob_list
+                bronze_blob_list=blob_list,
+                scope=reconciliation_scope,
             )
         except Exception as exc:
             reconciliation_failed = 1
@@ -1065,18 +1078,20 @@ def main():
 if __name__ == "__main__":
     from tasks.common.job_entrypoint import run_logged_job
     from tasks.common.job_trigger import ensure_api_awake_from_env, trigger_next_job_from_env
+    from tasks.common.intraday_runtime import market_layer_lock
     from tasks.common.system_health_markers import write_system_health_marker
 
     job_name = "silver-market-job"
     with mdc.JobLock(job_name, conflict_policy="fail"):
-        ensure_api_awake_from_env(required=True)
-        raise SystemExit(
-            run_logged_job(
-                job_name=job_name,
-                run=main,
-                on_success=(
-                    lambda: write_system_health_marker(layer="silver", domain="market", job_name=job_name),
-                    trigger_next_job_from_env,
-                ),
+        with market_layer_lock("silver", conflict_policy="fail", enabled=True):
+            ensure_api_awake_from_env(required=True)
+            raise SystemExit(
+                run_logged_job(
+                    job_name=job_name,
+                    run=main,
+                    on_success=(
+                        lambda: write_system_health_marker(layer="silver", domain="market", job_name=job_name),
+                        trigger_next_job_from_env,
+                    ),
+                )
             )
-        )
