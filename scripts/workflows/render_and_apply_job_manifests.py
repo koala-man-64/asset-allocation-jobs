@@ -15,6 +15,8 @@ PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 SECRET_VALUE_PLACEHOLDER_PATTERN = re.compile(r"^\s*value:\s*\$\{([A-Z][A-Z0-9_]*)\}\s*$")
 DEFAULT_ENV_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / ".env.template"
 PUBLIC_CONTROL_PLANE_OVERRIDE_ENV = "ALLOW_PUBLIC_ASSET_ALLOCATION_API_BASE_URL"
+ALLOWED_PROD_CONTROL_PLANE_HOSTS = frozenset({"asset-allocation-api", "asset-allocation-api-vnet"})
+ALLOWED_PROD_CONTROL_PLANE_SUFFIXES = (".privatelink.azurecontainerapps.io",)
 DEFAULT_REPOSITORY_TAGS = {
     "RESOURCE_TAG_COST_CENTER": "asset-allocation",
     "RESOURCE_TAG_WORKLOAD": "asset-allocation-jobs",
@@ -138,16 +140,19 @@ def ensure_control_plane_base_url_policy(environment: dict[str, str]) -> None:
     if not base_url:
         return
 
-    parsed = urlparse(base_url)
-    host = (parsed.hostname or base_url).lower()
-    if ".azurecontainerapps.io" not in host:
-        return
-
     if _is_truthy(environment.get(PUBLIC_CONTROL_PLANE_OVERRIDE_ENV)):
         return
 
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or base_url).lower()
+    if host in ALLOWED_PROD_CONTROL_PLANE_HOSTS:
+        return
+
+    if any(host.endswith(suffix) for suffix in ALLOWED_PROD_CONTROL_PLANE_SUFFIXES):
+        return
+
     raise SystemExit(
-        "ASSET_ALLOCATION_API_BASE_URL resolved to a public Azure Container Apps ingress host for prod. "
+        "ASSET_ALLOCATION_API_BASE_URL must resolve to an approved internal control-plane target for prod. "
         "Set ASSET_ALLOCATION_API_BASE_URL to http://asset-allocation-api for the same-environment restore path, "
         "or to http://asset-allocation-api-vnet after that target is deployed and reachable. Set "
         f"{PUBLIC_CONTROL_PLANE_OVERRIDE_ENV}=true only for an explicitly approved emergency rollback."

@@ -65,6 +65,14 @@ def _normalize(value: Any) -> str:
     return text
 
 
+def _normalize_command(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, list):
+        return tuple(_normalize(item) for item in value)
+    return (_normalize(value),)
+
+
 def _env_contract(container: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
     values: dict[str, str] = {}
     secret_refs: dict[str, str] = {}
@@ -141,6 +149,11 @@ def _compare_manifest_to_live(
         errors.append(f"{job_name}: rendered image does not match expected deployment image")
     if live_image != expected_image:
         errors.append(f"{job_name}: image mismatch: expected {expected_image}, found {live_image}")
+
+    expected_command = _normalize_command(expected_container.get("command"))
+    live_command = _normalize_command(live_container.get("command"))
+    if expected_command != live_command:
+        errors.append(f"{job_name}: command mismatch")
 
     for field_name in ("triggerType", "replicaRetryLimit", "replicaTimeout"):
         expected = _normalize(expected_configuration.get(field_name))
