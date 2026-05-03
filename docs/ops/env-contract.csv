@@ -43,6 +43,7 @@ GOLD_REGIME_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for reg
 GOLD_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold economic catalyst sync.
 GOLD_QUIVER_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for Quiver gold sync.
 PLATINUM_RANKINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for platinum rankings.
+SYMBOL_CLEANUP_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for queued symbol enrichment cleanup.
 BACKTEST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for backtests.
 JOB_STARTUP_API_CONTAINER_APPS,deploy_var,var,deploy_config,true,Container Apps that jobs may wake before running. Default this to the internal same-environment control-plane app name.
 ALPHA_VANTAGE_EARNINGS_FRESH_DAYS,deploy_var,var,deploy_config,true,Alpha Vantage earnings freshness window.

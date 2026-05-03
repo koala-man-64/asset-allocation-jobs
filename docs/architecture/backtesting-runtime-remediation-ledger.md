@@ -12,8 +12,8 @@ System health and the UI must use the API metadata fields, not the job name or m
 - Update this file in every repo PR that changes scope, interfaces, status, or test evidence.
 
 ## Program Status
-- Overall status: Implemented locally; pending commit, package publication, drift gate, and release choreography
-- QA gate: No-go until shared packages `asset-allocation-contracts==3.15.1` and `asset-allocation-runtime-common==3.5.7` resolve in the intended Python 3.14 environment, control-plane migrations are applied, and the jobs shared dependency compatibility gate is green.
+- Overall status: Implemented locally; shared jobs package pins resolve from the package index; pending commit, drift gate, control-plane migration rollout, and release choreography
+- QA gate: No-go until control-plane migrations are applied and release choreography is complete. Jobs shared dependency compatibility is green for `asset-allocation-contracts==3.15.2` and `asset-allocation-runtime-common==3.5.7` in a clean Python 3.14 environment.
 - Program type: Cross-repo coordinated remediation
 - Routing decision: This is a contracts-repo-first change.
 - Repos in scope: `asset-allocation-contracts`, `asset-allocation-control-plane`, `asset-allocation-runtime-common`, `asset-allocation-jobs`
@@ -33,13 +33,13 @@ System health and the UI must use the API metadata fields, not the job name or m
 | Research-safe vNext contracts | `asset-allocation-contracts` | Implemented locally | `agent/codex/backtest-runtime-remediation-20260503/asset-allocation-contracts` | `test_contract_models.py` -> `84 passed`; TS typecheck -> passed | Package publication still pending |
 | Research-safe vNext persistence | `asset-allocation-runtime-common` | Implemented locally | `agent/codex/backtest-runtime-remediation-20260503/asset-allocation-runtime-common` | targeted persistence/pin tests -> `14 passed` | Package publication still pending |
 | Research-safe vNext control-plane read APIs | `asset-allocation-control-plane` | Implemented locally | `agent/codex/backtest-runtime-remediation-20260503/asset-allocation-control-plane` | targeted repository/API/migration tests -> `53 passed` | Additive migration `0047_backtest_research_safe_v7.sql`; endpoint/repository tests updated |
-| Research-safe vNext jobs runtime | `asset-allocation-jobs` | Implemented locally | `agent/codex/backtest-runtime-remediation-20260503/asset-allocation-jobs` | `python -m pytest -q` -> `950 passed, 3 skipped`; quality gates green except published-package compatibility | Shared dependency compatibility gate fails until published `3.15.1` / `3.5.7` resolve |
+| Research-safe vNext jobs runtime | `asset-allocation-jobs` | Implemented locally | `agent/codex/backtest-runtime-remediation-20260503/asset-allocation-jobs` | `python -m pytest -q` -> `950 passed, 3 skipped`; shared dependency compatibility revalidated on `3.15.2` / `3.5.7` | Remaining blockers are drift gate, control-plane migration rollout, and release choreography |
 
 ## Execution Log
 
 ### 2026-05-03
 - Cross-repo order: `asset-allocation-contracts` v7 contract first, then `asset-allocation-runtime-common` persistence, then `asset-allocation-control-plane` migration/read adoption, then `asset-allocation-jobs` runtime and pin adoption.
-- Release status: no-go until `asset-allocation-contracts==3.15.1` and `asset-allocation-runtime-common==3.5.7` are published to the intended package index and `python scripts/workflows/validate_shared_dependency_compatibility.py --repo-root .` resolves them under Python 3.14.
+- Release status: `asset-allocation-contracts==3.15.2` and `asset-allocation-runtime-common==3.5.7` resolve from the intended package index under Python 3.14; release remains no-go until drift gate, control-plane migration rollout, and release choreography are complete.
 - Trading labels: `execution_model` remains `simple_bps`, `execution_model_quality` remains `not_tca_grade`, and `approval_readiness` remains `research_only`. This remediation does not claim TCA-grade execution, live approval readiness, borrow/locate coverage, factor risk, liquidity concentration controls, or corporate-action reconciliation.
 
 - Repo: `asset-allocation-contracts`
@@ -67,16 +67,16 @@ System health and the UI must use the API metadata fields, not the job name or m
 
 - Repo: `asset-allocation-jobs`
 - Branch / PR: `agent/codex/backtest-runtime-remediation-20260503/asset-allocation-jobs`
-- Summary: Pinned contracts/runtime-common to `3.15.1` / `3.5.7`, added runtime-common signature/schema contract test, added CI shared dependency compatibility check, and split strict slow data into session-stable date-only frames and per-bar timestamp-available frames cached by exact `bar_ts`.
+- Summary: Pinned contracts/runtime-common to `3.15.2` / `3.5.7`, added runtime-common signature/schema contract test, added CI shared dependency compatibility check, and split strict slow data into session-stable date-only frames and per-bar timestamp-available frames cached by exact `bar_ts`.
 - Test evidence:
   - `python scripts\run_quality_gate.py lint-python` with local v7 shared packages on `PYTHONPATH` -> passed
   - `python scripts\run_quality_gate.py test-fast` with local v7 shared packages on `PYTHONPATH` -> `74 passed`
   - `python scripts\run_quality_gate.py test-backtesting-runtime` with local v7 shared packages on `PYTHONPATH` -> `27 passed`
   - `python scripts\run_quality_gate.py test-runtime-common-compat` with local v7 shared packages on `PYTHONPATH` -> `14 passed`
   - `python -m pytest -q` with local v7 shared packages on `PYTHONPATH` -> `950 passed, 3 skipped`
-  - `python scripts\workflows\validate_shared_dependency_compatibility.py --repo-root .` -> blocked because `asset-allocation-contracts==3.15.1` is not yet published to the configured index.
+  - `python scripts\workflows\validate_shared_dependency_compatibility.py --repo-root .` -> passed with `asset-allocation-contracts==3.15.2` and `asset-allocation-runtime-common==3.5.7`.
   - `python .codex\skills\code-drift-sentinel\scripts\codedrift_sentinel.py --mode audit --repo . --baseline-ref origin/main --skip-quality-gates` -> failed, `drift_score=110.0`, threshold `35.0`; quality gates were run separately above.
-- Blockers: package-index compatibility remains blocked until shared packages are published; drift gate remains blocked until protected CI/config and behavioral/test drift receive explicit review/signoff or the drift score is reduced below `35`.
+- Blockers: package-index compatibility is cleared for jobs pins; drift gate remains blocked until protected CI/config and behavioral/test drift receive explicit review/signoff or the drift score is reduced below `35`.
 
 ### 2026-05-02
 - Repo: `asset-allocation-contracts`
@@ -211,7 +211,7 @@ Exit criteria: runtime gate remains green in CI.
 - A-008 Research-safe vNext Status: Implemented locally
 Owner: contracts/runtime-common/control-plane/jobs
 Work: add v7 metadata and data-quality event contracts, persist/read diagnostics, enforce strict point-in-time and fail-fast data behavior in the jobs runtime, add additive database migrations, align shared dependency pins, and document research-only execution-quality caveats.
-Exit criteria: `asset-allocation-contracts==3.15.1` and `asset-allocation-runtime-common==3.5.7` are published, downstream compatibility gates pass on Python 3.14, and control-plane endpoint tests pass with dependencies installed.
+Exit criteria: `asset-allocation-contracts==3.15.2` and `asset-allocation-runtime-common==3.5.7` resolve from the intended package index, downstream compatibility gates pass on Python 3.14, and control-plane endpoint tests pass with dependencies installed.
 Exit criteria: required workflow passes with the new gate.
 - A-008 Docs and traceability Status: Implemented locally
 Owner: jobs

@@ -46,6 +46,8 @@ properties:
         value: ${ASSET_ALLOCATION_API_BASE_URL}
       - name: ASSET_ALLOCATION_API_SCOPE
         value: ${ASSET_ALLOCATION_API_SCOPE}
+      - name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS
+        value: ${ASSET_ALLOCATION_API_TIMEOUT_SECONDS}
       - name: POSTGRES_DSN
         secretRef: pg-dsn
       image: ${JOB_IMAGE}

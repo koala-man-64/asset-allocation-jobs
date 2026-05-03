@@ -238,7 +238,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 - Prod jobs target an internal control-plane service URL. The current restore target is `http://asset-allocation-api`; `http://asset-allocation-api-vnet` is the durable target after the VNet-backed app is deployed and reachable. Public ACA ingress FQDNs are out of contract for jobs runtime configuration.
 - Jobs must not import control-plane Python modules directly for normal runtime behavior.
 - Backtesting worker preflight depends on a dedicated authenticated readiness endpoint in the control plane before claim/start flow is allowed to proceed.
-- Universe selection payloads now use stable public field ids at the contract edge. Jobs resolves those ids to warehouse columns locally inside `core/strategy_engine/universe.py` and `core/ranking_engine/service.py`; the warehouse mapping is not part of the external contract.
+- Universe selection payloads now use stable public field ids at the contract edge. Jobs resolves those ids to warehouse columns through runtime-common strategy/ranking services; the warehouse mapping is not part of the external contract.
 
 ### Identity and secret boundaries
 

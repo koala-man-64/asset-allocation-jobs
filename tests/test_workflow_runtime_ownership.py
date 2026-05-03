@@ -396,6 +396,7 @@ def test_symbol_cleanup_job_is_scheduled_and_points_to_worker_module() -> None:
     assert "scheduleTriggerConfig:" in text
     assert 'cronExpression: "0 23 * * 1-5"' in text
     assert 'command: ["python", "-m", "tasks.symbol_cleanup.worker"]' in text
+    assert "ASSET_ALLOCATION_API_TIMEOUT_SECONDS" in text
 
 
 def test_backtests_reconcile_job_uses_lower_frequency_and_timeout() -> None:

@@ -729,13 +729,36 @@ def test_render_and_apply_manifests_writes_redacted_support_manifests(
 def test_render_and_apply_manifests_blocks_public_prod_control_plane_url() -> None:
     module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
 
-    with pytest.raises(SystemExit, match="public Azure Container Apps ingress host"):
+    with pytest.raises(SystemExit, match="approved internal control-plane target"):
         module.ensure_control_plane_base_url_policy(
             {
                 "RESOURCE_TAG_ENVIRONMENT": "prod",
                 "ASSET_ALLOCATION_API_BASE_URL": "https://asset-allocation-api.example.azurecontainerapps.io",
             }
         )
+
+
+def test_render_and_apply_manifests_blocks_public_custom_control_plane_url() -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+
+    with pytest.raises(SystemExit, match="approved internal control-plane target"):
+        module.ensure_control_plane_base_url_policy(
+            {
+                "RESOURCE_TAG_ENVIRONMENT": "prod",
+                "ASSET_ALLOCATION_API_BASE_URL": "https://api.asset-allocation.example.com",
+            }
+        )
+
+
+def test_render_and_apply_manifests_allows_approved_internal_control_plane_url() -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+
+    module.ensure_control_plane_base_url_policy(
+        {
+            "RESOURCE_TAG_ENVIRONMENT": "prod",
+            "ASSET_ALLOCATION_API_BASE_URL": "http://asset-allocation-api-vnet",
+        }
+    )
 
 
 def test_render_and_apply_manifests_allows_public_control_plane_url_only_with_override() -> None:
@@ -861,6 +884,7 @@ properties:
     containers:
     - image: {image}
       name: bronze-example-job
+      command: ["python", "-m", "tasks.example.worker"]
       env:
       - name: ASSET_ALLOCATION_API_BASE_URL
         value: http://asset-allocation-api-vnet
@@ -887,6 +911,7 @@ def _matching_live_runtime() -> dict:
                 "containers": [
                     {
                         "image": "registry/image@sha256:expected",
+                        "command": ["python", "-m", "tasks.example.worker"],
                         "env": [
                             {"name": "ASSET_ALLOCATION_API_BASE_URL", "value": "http://asset-allocation-api-vnet"},
                             {"name": "SAFE_FLAG", "value": "false"},
@@ -972,6 +997,7 @@ def test_verify_deployed_job_runtime_detects_drift_without_printing_env_values(
     live["properties"]["configuration"]["scheduleTriggerConfig"]["cronExpression"] = "*/5 * * * *"
     live["properties"]["configuration"]["replicaRetryLimit"] = 1
     live["properties"]["template"]["containers"][0]["image"] = "registry/image@sha256:wrong"
+    live["properties"]["template"]["containers"][0]["command"] = ["python", "-m", "tasks.wrong.worker"]
     live["properties"]["template"]["containers"][0]["env"] = [
         {"name": "ASSET_ALLOCATION_API_BASE_URL", "value": "https://public.example.azurecontainerapps.io"},
         {"name": "SAFE_FLAG", "value": "true"},
@@ -991,6 +1017,7 @@ def test_verify_deployed_job_runtime_detects_drift_without_printing_env_values(
     assert "cronExpression mismatch" in message
     assert "replicaRetryLimit mismatch" in message
     assert "image mismatch" in message
+    assert "command mismatch" in message
     assert "env ASSET_ALLOCATION_API_BASE_URL value mismatch" in message
     assert "env SAFE_FLAG value mismatch" in message
     assert "env POSTGRES_DSN secretRef mismatch" in message
@@ -1256,6 +1283,36 @@ def test_check_fast_gate_runs_ruff_before_fast_tests(monkeypatch: pytest.MonkeyP
         (["/python", "-m", "ruff", "check", "."], module.REPO_ROOT),
         (["/python", "-m", "pytest", "-q", *module.FAST_TESTS], module.REPO_ROOT),
     ]
+    assert "tests/tasks/test_platinum_rankings.py" in module.FAST_TESTS
+    assert "tests/core/ranking_engine/test_service.py" in module.FAST_TESTS
+
+
+def test_test_fast_gate_includes_platinum_ranking_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/run_quality_gate.py", "run_quality_gate_test_fast")
+
+    monkeypatch.setattr(module, "resolve_python", lambda: "/python")
+
+    commands = module.build_commands("test-fast")
+
+    assert commands == [(["/python", "-m", "pytest", "-q", *module.FAST_TESTS], module.REPO_ROOT)]
+    assert "tests/tasks/test_platinum_rankings.py" in commands[0][0]
+    assert "tests/core/ranking_engine/test_service.py" in commands[0][0]
+
+
+def test_platinum_rankings_gate_runs_only_focused_ranking_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_module("scripts/run_quality_gate.py", "run_quality_gate_platinum")
+
+    monkeypatch.setattr(module, "resolve_python", lambda: "/python")
+
+    assert module.build_commands("test-platinum-rankings") == [
+        (["/python", "-m", "pytest", "-q", *module.PLATINUM_RANKING_TESTS], module.REPO_ROOT)
+    ]
+    assert module.PLATINUM_RANKING_TESTS == [
+        "tests/tasks/test_platinum_rankings.py",
+        "tests/core/ranking_engine/test_service.py",
+    ]
+    assert "tests/core/test_symbol_cleanup_runtime.py" in module.FAST_TESTS
+    assert "tests/tasks/test_symbol_cleanup_worker.py" in module.FAST_TESTS
 
 
 def test_check_fast_gate_stops_after_first_failure(monkeypatch: pytest.MonkeyPatch) -> None:
