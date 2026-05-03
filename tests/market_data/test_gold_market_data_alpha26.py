@@ -1365,6 +1365,49 @@ def test_main_fails_closed_when_gold_reconciliation_fails(monkeypatch):
     assert gold.main() == 1
 
 
+def test_main_fails_closed_when_postgres_sync_retry_is_pending(monkeypatch):
+    messages: list[str] = []
+
+    monkeypatch.setattr(core_module, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(gold.layer_bucketing, "gold_layout_mode", lambda: "alpha26")
+    monkeypatch.setattr(gold, "get_backfill_range", lambda: (None, None))
+    monkeypatch.setattr(gold, "load_watermarks", lambda _name: {})
+    monkeypatch.setattr(
+        gold,
+        "_build_job_config",
+        lambda: gold.FeatureJobConfig(
+            silver_container="silver",
+            gold_container="gold",
+        ),
+    )
+    monkeypatch.setattr(
+        gold,
+        "_run_alpha26_market_gold",
+        lambda **_kwargs: gold.GoldMarketRunResult(
+            processed=9,
+            skipped_unchanged=0,
+            skipped_missing_source=0,
+            failed=0,
+            watermarks_dirty=False,
+            alpha26_symbols=10_721,
+            index_path=None,
+            retry_pending_buckets=17,
+        ),
+    )
+    monkeypatch.setattr(
+        gold,
+        "_run_market_reconciliation",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("reconciliation should be skipped")),
+    )
+    monkeypatch.setattr(gold, "save_watermarks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(core_module, "write_line", lambda message: messages.append(str(message)))
+    monkeypatch.setattr(core_module, "write_warning", lambda message: messages.append(str(message)))
+    monkeypatch.setattr(core_module, "write_error", lambda message: messages.append(str(message)))
+
+    assert gold.main() == 1
+    assert any("publication incomplete" in message and "retry_pending_buckets=17" in message for message in messages)
+
+
 def test_build_job_config_reads_required_containers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AZURE_CONTAINER_SILVER", "silver")
     monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")

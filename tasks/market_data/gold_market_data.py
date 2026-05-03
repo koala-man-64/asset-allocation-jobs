@@ -2181,6 +2181,11 @@ def main() -> int:
         save_watermarks("gold_market_features", watermarks)
 
     total_failed = failed + reconciliation_failed
+    if retry_pending_buckets > 0:
+        mdc.write_warning(
+            "Gold market publication incomplete: "
+            f"retry_pending_buckets={retry_pending_buckets}; exiting nonzero until Postgres sync completes."
+        )
     mdc.write_line(
         "Gold market alpha26 complete: "
         f"processed_buckets={processed} skipped_unchanged={skipped_unchanged} "
@@ -2189,7 +2194,7 @@ def main() -> int:
         f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} failed={total_failed} "
         f"retry_pending_buckets={retry_pending_buckets}"
     )
-    return 0 if total_failed == 0 else 1
+    return 0 if total_failed == 0 and retry_pending_buckets == 0 else 1
 
 
 if __name__ == "__main__":
