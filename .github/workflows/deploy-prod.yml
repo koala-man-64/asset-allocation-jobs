@@ -84,6 +84,9 @@ jobs:
       QUIVER_DATA_MAX_PAGES_PER_REQUEST: ${{ vars.QUIVER_DATA_MAX_PAGES_PER_REQUEST || '0' }}
       QUIVER_DATA_SEC13F_TODAY_ONLY: ${{ vars.QUIVER_DATA_SEC13F_TODAY_ONLY || 'true' }}
       JOB_STARTUP_API_CONTAINER_APPS: ${{ vars.JOB_STARTUP_API_CONTAINER_APPS || 'asset-allocation-api' }}
+      GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS: ${{ vars.GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS || '3' }}
+      GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS: ${{ vars.GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS || '60' }}
+      STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS: ${{ vars.STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS || '3' }}
       SILVER_MARKET_JOB: ${{ vars.SILVER_MARKET_JOB || 'silver-market-job' }}
       SILVER_FINANCE_JOB: ${{ vars.SILVER_FINANCE_JOB || 'silver-finance-job' }}
       SILVER_PRICE_TARGET_JOB: ${{ vars.SILVER_PRICE_TARGET_JOB || 'silver-price-target-job' }}
@@ -96,6 +99,7 @@ jobs:
       GOLD_EARNINGS_JOB: ${{ vars.GOLD_EARNINGS_JOB || 'gold-earnings-job' }}
       GOLD_ECONOMIC_CATALYST_JOB: ${{ vars.GOLD_ECONOMIC_CATALYST_JOB || 'gold-economic-catalyst-job' }}
       GOLD_QUIVER_JOB: ${{ vars.GOLD_QUIVER_JOB || 'gold-quiver-data-job' }}
+      RESULTS_RECONCILE_JOB: ${{ vars.RESULTS_RECONCILE_JOB || 'results-reconcile-job' }}
       AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       NASDAQ_API_KEY: ${{ secrets.NASDAQ_API_KEY }}
