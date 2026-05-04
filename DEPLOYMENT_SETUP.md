@@ -116,6 +116,20 @@ Quiver-specific deploy vars:
 
 Quiver bronze requires `POSTGRES_DSN` because the symbol universe is resolved directly from `core.symbols`, not from `/api/data/symbols`.
 
+Gold regime deploy vars:
+
+- `GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS=3`
+- `GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS=60`
+- `STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS=3`
+- `RESULTS_RECONCILE_JOB=results-reconcile-job`
+
+Gold regime upstream and downstream readiness:
+
+- `gold-market-job` must populate `gold.market_data` with the required regime symbols before the scheduled `gold-regime-job` run.
+- `gold.regime_macro_inputs_daily` and `gold.economic_catalyst_entity_daily` must be readable through `POSTGRES_DSN`.
+- The control-plane signal endpoint must be reachable through `ASSET_ALLOCATION_API_BASE_URL`, authenticated with `ASSET_ALLOCATION_API_SCOPE`, and bounded by `ASSET_ALLOCATION_API_TIMEOUT_SECONDS`.
+- `results-reconcile-job` must be deployed and scheduled so durable regime publication signals are swept after publication.
+
 Deployment manifest tags are repo-owned defaults, not GitHub variables.
 
 - `RESOURCE_TAG_OWNER` defaults to the GitHub repository owner when available, otherwise `asset-allocation`
@@ -144,6 +158,8 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
    - read Postgres where required
    - obtain a token for `ASSET_ALLOCATION_API_SCOPE`
    - call the control-plane at the internal service URL configured in `ASSET_ALLOCATION_API_BASE_URL`
+   - for `gold-regime-job`, render `GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS`, `GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS`, `STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS`, and `ASSET_ALLOCATION_API_TIMEOUT_SECONDS`
+   - for `results-reconcile-job`, run on the `*/30 * * * *` schedule without `RESULTS_RECONCILE_DRY_RUN`
 
 ## Rollback
 

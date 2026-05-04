@@ -42,10 +42,14 @@ GOLD_EARNINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for g
 GOLD_REGIME_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for regime recompute.
 GOLD_ECONOMIC_CATALYST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for gold economic catalyst sync.
 GOLD_QUIVER_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for Quiver gold sync.
+RESULTS_RECONCILE_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for durable publication signal reconciliation.
 PLATINUM_RANKINGS_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for platinum rankings.
 SYMBOL_CLEANUP_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for queued symbol enrichment cleanup.
 BACKTEST_JOB,deploy_var,var,deploy_config,true,ACA Jobs resource name for backtests.
 JOB_STARTUP_API_CONTAINER_APPS,deploy_var,var,deploy_config,true,Container Apps that jobs may wake before running. Default this to the internal same-environment control-plane app name.
+GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS,deploy_var,var,deploy_config,true,Gold regime input-readiness retry attempts before publishing a complete window or failing.
+GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS,deploy_var,var,deploy_config,true,Gold regime input-readiness retry sleep interval in seconds.
+STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS,deploy_var,var,deploy_config,true,Bounded retry attempts for strategy publication reconcile signal posts.
 ALPHA_VANTAGE_EARNINGS_FRESH_DAYS,deploy_var,var,deploy_config,true,Alpha Vantage earnings freshness window.
 ALPHA_VANTAGE_FINANCE_FRESH_DAYS,deploy_var,var,deploy_config,true,Alpha Vantage finance freshness window.
 ALPHA_VANTAGE_MAX_WORKERS,deploy_var,var,deploy_config,true,Alpha Vantage worker concurrency.

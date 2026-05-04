@@ -215,12 +215,53 @@ def test_strategy_compute_target_jobs_have_required_classifications() -> None:
 def test_gold_regime_job_runs_after_market_chain_with_bounded_retry() -> None:
     payload = yaml.safe_load((repo_root() / "deploy" / "job_gold_regime_data.yaml").read_text(encoding="utf-8"))
     configuration = payload["properties"]["configuration"]
+    container = payload["properties"]["template"]["containers"][0]
+    env = {
+        item["name"]: item
+        for item in container["env"]
+        if isinstance(item, dict) and item.get("name")
+    }
+    secrets = {item["name"] for item in configuration["secrets"]}
 
     assert configuration["triggerType"] == "Schedule"
     assert configuration["scheduleTriggerConfig"]["cronExpression"] == "30 2 * * 2-6"
     assert configuration["replicaRetryLimit"] <= 1
     assert configuration["scheduleTriggerConfig"]["parallelism"] == 1
     assert configuration["scheduleTriggerConfig"]["replicaCompletionCount"] == 1
+    assert secrets == {"azure-storage-connection-string", "pg-dsn"}
+    assert env["POSTGRES_DSN"]["secretRef"] == "pg-dsn"
+    assert env["AZURE_STORAGE_CONNECTION_STRING"]["secretRef"] == "azure-storage-connection-string"
+    assert env["AZURE_CONTAINER_GOLD"]["value"] == "${AZURE_CONTAINER_GOLD}"
+    assert env["AZURE_CONTAINER_COMMON"]["value"] == "${AZURE_CONTAINER_COMMON}"
+    assert env["ASSET_ALLOCATION_API_BASE_URL"]["value"] == "${ASSET_ALLOCATION_API_BASE_URL}"
+    assert env["ASSET_ALLOCATION_API_SCOPE"]["value"] == "${ASSET_ALLOCATION_API_SCOPE}"
+    assert env["ASSET_ALLOCATION_API_TIMEOUT_SECONDS"]["value"] == "${ASSET_ALLOCATION_API_TIMEOUT_SECONDS}"
+    assert env["JOB_STARTUP_API_CONTAINER_APPS"]["value"] == "${JOB_STARTUP_API_CONTAINER_APPS}"
+    assert env["GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS"]["value"] == (
+        "${GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS}"
+    )
+    assert env["GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS"]["value"] == (
+        "${GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS}"
+    )
+    assert env["STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS"]["value"] == "${STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS}"
+    assert "TRIGGER_NEXT_JOB_NAME" not in env
+
+
+def test_gold_regime_deploy_workflow_exports_runtime_defaults() -> None:
+    text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert (
+        "GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS: "
+        "${{ vars.GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS || '3' }}"
+    ) in text
+    assert (
+        "GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS: "
+        "${{ vars.GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS || '60' }}"
+    ) in text
+    assert (
+        "STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS: ${{ vars.STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS || '3' }}"
+    ) in text
+    assert "RESULTS_RECONCILE_JOB: ${{ vars.RESULTS_RECONCILE_JOB || 'results-reconcile-job' }}" in text
 
 
 def test_quiver_job_manifests_define_control_plane_env_vars() -> None:
@@ -425,6 +466,9 @@ def test_contributor_and_security_docs_reference_live_jobs_assets_only() -> None
 
 def test_results_reconcile_job_is_scheduled_reconciler_and_not_dry_run() -> None:
     text = (repo_root() / "deploy" / "job_results_reconcile.yaml").read_text(encoding="utf-8")
+    env_template = (repo_root() / ".env.template").read_text(encoding="utf-8")
+    env_contract = (repo_root() / "docs" / "ops" / "env-contract.csv").read_text(encoding="utf-8")
+
     assert "triggerType: Schedule" in text
     assert "scheduleTriggerConfig:" in text
     assert 'cronExpression: "*/30 * * * *"' in text
@@ -432,6 +476,8 @@ def test_results_reconcile_job_is_scheduled_reconciler_and_not_dry_run() -> None
     assert "RESULTS_RECONCILE_DRY_RUN" not in text
     assert "name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS" in text
     assert 'value: "600"' in text
+    assert "RESULTS_RECONCILE_JOB=results-reconcile-job" in env_template
+    assert "RESULTS_RECONCILE_JOB,deploy_var,var,deploy_config,true" in env_contract
 
 
 def test_symbol_cleanup_job_is_scheduled_and_points_to_worker_module() -> None:

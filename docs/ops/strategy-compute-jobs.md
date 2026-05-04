@@ -41,6 +41,12 @@ The signal metadata is typed and limited to the published regime window, row cou
 
 `results-reconcile-job` is the operational-support sweeper. It runs every 30 minutes, claims pending signals with a lease, marks successful batches `processed`, and schedules retry after transient errors.
 
+## Regime Runtime Dependencies
+
+`gold-regime-job` requires `POSTGRES_DSN`, `AZURE_STORAGE_CONNECTION_STRING`, `AZURE_CONTAINER_GOLD`, `AZURE_CONTAINER_COMMON`, `ASSET_ALLOCATION_API_BASE_URL`, `ASSET_ALLOCATION_API_SCOPE`, and `ASSET_ALLOCATION_API_TIMEOUT_SECONDS`. It also renders `GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS`, `GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS`, and `STRATEGY_PUBLICATION_SIGNAL_ATTEMPTS` so deployed behavior matches the documented defaults.
+
+Before scheduled regime publication, upstream jobs must have made `gold.market_data`, `gold.regime_macro_inputs_daily`, and `gold.economic_catalyst_entity_daily` readable in Postgres. After publication, the downstream contract is the durable reconcile signal plus the scheduled `results-reconcile-job`; do not restore direct job chaining.
+
 ## Rollback
 
 Rollback does not require data rollback. ACA job names and operator aliases are unchanged.
