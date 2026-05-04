@@ -16,15 +16,27 @@ from asset_allocation_runtime_common.regime_repository import RegimeRepository
 from asset_allocation_runtime_common.strategy_publication_repository import StrategyPublicationRepository
 from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from asset_allocation_runtime_common.market_data.gold_sync_contracts import load_domain_sync_state
+from asset_allocation_runtime_common.market_data.symbol_identity import (
+    canonicalize_provider_symbol,
+    provider_symbol_for_query,
+)
 from tasks.common.job_trigger import ensure_api_awake_from_env
 from tasks.common.regime_publication import (
     build_regime_publish_state,
     finalize_regime_publication,
-    log_regime_publication_status,
 )
 
 JOB_NAME = "gold-regime-job"
 WATERMARK_KEY = "gold_regime_features"
+_MARKET_PROVIDER = "massive"
+_MARKET_DOMAIN = "market"
+_DEFAULT_INPUT_READINESS_RETRY_ATTEMPTS = 3
+_DEFAULT_INPUT_READINESS_RETRY_SLEEP_SECONDS = 60.0
+_MAX_INPUT_READINESS_RETRY_ATTEMPTS = 10
+_MAX_INPUT_READINESS_RETRY_SLEEP_SECONDS = 900.0
+_PARTIAL_SUCCESS_STATUS = "partial_success"
+_INPUT_READINESS_FAILURE_MODE = "input_readiness"
+_INPUT_READINESS_RETRY_EXHAUSTED_REASON = "input_readiness_retry_exhausted"
 _INPUTS_COLUMNS = (
     "as_of_date",
     "spy_close",
@@ -113,6 +125,22 @@ class _RegimePublishWindow:
     skipped_trailing_input_dates: tuple[date, ...]
 
 
+@dataclass(frozen=True)
+class _RegimeInputReadinessRetryConfig:
+    attempts: int
+    sleep_seconds: float
+
+
+@dataclass(frozen=True)
+class _RegimeInputReadinessResult:
+    market_series: pd.DataFrame
+    macro_inputs: pd.DataFrame
+    inputs: pd.DataFrame
+    publish_window: _RegimePublishWindow
+    attempts_used: int
+    retry_exhausted: bool
+
+
 _REGIME_APPLY_CONFIGS: tuple[_RegimeApplyConfig, ...] = (
     _RegimeApplyConfig(
         table="gold.regime_macro_inputs_daily",
@@ -152,6 +180,52 @@ def _require_postgres_dsn() -> str:
     if not dsn:
         raise ValueError("POSTGRES_DSN is required for gold regime job.")
     return dsn
+
+
+def _bounded_int_env(name: str, *, default: int, minimum: int, maximum: int) -> int:
+    raw = str(os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        mdc.write_warning(f"Invalid {name}={raw!r}; using default={default}.")
+        return default
+    return min(max(value, minimum), maximum)
+
+
+def _bounded_float_env(name: str, *, default: float, minimum: float, maximum: float) -> float:
+    raw = str(os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        mdc.write_warning(f"Invalid {name}={raw!r}; using default={default:.1f}.")
+        return default
+    return min(max(value, minimum), maximum)
+
+
+def _resolve_input_readiness_retry_config() -> _RegimeInputReadinessRetryConfig:
+    config = _RegimeInputReadinessRetryConfig(
+        attempts=_bounded_int_env(
+            "GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS",
+            default=_DEFAULT_INPUT_READINESS_RETRY_ATTEMPTS,
+            minimum=1,
+            maximum=_MAX_INPUT_READINESS_RETRY_ATTEMPTS,
+        ),
+        sleep_seconds=_bounded_float_env(
+            "GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS",
+            default=_DEFAULT_INPUT_READINESS_RETRY_SLEEP_SECONDS,
+            minimum=0.0,
+            maximum=_MAX_INPUT_READINESS_RETRY_SLEEP_SECONDS,
+        ),
+    )
+    mdc.write_line(
+        "Gold regime input readiness retry config: "
+        f"attempts={config.attempts} sleep_seconds={config.sleep_seconds:.1f}"
+    )
+    return config
 
 
 def _coerce_cell(value: Any) -> Any:
@@ -374,11 +448,59 @@ def _apply_regime_table(
     )
 
 
+def _canonical_regime_market_symbol(symbol: object) -> str:
+    raw = str(symbol or "").strip()
+    if not raw:
+        return ""
+    return canonicalize_provider_symbol(_MARKET_PROVIDER, _MARKET_DOMAIN, raw)
+
+
+def _regime_market_query_symbols() -> tuple[str, ...]:
+    symbols: list[str] = []
+    for symbol in REGIME_REQUIRED_MARKET_SYMBOLS:
+        canonical = _canonical_regime_market_symbol(symbol)
+        if canonical:
+            symbols.append(canonical)
+        provider_symbol = provider_symbol_for_query(_MARKET_PROVIDER, _MARKET_DOMAIN, canonical)
+        if provider_symbol and provider_symbol != canonical:
+            symbols.append(provider_symbol)
+    return tuple(dict.fromkeys(symbols))
+
+
 def _normalize_market_series(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     out["date"] = pd.to_datetime(out.get("date"), errors="coerce").dt.date
-    out["symbol"] = out.get("symbol", pd.Series(dtype="string")).astype(str).str.strip().str.upper()
-    out = out.dropna(subset=["date"]).reset_index(drop=True)
+    raw_symbols = (
+        out.get("symbol", pd.Series("", index=out.index, dtype="string"))
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.upper()
+    )
+    out["symbol"] = raw_symbols
+    out["_raw_symbol"] = raw_symbols
+    out["_original_order"] = range(len(out))
+    out = out[(out["_raw_symbol"] != "") & out["date"].notna()].copy()
+    if out.empty:
+        return out.drop(columns=["_raw_symbol", "_original_order"], errors="ignore").reset_index(drop=True)
+
+    out["symbol"] = out["_raw_symbol"].map(_canonical_regime_market_symbol)
+    alias_rows = int((out["_raw_symbol"] != out["symbol"]).sum())
+    out["_canonical_preference"] = (out["_raw_symbol"] != out["symbol"]).astype(int)
+    before_dedup_count = len(out)
+    out = (
+        out.sort_values(["symbol", "date", "_canonical_preference", "_original_order"])
+        .drop_duplicates(subset=["symbol", "date"], keep="first")
+        .drop(columns=["_raw_symbol", "_canonical_preference", "_original_order"], errors="ignore")
+        .sort_values(["date", "symbol"])
+        .reset_index(drop=True)
+    )
+    dropped_duplicate_rows = max(before_dedup_count - len(out), 0)
+    if alias_rows or dropped_duplicate_rows:
+        mdc.write_warning(
+            "Gold regime market symbol aliases normalized: "
+            f"alias_rows={alias_rows} duplicate_rows_dropped={dropped_duplicate_rows}"
+        )
     return out
 
 
@@ -517,7 +639,8 @@ def _summarize_macro_input_coverage(frame: pd.DataFrame) -> str:
         for column in required_columns
         if column != "rates_event_flag"
     }
-    rates_event_count = int(pd.Series(frame.get("rates_event_flag"), dtype="object").fillna(False).astype(bool).sum())
+    rates_event_series = pd.Series(frame.get("rates_event_flag"), dtype="boolean").fillna(False)
+    rates_event_count = int(rates_event_series.sum())
     metrics = " ".join(f"{column}_nonnull={count}" for column, count in present_counts.items())
     return (
         f"{parsed_dates.min().date().isoformat()}..{parsed_dates.max().date().isoformat()} "
@@ -656,6 +779,7 @@ def _assert_regime_publish_frames_ready(
 
 
 def _load_market_series(dsn: str) -> pd.DataFrame:
+    query_symbols = _regime_market_query_symbols()
     with connect(dsn) as conn:
         frame = pd.read_sql_query(
             """
@@ -676,7 +800,7 @@ def _load_market_series(dsn: str) -> pd.DataFrame:
             ORDER BY date ASC, symbol ASC
             """,
             conn,
-            params=(list(REGIME_REQUIRED_MARKET_SYMBOLS),),
+            params=(list(query_symbols),),
         )
     normalized = _normalize_market_series(frame)
     return _validate_required_market_series(normalized, dsn=dsn)
@@ -1007,6 +1131,83 @@ def _record_regime_reconcile_signal_after_artifact(
     )
 
 
+def _load_regime_input_readiness(dsn: str, *, computed_at: datetime) -> _RegimeInputReadinessResult:
+    market_series = _load_market_series(dsn)
+    macro_inputs = _load_macro_inputs(dsn)
+    inputs = _build_inputs_daily(market_series, macro_inputs, computed_at=computed_at)
+    publish_window = _resolve_publish_window(inputs, market_series=market_series, macro_inputs=macro_inputs)
+    return _RegimeInputReadinessResult(
+        market_series=market_series,
+        macro_inputs=macro_inputs,
+        inputs=inputs,
+        publish_window=publish_window,
+        attempts_used=1,
+        retry_exhausted=False,
+    )
+
+
+def _resolve_regime_input_readiness(dsn: str, *, computed_at: datetime) -> _RegimeInputReadinessResult:
+    retry_config = _resolve_input_readiness_retry_config()
+    last_error: Exception | None = None
+    for attempt in range(1, retry_config.attempts + 1):
+        try:
+            readiness = _load_regime_input_readiness(dsn, computed_at=computed_at)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retry_config.attempts:
+                raise
+            mdc.write_warning(
+                "Gold regime input readiness check failed; retrying: "
+                f"attempt={attempt}/{retry_config.attempts} error={type(exc).__name__}: {exc}"
+            )
+            if retry_config.sleep_seconds > 0:
+                time.sleep(retry_config.sleep_seconds)
+            continue
+
+        publish_window = readiness.publish_window
+        if not publish_window.skipped_trailing_input_dates:
+            return _RegimeInputReadinessResult(
+                market_series=readiness.market_series,
+                macro_inputs=readiness.macro_inputs,
+                inputs=readiness.inputs,
+                publish_window=publish_window,
+                attempts_used=attempt,
+                retry_exhausted=False,
+            )
+
+        metadata = _publish_window_metadata(publish_window)
+        skipped_dates = ",".join(metadata["skipped_trailing_input_dates"]) or "-"
+        if attempt >= retry_config.attempts:
+            mdc.write_warning(
+                "Gold regime input readiness retry exhausted; publishing latest complete window: "
+                f"attempts={attempt} published_as_of_date={metadata['published_as_of_date']} "
+                f"input_as_of_date={metadata['input_as_of_date']} "
+                f"skipped_trailing_input_dates={skipped_dates}"
+            )
+            return _RegimeInputReadinessResult(
+                market_series=readiness.market_series,
+                macro_inputs=readiness.macro_inputs,
+                inputs=readiness.inputs,
+                publish_window=publish_window,
+                attempts_used=attempt,
+                retry_exhausted=True,
+            )
+
+        mdc.write_warning(
+            "Gold regime input readiness incomplete; retrying before publication: "
+            f"attempt={attempt}/{retry_config.attempts} "
+            f"published_as_of_date={metadata['published_as_of_date']} "
+            f"input_as_of_date={metadata['input_as_of_date']} "
+            f"skipped_trailing_input_dates={skipped_dates}"
+        )
+        if retry_config.sleep_seconds > 0:
+            time.sleep(retry_config.sleep_seconds)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Gold regime input readiness retry loop exited without a result.")
+
+
 def main() -> int:
     mdc.log_environment_diagnostics()
     dsn = _require_postgres_dsn()
@@ -1015,14 +1216,14 @@ def main() -> int:
         raise ValueError("AZURE_CONTAINER_GOLD is required for gold regime job.")
 
     computed_at = datetime.now(timezone.utc)
-    market_series = _load_market_series(dsn)
-    macro_inputs = _load_macro_inputs(dsn)
+    readiness = _resolve_regime_input_readiness(dsn, computed_at=computed_at)
+    macro_inputs = readiness.macro_inputs
+    inputs = readiness.inputs
+    publish_window = readiness.publish_window
     repo = RegimeRepository(dsn)
     active_revisions = repo.list_active_regime_model_revisions()
     if not active_revisions:
         raise ValueError("No active regime model revisions found.")
-    inputs = _build_inputs_daily(market_series, macro_inputs, computed_at=computed_at)
-    publish_window = _resolve_publish_window(inputs, market_series=market_series, macro_inputs=macro_inputs)
     publish_window_metadata = _publish_window_metadata(publish_window)
     publish_window_warnings = _publish_window_warnings(publish_window)
     skipped_dates_for_log = ",".join(publish_window_metadata["skipped_trailing_input_dates"]) or "-"
@@ -1042,31 +1243,13 @@ def main() -> int:
             "skipped_count=0"
         )
 
-    if (
-        publish_window.input_as_of_date is not None
-        and publish_window.input_as_of_date > publish_window.published_as_of_date
-    ):
-        retry_pending_state = build_regime_publish_state(
-            published_as_of_date=publish_window_metadata["published_as_of_date"],
-            input_as_of_date=publish_window_metadata["input_as_of_date"],
-            history_rows=0,
-            latest_rows=0,
-            transition_rows=0,
-            active_models=[],
-            downstream_triggered=False,
-            warnings=publish_window_warnings,
-            status="retry_pending",
-            reason="stale_eod_input",
-            failure_mode="none",
-        )
-        log_regime_publication_status(retry_pending_state)
-        mdc.write_warning(
-            "Gold regime publication deferred: "
-            f"published_as_of_date={publish_window_metadata['published_as_of_date']} "
-            f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
-            f"skipped_trailing_input_dates={skipped_dates_for_log}"
-        )
-        return 2
+    publication_status = "published"
+    publication_reason = "none"
+    publication_failure_mode = "none"
+    if readiness.retry_exhausted and publish_window.skipped_trailing_input_dates:
+        publication_status = _PARTIAL_SUCCESS_STATUS
+        publication_reason = _INPUT_READINESS_RETRY_EXHAUSTED_REASON
+        publication_failure_mode = _INPUT_READINESS_FAILURE_MODE
 
     published_inputs = _published_inputs(inputs, window=publish_window)
     published_macro_inputs = _published_inputs(macro_inputs, window=publish_window)
@@ -1145,6 +1328,9 @@ def main() -> int:
         ],
         downstream_triggered=False,
         warnings=publish_window_warnings,
+        status=publication_status,
+        reason=publication_reason,
+        failure_mode=publication_failure_mode,
     )
     _replace_postgres_tables(
         dsn,
@@ -1168,7 +1354,7 @@ def main() -> int:
         when=computed_at,
         after_artifact_published_fn=_record_regime_reconcile_signal_after_artifact,
     )
-    if finalization.status != "published":
+    if finalization.status not in {"published", _PARTIAL_SUCCESS_STATUS}:
         return 1
 
     mdc.write_line(
@@ -1179,6 +1365,7 @@ def main() -> int:
         f"active_models={len(active_models)} published_as_of_date={publish_window_metadata['published_as_of_date']} "
         f"input_as_of_date={publish_window_metadata['input_as_of_date']} "
         f"skipped_trailing_count={len(publish_window.skipped_trailing_input_dates)} "
+        f"input_readiness_attempts={readiness.attempts_used} status={publication_status} "
         "downstream_triggered=false"
     )
     return 0

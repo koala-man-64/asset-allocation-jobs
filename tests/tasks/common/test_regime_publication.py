@@ -79,6 +79,84 @@ def test_finalize_regime_publication_reuses_shared_publish_state_across_surfaces
     assert any("artifact_publication_status layer=gold domain=regime status=published" in message for message in messages)
 
 
+def test_finalize_regime_publication_persists_partial_success_state(monkeypatch) -> None:
+    messages: list[str] = []
+    captured: dict[str, object] = {}
+    marker_metadata: list[dict[str, object]] = []
+    saved_watermarks: list[tuple[str, dict[str, object]]] = []
+    saved_last_success: list[tuple[str, datetime, dict[str, object]]] = []
+
+    monkeypatch.setattr(regime_publication.mdc, "get_storage_client", lambda _container: object())
+    monkeypatch.setattr(
+        regime_publication.domain_artifacts,
+        "publish_domain_artifact_payload",
+        lambda *, payload, client=None: captured.update({"payload": dict(payload), "client": client})
+        or {"artifactPath": "regime/_metadata/domain.json"},
+    )
+    monkeypatch.setattr(
+        regime_publication,
+        "save_watermarks",
+        lambda key, items: saved_watermarks.append((key, dict(items))),
+    )
+    monkeypatch.setattr(
+        regime_publication,
+        "save_last_success",
+        lambda key, *, when, metadata=None: saved_last_success.append((key, when, dict(metadata or {}))),
+    )
+    monkeypatch.setattr(
+        regime_publication,
+        "write_system_health_marker",
+        lambda *, layer, domain, job_name="", metadata=None: marker_metadata.append(dict(metadata or {})) or True,
+    )
+    monkeypatch.setattr(regime_publication.mdc, "write_line", lambda msg: messages.append(str(msg)))
+    monkeypatch.setattr(regime_publication.mdc, "write_error", lambda msg: messages.append(str(msg)))
+
+    publish_state = regime_publication.build_regime_publish_state(
+        published_as_of_date="2026-03-19",
+        input_as_of_date="2026-03-20",
+        history_rows=2,
+        latest_rows=1,
+        transition_rows=1,
+        active_models=[{"model_name": "default-regime", "model_version": 2}],
+        downstream_triggered=False,
+        warnings=["Trailing incomplete regime input dates skipped from published regime surfaces: 2026-03-20."],
+        status="partial_success",
+        reason="input_readiness_retry_exhausted",
+        failure_mode="input_readiness",
+    )
+    when = datetime(2026, 3, 20, 12, 0, tzinfo=timezone.utc)
+
+    result = regime_publication.finalize_regime_publication(
+        gold_container="gold",
+        inputs=pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-19")]}),
+        history=pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-19")]}),
+        latest=pd.DataFrame({"as_of_date": [pd.Timestamp("2026-03-19")]}),
+        transitions=pd.DataFrame({"effective_from_date": [pd.Timestamp("2026-03-19")]}),
+        active_models=[{"name": "default-regime", "version": 2, "activated_at": "2026-03-20T00:00:00Z"}],
+        publish_state=publish_state,
+        job_name="gold-regime-job",
+        watermark_key="gold_regime_features",
+        when=when,
+        write_marker_fn=regime_publication.write_system_health_marker,
+        save_watermarks_fn=regime_publication.save_watermarks,
+        save_last_success_fn=regime_publication.save_last_success,
+    )
+
+    assert result.status == "partial_success"
+    assert result.reason == "input_readiness_retry_exhausted"
+    assert result.failure_mode == "input_readiness"
+    assert captured["payload"]["status"] == "partial_success"
+    assert captured["payload"]["input_as_of_date"] == "2026-03-20"
+    assert captured["payload"]["published_as_of_date"] == "2026-03-19"
+    assert saved_watermarks == [("gold_regime_features", publish_state)]
+    assert marker_metadata == [publish_state]
+    assert saved_last_success == [("gold_regime_features", when, publish_state)]
+    assert any(
+        "artifact_publication_status layer=gold domain=regime status=partial_success" in message
+        for message in messages
+    )
+
+
 def test_finalize_regime_publication_blocks_before_success_markers_when_reconcile_signal_fails(monkeypatch) -> None:
     messages: list[str] = []
     saved_watermarks: list[tuple[str, dict[str, object]]] = []
