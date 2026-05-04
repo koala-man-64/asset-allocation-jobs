@@ -25,6 +25,10 @@ from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client impo
 )
 from asset_allocation_contracts.market_history import MARKET_HISTORY_START_DATE, MARKET_HISTORY_STATUS_NO_HISTORY
 from asset_allocation_runtime_common.market_data import symbol_availability
+from asset_allocation_runtime_common.market_data.symbol_identity import (
+    canonicalize_provider_symbol,
+    provider_symbol_for_query,
+)
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.market_data.pipeline import ListManager
 from asset_allocation_runtime_common.market_data import bronze_bucketing
@@ -63,11 +67,6 @@ _FULL_HISTORY_START_DATE = MARKET_HISTORY_START_DATE
 _SNAPSHOT_BATCH_SIZE = 250
 _SNAPSHOT_ASSET_TYPE = "stocks"
 _REGIME_REQUIRED_MARKET_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "ACWI", "^VIX", "^VIX3M"})
-_MASSIVE_MARKET_HISTORY_SYMBOL_ALIASES = {
-    "^VIX": "I:VIX",
-    "^VIX3M": "I:VIX3M",
-}
-_MASSIVE_PROVIDER_SYMBOL_ALIASES = {provider: canonical for canonical, provider in _MASSIVE_MARKET_HISTORY_SYMBOL_ALIASES.items()}
 _REGIME_REQUIRED_EQUITY_MARKET_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "ACWI"})
 _BUCKET_COLUMNS = [
     "symbol",
@@ -120,13 +119,17 @@ def _is_regime_required_market_symbol(symbol: object) -> bool:
 
 
 def _canonical_market_symbol(symbol: object) -> str:
-    normalized = str(symbol or "").strip().upper()
-    return _MASSIVE_PROVIDER_SYMBOL_ALIASES.get(normalized, normalized)
+    raw = str(symbol or "").strip()
+    if not raw:
+        return ""
+    return canonicalize_provider_symbol(_PROVIDER, _DOMAIN, raw)
 
 
 def _provider_market_history_symbol(symbol: object) -> str:
     canonical = _canonical_market_symbol(symbol)
-    return _MASSIVE_MARKET_HISTORY_SYMBOL_ALIASES.get(canonical, canonical)
+    if not canonical:
+        return ""
+    return provider_symbol_for_query(_PROVIDER, _DOMAIN, canonical)
 
 
 def _with_required_market_symbols(symbols: list[str]) -> list[str]:
@@ -1532,7 +1535,9 @@ async def main_async() -> int:
         "Bronze market availability sync: "
         f"provider={sync_result.provider} listed_count={sync_result.listed_count} "
         f"inserted_count={sync_result.inserted_count} disabled_count={sync_result.disabled_count} "
-        f"duration_ms={sync_result.duration_ms} lock_wait_ms={sync_result.lock_wait_ms}"
+        f"duration_ms={sync_result.duration_ms} lock_wait_ms={sync_result.lock_wait_ms} "
+        f"alias_resolution_count={getattr(sync_result, 'alias_resolution_count', 0)} "
+        f"alias_resolution_failure_count={getattr(sync_result, 'alias_resolution_failure_count', 0)}"
     )
     df_symbols = symbol_availability.get_domain_symbols("market")
     provider_available_count = int(df_symbols["Symbol"].dropna().shape[0]) if "Symbol" in df_symbols.columns else 0

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from asset_allocation_runtime_common.market_data.symbol_identity import UnsupportedProviderSymbolError
 from tasks.market_data import bronze_market_data as bronze
 
 
@@ -393,6 +394,17 @@ def test_with_required_market_symbols_schedules_canonical_vix_aliases() -> None:
     assert "^VIX" in symbols
     assert "^VIX3M" in symbols
     assert "I:VIX" not in symbols
+
+
+def test_market_symbol_resolver_rejects_bare_vix_aliases() -> None:
+    with pytest.raises(UnsupportedProviderSymbolError):
+        bronze._canonical_market_symbol("VIX")
+
+
+def test_provider_market_history_symbol_uses_massive_vix_aliases() -> None:
+    assert bronze._provider_market_history_symbol("^VIX") == "I:VIX"
+    assert bronze._provider_market_history_symbol("^VIX3M") == "I:VIX3M"
+    assert bronze._provider_market_history_symbol("SPY") == "SPY"
 
 
 def test_bronze_required_symbol_gate_blocks_incomplete_publish_session() -> None:

@@ -78,9 +78,10 @@ Gold Delta remains the source of truth. The gold jobs now replicate successful b
   - the bucket still writes surviving symbols to Delta and Postgres
   - the bucket emits `status=ok_with_failures`
   - final symbol-index publication and final watermark persistence stay blocked for the run
-- Critical market symbols `SPY`, `^VIX`, and `^VIX3M` remain fail-closed:
+- Critical market symbols `SPY`, `QQQ`, `IWM`, `ACWI`, `^VIX`, and `^VIX3M` remain fail-closed:
   - a compute failure on any of those symbols aborts the bucket write
   - a post-sync verification failure in `gold.market_data` blocks final publication
+- Bronze market availability sync logs include `alias_resolution_count` and `alias_resolution_failure_count` so provider-native symbols such as Massive `I:VIX` and `I:VIX3M` can be audited at the scheduling boundary.
 - Operator-facing market logs now distinguish:
   - `layer_handoff_status ... status=ok_with_failures` for ordinary-symbol partial success
   - `layer_handoff_status ... status=failed ... critical_symbol=true symbol=<ticker>` for regime-critical hard failures

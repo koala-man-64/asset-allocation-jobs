@@ -20,6 +20,7 @@ from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client import AlphaVantageGatewayClient
 from asset_allocation_runtime_common.providers.massive_gateway_client import MassiveGatewayClient
 from asset_allocation_runtime_common.foundation.postgres import connect
+from asset_allocation_runtime_common.market_data.symbol_identity import canonicalize_provider_symbol
 
 DomainName = Literal["market", "finance", "earnings", "price-target"]
 ProviderName = Literal["massive", "alpha_vantage", "nasdaq"]
@@ -41,10 +42,6 @@ PROVIDER_SOURCE_COLUMN_MAP: dict[ProviderName, str] = {
     "alpha_vantage": "source_alpha_vantage",
     "nasdaq": "source_nasdaq",
 }
-_MASSIVE_PROVIDER_ALIASES = {
-    "I:VIX": "^VIX",
-    "I:VIX3M": "^VIX3M",
-}
 _MARKET_ALLOWED_ASSET_TYPES = frozenset({"STOCK", "ETF", "FUND", "CS", "ETS", "ETV", "ETN"})
 _MARKET_REQUIRED_SYMBOLS = frozenset({"SPY", "^VIX", "^VIX3M"})
 _ADVISORY_LOCK_KEYS: dict[str, tuple[int, int]] = {
@@ -63,6 +60,8 @@ class SyncResult:
     disabled_count: int
     duration_ms: int
     lock_wait_ms: int
+    alias_resolution_count: int = 0
+    alias_resolution_failure_count: int = 0
 
 
 def _normalize_symbol(value: object) -> str:
@@ -70,8 +69,7 @@ def _normalize_symbol(value: object) -> str:
 
 
 def _normalize_massive_symbol(value: object) -> str:
-    normalized = _normalize_symbol(value)
-    return _MASSIVE_PROVIDER_ALIASES.get(normalized, normalized)
+    return canonicalize_provider_symbol("massive", "market", value)
 
 
 def _normalize_asset_type(value: object) -> str:
@@ -102,14 +100,17 @@ def get_symbol_availability_mask(
 
 def _normalize_massive_records(records: list[dict[str, object]]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
+    alias_resolution_count = 0
     for record in records:
         if not isinstance(record, dict):
             continue
-        symbol = _normalize_massive_symbol(
-            record.get("Symbol") or record.get("symbol") or record.get("ticker")
-        )
-        if not symbol:
+        raw_symbol = record.get("Symbol") or record.get("symbol") or record.get("ticker")
+        normalized_raw = _normalize_symbol(raw_symbol)
+        if not normalized_raw:
             continue
+        symbol = _normalize_massive_symbol(raw_symbol)
+        if symbol != normalized_raw:
+            alias_resolution_count += 1
         rows.append(
             {
                 "Symbol": symbol,
@@ -124,7 +125,9 @@ def _normalize_massive_records(records: list[dict[str, object]]) -> pd.DataFrame
     out = pd.DataFrame(rows)
     out["Symbol"] = out["Symbol"].astype(str).str.strip().str.upper()
     out = out[out["Symbol"].ne("")]
-    return out.drop_duplicates(subset=["Symbol"]).reset_index(drop=True)
+    out = out.drop_duplicates(subset=["Symbol"]).reset_index(drop=True)
+    out.attrs["alias_resolution_count"] = alias_resolution_count
+    return out
 
 
 def _market_domain_eligibility_mask(df: pd.DataFrame) -> pd.Series:
@@ -221,6 +224,8 @@ def _provider_sync_payload(*, domain: DomainName, result: SyncResult) -> dict[st
             "disabled_count": int(result.disabled_count),
             "duration_ms": int(result.duration_ms),
             "lock_wait_ms": int(result.lock_wait_ms),
+            "alias_resolution_count": int(result.alias_resolution_count),
+            "alias_resolution_failure_count": int(result.alias_resolution_failure_count),
             "refreshed_at": pd.Timestamp.utcnow().isoformat(),
         }
     }
@@ -333,6 +338,8 @@ def sync_domain_availability(domain: DomainName) -> SyncResult:
                     disabled_count=disabled_count,
                     duration_ms=int((time.perf_counter() - started) * 1000),
                     lock_wait_ms=lock_wait_ms,
+                    alias_resolution_count=int(df_symbols.attrs.get("alias_resolution_count", 0) or 0),
+                    alias_resolution_failure_count=int(df_symbols.attrs.get("alias_resolution_failure_count", 0) or 0),
                 )
                 cur.execute(
                     f"""
