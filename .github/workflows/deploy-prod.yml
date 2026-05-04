@@ -196,7 +196,7 @@ jobs:
           image_digest="${{ steps.image.outputs.image_digest }}"
           case "${image_digest}" in
             "${expected_prefix}"*)
-              digest="${image_digest#${expected_prefix}}"
+              digest="${image_digest#"${expected_prefix}"}"
               ;;
             *)
               echo "Resolved image must point to ${expected_prefix}<digest>." >&2
