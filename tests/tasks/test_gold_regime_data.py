@@ -8,6 +8,7 @@ import pytest
 
 from asset_allocation_contracts.strategy_publication import StrategyPublicationReconcileSignalResponse
 from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
+from tasks.common.regime_publication import RegimePublicationFinalizationResult
 from tasks.regime_data import gold_regime_data as regime_job
 
 
@@ -85,9 +86,117 @@ def _macro_row(as_of_date: str, **overrides: Any) -> dict[str, Any]:
     return base
 
 
+def _complete_regime_input_row(as_of_date: str, *, complete: bool = True, **overrides: Any) -> dict[str, Any]:
+    base = {
+        **_macro_row(as_of_date),
+        "spy_close": 110.0,
+        "qqq_close": 120.0,
+        "iwm_close": 95.0,
+        "acwi_close": 88.0,
+        "return_1d": 0.01,
+        "return_20d": 0.04,
+        "qqq_return_20d": 0.05,
+        "iwm_return_20d": 0.01,
+        "acwi_return_20d": 0.02,
+        "spy_sma_200d": 100.0,
+        "qqq_sma_200d": 105.0,
+        "atr_14d": 2.5,
+        "gap_atr": 0.2,
+        "bb_width_20d": 0.1,
+        "rsi_14d": 55.0,
+        "volume_pct_rank_252d": 0.55,
+        "vix_spot_close": 14.0,
+        "vix3m_close": 15.0,
+        "vix_slope": 1.0,
+        "vix_gt_32_streak": 0,
+        "inputs_complete_flag": complete,
+    }
+    if not complete:
+        base["rate_10y"] = None
+    base.update(overrides)
+    return base
+
+
 def test_regime_job_uses_shared_required_market_symbol_contract() -> None:
     assert regime_job.REGIME_REQUIRED_MARKET_SYMBOLS == REGIME_REQUIRED_MARKET_SYMBOLS
     assert REGIME_REQUIRED_MARKET_SYMBOLS == ("SPY", "QQQ", "IWM", "ACWI", "^VIX", "^VIX3M")
+
+
+def test_regime_market_query_symbols_include_provider_aliases() -> None:
+    query_symbols = regime_job._regime_market_query_symbols()
+
+    assert "SPY" in query_symbols
+    assert "QQQ" in query_symbols
+    assert "^VIX" in query_symbols
+    assert "I:VIX" in query_symbols
+    assert "^VIX3M" in query_symbols
+    assert "I:VIX3M" in query_symbols
+    assert len(query_symbols) == len(set(query_symbols))
+
+
+def test_normalize_market_series_resolves_provider_aliases_for_required_symbols() -> None:
+    frame = pd.DataFrame(
+        [
+            _market_row("SPY", "2026-03-20"),
+            _market_row("QQQ", "2026-03-20"),
+            _market_row("IWM", "2026-03-20"),
+            _market_row("ACWI", "2026-03-20"),
+            _market_row("I:VIX", "2026-03-20", return_1d=None, return_20d=None),
+            _market_row("I:VIX3M", "2026-03-20", return_1d=None, return_20d=None),
+        ]
+    )
+
+    normalized = regime_job._normalize_market_series(frame)
+
+    assert "^VIX" in normalized["symbol"].tolist()
+    assert "^VIX3M" in normalized["symbol"].tolist()
+    assert "I:VIX" not in normalized["symbol"].tolist()
+    assert "I:VIX3M" not in normalized["symbol"].tolist()
+    regime_job._validate_required_market_series(normalized)
+
+
+def test_normalize_market_series_prefers_canonical_symbol_rows_over_provider_alias_duplicates() -> None:
+    normalized = regime_job._normalize_market_series(
+        pd.DataFrame(
+            [
+                _market_row("I:VIX", "2026-03-20", close=22.0),
+                _market_row("^VIX", "2026-03-20", close=14.0),
+            ]
+        )
+    )
+
+    vix_rows = normalized[normalized["symbol"] == "^VIX"]
+    assert len(vix_rows) == 1
+    assert vix_rows.iloc[0]["close"] == 14.0
+
+
+def test_load_market_series_queries_canonical_and_provider_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_params: list[object] = []
+
+    def _fake_read_sql_query(_sql: str, _conn: object, params=None):
+        captured_params.append(params)
+        return pd.DataFrame(
+            [
+                _market_row("SPY", "2026-03-20"),
+                _market_row("QQQ", "2026-03-20"),
+                _market_row("IWM", "2026-03-20"),
+                _market_row("ACWI", "2026-03-20"),
+                _market_row("I:VIX", "2026-03-20", return_1d=None, return_20d=None),
+                _market_row("I:VIX3M", "2026-03-20", return_1d=None, return_20d=None),
+            ]
+        )
+
+    monkeypatch.setattr(regime_job, "connect", lambda _dsn: _FakeConnection(_FakeCursor()))
+    monkeypatch.setattr(regime_job.pd, "read_sql_query", _fake_read_sql_query)
+
+    market_series = regime_job._load_market_series("postgresql://test")
+
+    queried_symbols = captured_params[0][0]
+    assert "^VIX" in queried_symbols
+    assert "I:VIX" in queried_symbols
+    assert "^VIX3M" in queried_symbols
+    assert "I:VIX3M" in queried_symbols
+    assert set(market_series["symbol"]) == set(REGIME_REQUIRED_MARKET_SYMBOLS)
 
 
 def test_validate_required_market_series_reports_missing_symbols() -> None:
@@ -143,6 +252,10 @@ def test_record_regime_reconcile_signal_posts_durable_publication_fingerprint(mo
             "latest_rows": 2,
             "transition_rows": 1,
             "active_models": [{"model_name": "default-regime", "model_version": 3}],
+            "status": "partial_success",
+            "reason": "input_readiness_retry_exhausted",
+            "failure_mode": "input_readiness",
+            "warnings": ["partial input readiness"],
         },
         source_fingerprint="fp-123",
         domain_artifact_path="regime/_metadata/domain.json",
@@ -445,11 +558,16 @@ def test_replace_postgres_tables_uses_staged_apply_for_macro_and_regime_tables(
     assert any("DELETE FROM gold.regime_history AS target" in sql for sql, _params in cursor.executed)
 
 
-def test_main_returns_retry_pending_when_latest_macro_join_is_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
-    logged_states: list[dict[str, Any]] = []
+def test_main_returns_partial_success_when_latest_macro_join_is_incomplete_after_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_publish_states: list[dict[str, Any]] = []
+    readiness_attempts = {"count": 0}
 
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://test")
     monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")
+    monkeypatch.setenv("GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS", "0")
     monkeypatch.setattr(
         regime_job,
         "_load_market_series",
@@ -465,71 +583,154 @@ def test_main_returns_retry_pending_when_latest_macro_join_is_incomplete(monkeyp
     monkeypatch.setattr(
         regime_job,
         "_build_inputs_daily",
-        lambda _market, _macro, computed_at: pd.DataFrame(
+        lambda _market, _macro, computed_at: readiness_attempts.__setitem__("count", readiness_attempts["count"] + 1)
+        or pd.DataFrame(
             [
-                {
-                    **_macro_row("2026-03-20"),
-                    "spy_close": 110.0,
-                    "qqq_close": 120.0,
-                    "iwm_close": 95.0,
-                    "acwi_close": 88.0,
-                    "return_1d": 0.01,
-                    "return_20d": 0.04,
-                    "qqq_return_20d": 0.05,
-                    "iwm_return_20d": 0.01,
-                    "acwi_return_20d": 0.02,
-                    "spy_sma_200d": 100.0,
-                    "qqq_sma_200d": 105.0,
-                    "atr_14d": 2.5,
-                    "gap_atr": 0.2,
-                    "bb_width_20d": 0.1,
-                    "rsi_14d": 55.0,
-                    "volume_pct_rank_252d": 0.55,
-                    "vix_spot_close": 14.0,
-                    "vix3m_close": 15.0,
-                    "vix_slope": 1.0,
-                    "vix_gt_32_streak": 0,
-                    "inputs_complete_flag": True,
-                },
-                {
-                    **_macro_row("2026-03-21", rate_10y=None),
-                    "spy_close": 111.0,
-                    "qqq_close": 121.0,
-                    "iwm_close": 96.0,
-                    "acwi_close": 89.0,
-                    "return_1d": 0.01,
-                    "return_20d": 0.04,
-                    "qqq_return_20d": 0.05,
-                    "iwm_return_20d": 0.01,
-                    "acwi_return_20d": 0.02,
-                    "spy_sma_200d": 100.0,
-                    "qqq_sma_200d": 105.0,
-                    "atr_14d": 2.5,
-                    "gap_atr": 0.2,
-                    "bb_width_20d": 0.1,
-                    "rsi_14d": 55.0,
-                    "volume_pct_rank_252d": 0.55,
-                    "vix_spot_close": 14.0,
-                    "vix3m_close": 15.0,
-                    "vix_slope": 1.0,
-                    "vix_gt_32_streak": 0,
-                    "inputs_complete_flag": False,
-                },
+                _complete_regime_input_row("2026-03-20", complete=True),
+                _complete_regime_input_row("2026-03-21", complete=False),
             ]
         ),
     )
     monkeypatch.setattr(
         regime_job.RegimeRepository,
         "list_active_regime_model_revisions",
-        lambda self: [{"name": "default-regime", "version": 3, "config": {}}],
+        lambda self: [{"name": "default-regime", "version": 3, "config": {"activationThreshold": 0.6}}],
     )
-    monkeypatch.setattr(regime_job, "log_regime_publication_status", lambda state, failed_finalization=0: logged_states.append(dict(state)))
+    monkeypatch.setattr(
+        regime_job,
+        "build_regime_outputs",
+        lambda inputs, *, model_name, model_version, config, computed_at: (
+            pd.DataFrame(
+                [
+                    {
+                        "as_of_date": pd.Timestamp("2026-03-20"),
+                        "effective_from_date": pd.Timestamp("2026-03-23"),
+                        "model_name": model_name,
+                        "model_version": model_version,
+                        "regime_code": "trending_up",
+                        "display_name": "Trending (Up)",
+                        "signal_state": "active",
+                        "score": 1.0,
+                        "activation_threshold": 0.6,
+                        "is_active": True,
+                        "matched_rule_id": "trending_up",
+                        "halt_flag": False,
+                        "halt_reason": None,
+                        "evidence_json": "{}",
+                        "computed_at": computed_at,
+                    }
+                ]
+            ),
+            pd.DataFrame(
+                [
+                    {
+                        "as_of_date": pd.Timestamp("2026-03-20"),
+                        "effective_from_date": pd.Timestamp("2026-03-23"),
+                        "model_name": model_name,
+                        "model_version": model_version,
+                        "regime_code": "trending_up",
+                        "display_name": "Trending (Up)",
+                        "signal_state": "active",
+                        "score": 1.0,
+                        "activation_threshold": 0.6,
+                        "is_active": True,
+                        "matched_rule_id": "trending_up",
+                        "halt_flag": False,
+                        "halt_reason": None,
+                        "evidence_json": "{}",
+                        "computed_at": computed_at,
+                    }
+                ]
+            ),
+            pd.DataFrame(
+                [
+                    {
+                        "model_name": model_name,
+                        "model_version": model_version,
+                        "effective_from_date": pd.Timestamp("2026-03-23"),
+                        "regime_code": "trending_up",
+                        "transition_type": "entered",
+                        "prior_score": None,
+                        "new_score": 1.0,
+                        "activation_threshold": 0.6,
+                        "trigger_rule_id": "trending_up",
+                        "computed_at": computed_at,
+                    }
+                ]
+            ),
+        ),
+    )
+    monkeypatch.setattr(regime_job, "_write_storage_parquet_outputs", lambda **_kwargs: None)
+    monkeypatch.setattr(regime_job, "_replace_postgres_tables", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        regime_job,
+        "finalize_regime_publication",
+        lambda **kwargs: captured_publish_states.append(dict(kwargs["publish_state"]))
+        or RegimePublicationFinalizationResult(
+            status="partial_success",
+            reason="input_readiness_retry_exhausted",
+            failure_mode="input_readiness",
+            failed_finalization=0,
+            domain_artifact_path="regime/_metadata/domain.json",
+            health_marker_written=True,
+            publish_state=dict(kwargs["publish_state"]),
+            source_fingerprint="fp-123",
+        ),
+    )
     monkeypatch.setattr(regime_job.mdc, "log_environment_diagnostics", lambda: None)
     monkeypatch.setattr(regime_job.mdc, "write_warning", lambda _msg: None)
     monkeypatch.setattr(regime_job.mdc, "write_line", lambda _msg: None)
 
     result = regime_job.main()
 
-    assert result == 2
-    assert logged_states[0]["status"] == "retry_pending"
-    assert logged_states[0]["published_as_of_date"] == "2026-03-20"
+    assert result == 0
+    assert readiness_attempts["count"] == 2
+    assert captured_publish_states[0]["status"] == "partial_success"
+    assert captured_publish_states[0]["reason"] == "input_readiness_retry_exhausted"
+    assert captured_publish_states[0]["failure_mode"] == "input_readiness"
+    assert captured_publish_states[0]["published_as_of_date"] == "2026-03-20"
+    assert captured_publish_states[0]["input_as_of_date"] == "2026-03-21"
+    assert captured_publish_states[0]["warnings"]
+
+
+def test_main_fails_after_retries_when_no_complete_input_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    publish_calls = {"count": 0}
+    readiness_attempts = {"count": 0}
+
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql://test")
+    monkeypatch.setenv("AZURE_CONTAINER_GOLD", "gold")
+    monkeypatch.setenv("GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS", "0")
+    monkeypatch.setattr(
+        regime_job,
+        "_load_market_series",
+        lambda _dsn: regime_job._normalize_market_series(
+            pd.DataFrame([_market_row(symbol, "2026-03-20") for symbol in REGIME_REQUIRED_MARKET_SYMBOLS])
+        ),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "_load_macro_inputs",
+        lambda _dsn: regime_job._normalize_macro_inputs(pd.DataFrame([_macro_row("2026-03-20", rate_10y=None)])),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "_build_inputs_daily",
+        lambda _market, _macro, computed_at: readiness_attempts.__setitem__("count", readiness_attempts["count"] + 1)
+        or pd.DataFrame([_complete_regime_input_row("2026-03-20", complete=False)]),
+    )
+    monkeypatch.setattr(
+        regime_job,
+        "finalize_regime_publication",
+        lambda **_kwargs: publish_calls.__setitem__("count", publish_calls["count"] + 1),
+    )
+    monkeypatch.setattr(regime_job.mdc, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(regime_job.mdc, "write_warning", lambda _msg: None)
+    monkeypatch.setattr(regime_job.mdc, "write_line", lambda _msg: None)
+    monkeypatch.setattr(regime_job.mdc, "write_error", lambda _msg: None)
+
+    with pytest.raises(ValueError, match="no complete multi-label regime rows"):
+        regime_job.main()
+
+    assert readiness_attempts["count"] == 2
+    assert publish_calls["count"] == 0

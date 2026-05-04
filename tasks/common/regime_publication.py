@@ -219,8 +219,9 @@ def finalize_regime_publication(
         save_watermarks_fn(watermark_key, dict(publish_state))
         save_last_success_fn(watermark_key, when=when, metadata=dict(publish_state))
         log_regime_publication_status(publish_state)
+        successful_status = str(publish_state.get("status") or "published").strip() or "published"
         return RegimePublicationFinalizationResult(
-            status="published",
+            status=successful_status,
             reason=str(publish_state.get("reason") or "none"),
             failure_mode=str(publish_state.get("failure_mode") or "none"),
             failed_finalization=0,

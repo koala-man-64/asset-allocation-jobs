@@ -6,6 +6,7 @@ All gold jobs now emit the same final `artifact_publication_status` contract, bu
 
 - Bucketed jobs (`market`, `finance`, `earnings`, `price-target`) persist bucket state incrementally and publish root `domain.json` once at end-of-run.
 - `regime` is a single-domain publication. It writes parquet surfaces first, then finalizes one shared publish-state payload across artifact metadata, watermarks, and health markers.
+- `regime` can finish with `partial_success` when the latest input date is incomplete after bounded readiness retries, but an earlier complete publish window exists.
 
 This applies to:
 
@@ -62,13 +63,16 @@ Shared regime publish-state fields:
 - `bucket`: one or more buckets failed at a hard bucket stage such as write or checkpoint.
 - `finalization`: the bucket work completed, but final publication failed during end-of-run checks or final index publication.
 - `mixed`: more than one failure class occurred in the same run.
+- `input_readiness`: the latest regime input date remained incomplete after retries; the regime job published only through the latest complete input date.
 
 ## Operational Interpretation
 
 - Treat root `domain.json` as final domain state only. It should not appear mid-run anymore.
 - During a live run, bucket artifacts plus the gold symbol index remain the interim source of truth.
 - For root-cause analysis, use the final publication log to classify the failure, then inspect earlier per-bucket logs to find the specific failing symbol or bucket.
-- For `regime`, stale end-of-day inputs fail closed. The job emits `artifact_publication_status ... status=retry_pending reason=stale_eod_input` and does not advance success metadata or publication signals.
+- For `regime`, input readiness is retried before publication. Defaults are 3 attempts and 60 seconds between attempts. Operators can override them with `GOLD_REGIME_INPUT_READINESS_RETRY_ATTEMPTS` and `GOLD_REGIME_INPUT_READINESS_RETRY_SLEEP_SECONDS`; invalid values are capped back to safe runtime defaults.
+- If the latest `regime` input date is still incomplete after retries, but at least one complete input date exists, the job publishes valid regime state through the latest complete `published_as_of_date`, emits `artifact_publication_status ... status=partial_success reason=input_readiness_retry_exhausted failure_mode=input_readiness`, writes success metadata with warnings, and exits `0`.
+- `partial_success` never publishes incomplete regime rows. If there are no complete regime input rows, or if market/macro inputs cannot be loaded after retries, the job still fails hard and does not publish.
 - `regime` is `strategy-compute`, not a gold medallion pipeline stage. After successful publication, it records a durable reconcile signal keyed by `regime + sourceFingerprint`; `results-reconcile-job` sweeps those signals as `operational-support`.
 
 ## Example
@@ -92,6 +96,8 @@ The strategy-compute rollout adds a Postgres signal table, but rollback does not
 Rollback is limited to:
 
 - `tasks/common/gold_checkpoint_publication.py`
+- `tasks/common/regime_publication.py`
+- `tasks/regime_data/gold_regime_data.py`
 - the four gold job call sites
 - test and doc updates
 
