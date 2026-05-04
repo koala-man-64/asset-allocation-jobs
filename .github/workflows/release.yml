@@ -128,6 +128,9 @@ jobs:
             --git-sha "${RELEASE_GIT_SHA}" \
             --image-ref "${IMAGE_REF}" \
             --image-digest "${IMAGE_DIGEST}" \
+            --release-run-id "${GITHUB_RUN_ID}" \
+            --release-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --created-at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --contracts-version "${CONTRACTS_VERSION}" \
             --runtime-common-version "${RUNTIME_COMMON_VERSION}" \
             --jobs-version "${JOBS_VERSION}" \

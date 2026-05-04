@@ -31,6 +31,7 @@ def build_command(
     command = [
         "docker",
         "build",
+        "--pull",
         "--file",
         dockerfile,
         "--tag",

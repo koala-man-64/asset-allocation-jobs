@@ -11,6 +11,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--git-sha", required=True, help="Git commit SHA.")
     parser.add_argument("--image-ref", required=True, help="Built image reference.")
     parser.add_argument("--image-digest", required=True, help="Published image digest.")
+    parser.add_argument("--release-run-id", required=True, help="GitHub Actions release run ID.")
+    parser.add_argument("--release-run-attempt", required=True, help="GitHub Actions release run attempt.")
+    parser.add_argument("--created-at", required=True, help="UTC release manifest creation timestamp.")
     parser.add_argument("--contracts-version", required=True, help="Pinned contracts package version.")
     parser.add_argument("--runtime-common-version", required=True, help="Pinned runtime-common package version.")
     parser.add_argument("--jobs-version", required=True, help="Jobs package version.")
@@ -24,6 +27,9 @@ def build_manifest(
     git_sha: str,
     image_ref: str,
     image_digest: str,
+    release_run_id: str,
+    release_run_attempt: str,
+    created_at: str,
     contracts_version: str,
     runtime_common_version: str,
     jobs_version: str,
@@ -34,6 +40,9 @@ def build_manifest(
         "artifact_kind": "container-image",
         "artifact_ref": image_ref,
         "image_digest": image_digest,
+        "release_run_id": release_run_id,
+        "release_run_attempt": release_run_attempt,
+        "created_at": created_at,
         "version_matrix": {
             "contracts": contracts_version,
             "runtime_common": runtime_common_version,
@@ -56,6 +65,9 @@ def main() -> None:
         git_sha=args.git_sha,
         image_ref=args.image_ref,
         image_digest=args.image_digest,
+        release_run_id=args.release_run_id,
+        release_run_attempt=args.release_run_attempt,
+        created_at=args.created_at,
         contracts_version=args.contracts_version,
         runtime_common_version=args.runtime_common_version,
         jobs_version=args.jobs_version,

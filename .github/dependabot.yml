@@ -17,6 +17,12 @@ updates:
       - "*"
     multi-ecosystem-group: all-dependencies
 
+  - package-ecosystem: docker
+    directory: /
+    patterns:
+      - "*"
+    multi-ecosystem-group: all-dependencies
+
   - package-ecosystem: pip
     directory: /
     patterns:

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Tasks-only image for Azure Container Apps Jobs.
-FROM python:3.14-slim-bookworm
+FROM python:3.14-slim-bookworm@sha256:2e256d0381371566ed96980584957ed31297f437569b79b0e5f7e17f2720e53a
 
 WORKDIR /app
 RUN addgroup --system app && adduser --system --ingroup app app

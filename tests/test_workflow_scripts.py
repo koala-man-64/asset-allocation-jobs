@@ -173,6 +173,9 @@ def test_write_release_manifest_writes_expected_shape(tmp_path: Path) -> None:
         git_sha="abc123",
         image_ref="registry/image:tag",
         image_digest="registry/image@sha256:deadbeef",
+        release_run_id="42",
+        release_run_attempt="1",
+        created_at="2026-05-04T12:00:00Z",
         contracts_version="1.0.0",
         runtime_common_version="2.0.0",
         jobs_version="3.0.0",
@@ -183,7 +186,11 @@ def test_write_release_manifest_writes_expected_shape(tmp_path: Path) -> None:
 
     written = output_path.read_text(encoding="utf-8")
     assert '"repo": "owner/repo"' in written
+    assert '"artifact_kind": "container-image"' in written
+    assert '"artifact_ref": "registry/image:tag"' in written
     assert '"image_digest": "registry/image@sha256:deadbeef"' in written
+    assert '"release_run_id": "42"' in written
+    assert '"created_at": "2026-05-04T12:00:00Z"' in written
     assert '"contracts": "1.0.0"' in written
 
 
@@ -240,9 +247,12 @@ def test_download_bytes_uses_github_api_headers(monkeypatch: pytest.MonkeyPatch)
 
 def test_resolve_release_image_uses_latest_successful_release_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_module("scripts/workflows/resolve_release_image_digest.py", "resolve_release_image_digest")
+    digest = "assetalloc.azurecr.io/asset-allocation-jobs@sha256:" + ("a" * 64)
 
     def fake_request_json(url: str, token: str) -> dict[str, object]:
         assert token == "test-token"
+        if "/git/ref/heads/main" in url:
+            return {"object": {"sha": "def456"}}
         if "/actions/workflows/release.yml/runs" in url:
             return {
                 "workflow_runs": [
@@ -252,6 +262,8 @@ def test_resolve_release_image_uses_latest_successful_release_artifact(monkeypat
                         "conclusion": "success",
                         "head_branch": "main",
                         "head_sha": "def456",
+                        "run_attempt": 1,
+                        "created_at": "2026-05-04T12:00:00Z",
                         "html_url": "https://github.example/runs/11",
                     },
                 ]
@@ -277,7 +289,12 @@ def test_resolve_release_image_uses_latest_successful_release_artifact(monkeypat
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr(
             "release-manifest.json",
-            '{"image_digest": "registry/image@sha256:feedbeef", "git_sha": "abc123"}',
+            (
+                '{"artifact_kind": "container-image", "repo": "owner/repo", "git_sha": "def456", '
+                '"artifact_ref": "assetalloc.azurecr.io/asset-allocation-jobs:def456", '
+                f'"image_digest": "{digest}", "release_run_id": "11", '
+                '"release_run_attempt": "1", "created_at": "2026-05-04T12:00:00Z"}'
+            ),
         )
     monkeypatch.setattr(module, "download_bytes", lambda url, token: buffer.getvalue())
 
@@ -289,18 +306,21 @@ def test_resolve_release_image_uses_latest_successful_release_artifact(monkeypat
         token="test-token",
     )
 
-    assert outputs["image_digest"] == "registry/image@sha256:feedbeef"
-    assert outputs["image_source"] == "latest-successful-release"
+    assert outputs["image_digest"] == digest
+    assert outputs["image_source"] == "current-main-release"
     assert outputs["release_branch"] == "main"
-    assert outputs["release_git_sha"] == "abc123"
+    assert outputs["release_git_sha"] == "def456"
     assert outputs["release_run_id"] == "11"
 
 
 def test_resolve_release_image_verifies_dispatch_run_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_module("scripts/workflows/resolve_release_image_digest.py", "resolve_release_image_digest")
+    digest = "assetalloc.azurecr.io/asset-allocation-jobs@sha256:" + ("a" * 64)
 
     def fake_request_json(url: str, token: str) -> dict[str, object]:
         assert token == "test-token"
+        if "/git/ref/heads/main" in url:
+            return {"object": {"sha": "newer-main-sha"}}
         if "/actions/runs/22/artifacts" in url:
             return {
                 "artifacts": [
@@ -317,6 +337,8 @@ def test_resolve_release_image_verifies_dispatch_run_provenance(monkeypatch: pyt
                 "conclusion": "success",
                 "head_branch": "main",
                 "head_sha": "def456",
+                "run_attempt": 1,
+                "created_at": "2026-05-04T12:00:00Z",
                 "html_url": "https://github.example/runs/22",
             }
         raise AssertionError(f"Unexpected GitHub API request: {url}")
@@ -330,7 +352,12 @@ def test_resolve_release_image_verifies_dispatch_run_provenance(monkeypatch: pyt
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr(
             "release-manifest.json",
-            '{"image_digest": "registry/image@sha256:feedbeef", "git_sha": "def456"}',
+            (
+                '{"artifact_kind": "container-image", "repo": "owner/repo", "git_sha": "def456", '
+                '"artifact_ref": "assetalloc.azurecr.io/asset-allocation-jobs:def456", '
+                f'"image_digest": "{digest}", "release_run_id": "22", '
+                '"release_run_attempt": "1", "created_at": "2026-05-04T12:00:00Z"}'
+            ),
         )
     monkeypatch.setattr(module, "download_bytes", lambda url, token: buffer.getvalue())
 
@@ -341,21 +368,32 @@ def test_resolve_release_image_verifies_dispatch_run_provenance(monkeypatch: pyt
         artifact_name="jobs-release",
         token="test-token",
         run_id=22,
-        expected_digest="registry/image@sha256:feedbeef",
+        expected_digest=digest,
         expected_git_sha="def456",
+        allow_rollback=True,
     )
 
-    assert outputs["image_digest"] == "registry/image@sha256:feedbeef"
-    assert outputs["image_source"] == "verified-dispatch-release"
+    assert outputs["image_digest"] == digest
+    assert outputs["image_source"] == "guarded-rollback"
     assert outputs["release_run_id"] == "22"
 
 
 def test_resolve_release_image_rejects_dispatch_digest_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_module("scripts/workflows/resolve_release_image_digest.py", "resolve_release_image_digest")
+    digest = "assetalloc.azurecr.io/asset-allocation-jobs@sha256:" + ("a" * 64)
 
     def fake_request_json(url: str, token: str) -> dict[str, object]:
+        if "/git/ref/heads/main" in url:
+            return {"object": {"sha": "newer-main-sha"}}
         if url.endswith("/actions/runs/22"):
-            return {"id": 22, "conclusion": "success", "head_sha": "def456"}
+            return {
+                "id": 22,
+                "run_attempt": 1,
+                "conclusion": "success",
+                "head_branch": "main",
+                "head_sha": "def456",
+                "created_at": "2026-05-04T12:00:00Z",
+            }
         if "/actions/runs/22/artifacts" in url:
             return {
                 "artifacts": [
@@ -377,7 +415,12 @@ def test_resolve_release_image_rejects_dispatch_digest_mismatch(monkeypatch: pyt
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr(
             "release-manifest.json",
-            '{"image_digest": "registry/image@sha256:feedbeef", "git_sha": "def456"}',
+            (
+                '{"artifact_kind": "container-image", "repo": "owner/repo", "git_sha": "def456", '
+                '"artifact_ref": "assetalloc.azurecr.io/asset-allocation-jobs:def456", '
+                f'"image_digest": "{digest}", "release_run_id": "22", '
+                '"release_run_attempt": "1", "created_at": "2026-05-04T12:00:00Z"}'
+            ),
         )
     monkeypatch.setattr(module, "download_bytes", lambda url, token: buffer.getvalue())
 
@@ -389,8 +432,9 @@ def test_resolve_release_image_rejects_dispatch_digest_mismatch(monkeypatch: pyt
             artifact_name="jobs-release",
             token="test-token",
             run_id=22,
-            expected_digest="registry/image@sha256:wrong",
+            expected_digest="assetalloc.azurecr.io/asset-allocation-jobs@sha256:" + ("b" * 64),
             expected_git_sha="def456",
+            allow_rollback=True,
         )
 
 
@@ -418,7 +462,7 @@ def test_build_jobs_image_pushes_and_emits_outputs(monkeypatch: pytest.MonkeyPat
         github_output=str(output_path),
     )
 
-    assert commands[0][:4] == ["docker", "build", "--file", "Dockerfile"]
+    assert commands[0][:5] == ["docker", "build", "--pull", "--file", "Dockerfile"]
     assert commands[1] == ["docker", "push", "registry/image:tag"]
     assert outputs["image_digest"] == "registry/image:tag@sha256:1234"
     assert "image_ref=registry/image:tag" in output_path.read_text(encoding="utf-8")
@@ -843,9 +887,12 @@ def test_deploy_prod_repository_dispatch_requires_release_provenance() -> None:
 
     assert "DISPATCH_RELEASE_RUN_ID" in workflow_text
     assert "DISPATCH_RELEASE_GIT_SHA" in workflow_text
+    assert "DISPATCH_ROLLBACK_REASON" in workflow_text
     assert "--run-id \"${DISPATCH_RELEASE_RUN_ID}\"" in workflow_text
     assert "--expected-digest \"${DISPATCH_IMAGE_DIGEST}\"" in workflow_text
     assert "--expected-git-sha \"${DISPATCH_RELEASE_GIT_SHA}\"" in workflow_text
+    assert 'if [ -n "${DISPATCH_ROLLBACK_REASON}" ]; then' in workflow_text
+    assert "resolver_args+=(--allow-rollback --max-age-days 14)" in workflow_text
     assert "image_source=repository_dispatch" not in workflow_text
 
 

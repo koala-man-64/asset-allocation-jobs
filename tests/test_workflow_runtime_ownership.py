@@ -506,6 +506,21 @@ def test_dockerfile_uses_repo_local_copy_paths_and_omits_psql_client() -> None:
     assert "COPY asset-allocation-jobs/" not in text
     assert "postgresql-client" not in text
     assert "USER app" in text
+    assert "FROM python:3.14-slim-bookworm@sha256:" in text
+
+
+def test_container_workflows_prevent_stale_build_inputs() -> None:
+    workflow_texts = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((repo_root() / ".github" / "workflows").glob("*.yml"))
+    )
+
+    assert ":latest" not in workflow_texts
+    assert "az acr repository show-manifests" not in workflow_texts
+    assert '"--pull"' in (repo_root() / "scripts" / "workflows" / "build_jobs_image.py").read_text(
+        encoding="utf-8"
+    )
+    assert "python scripts/workflows/validate_pinned_image_digests.py" in workflow_texts
 
 
 def test_docker_context_excludes_local_env_files() -> None:
