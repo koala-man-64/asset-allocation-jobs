@@ -831,6 +831,17 @@ def test_deploy_prod_workflow_exports_subscription_id_for_manifest_rendering() -
     assert "AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}" in workflow_text
 
 
+def test_deploy_prod_workflow_resolves_container_apps_environment_from_azure() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+    expected_command = (
+        'az containerapp env show --name "${CONTAINER_APPS_ENVIRONMENT_NAME}" '
+        '--resource-group "${RESOURCE_GROUP}" --query id -o tsv'
+    )
+
+    assert expected_command in workflow_text
+    assert 'env_id="/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}' not in workflow_text
+
+
 def test_deploy_prod_workflow_defaults_to_internal_api_var_not_public_secret() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
