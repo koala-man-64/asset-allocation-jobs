@@ -88,6 +88,7 @@ jobs:
         env:
           ACR_NAME: ${{ vars.ACR_NAME }}
           ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
         shell: bash
         run: |
@@ -95,7 +96,8 @@ jobs:
           python asset-allocation-jobs/scripts/workflows/acr_docker_login.py \
             --acr-name "${ACR_NAME}" \
             --login-server "${ACR_LOGIN_SERVER}" \
-            --tenant-id "${AZURE_TENANT_ID}"
+            --tenant-id "${AZURE_TENANT_ID}" \
+            --push-repository asset-allocation-jobs
 
       - name: Build and push jobs image
         id: image

@@ -570,10 +570,169 @@ def test_acr_docker_login_uses_aad_token_exchange_and_docker_password_stdin(
     ]
 
 
+def test_acr_docker_login_validates_push_scope_before_docker_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module("scripts/workflows/acr_docker_login.py", "acr_docker_login_push_scope")
+    from urllib.parse import parse_qs
+
+    seen_requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.payload
+
+    def fake_urlopen(request, timeout):
+        body = parse_qs(request.data.decode("utf-8"))
+        seen_requests.append(
+            {
+                "url": request.full_url,
+                "timeout": timeout,
+                "body": body,
+            }
+        )
+        if request.full_url.endswith("/oauth2/exchange"):
+            return FakeResponse(b'{"refresh_token": "acr-refresh-token"}')
+        if request.full_url.endswith("/oauth2/token"):
+            return FakeResponse(b'{"access_token": "acr-access-token"}')
+        raise AssertionError(f"unexpected request URL: {request.full_url}")
+
+    docker_commands: list[dict[str, object]] = []
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["az", "account", "get-access-token"]:
+            return subprocess.CompletedProcess(command, 0, stdout="aad-token\n", stderr="")
+        if command[:2] == ["docker", "login"]:
+            docker_commands.append({"command": list(command), "input": kwargs.get("input")})
+            return subprocess.CompletedProcess(command, 0)
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setenv("AZURE_CLIENT_ID", "client-id")
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert (
+        module.main(
+            [
+                "--acr-name",
+                "assetallocationacr",
+                "--tenant-id",
+                "tenant-id",
+                "--push-repository",
+                "asset-allocation-jobs",
+            ]
+        )
+        == 0
+    )
+
+    assert seen_requests == [
+        {
+            "url": "https://assetallocationacr.azurecr.io/oauth2/exchange",
+            "timeout": 30,
+            "body": {
+                "grant_type": ["access_token"],
+                "service": ["assetallocationacr.azurecr.io"],
+                "tenant": ["tenant-id"],
+                "access_token": ["aad-token"],
+            },
+        },
+        {
+            "url": "https://assetallocationacr.azurecr.io/oauth2/token",
+            "timeout": 30,
+            "body": {
+                "grant_type": ["refresh_token"],
+                "service": ["assetallocationacr.azurecr.io"],
+                "scope": ["repository:asset-allocation-jobs:pull,push"],
+                "refresh_token": ["acr-refresh-token"],
+            },
+        },
+    ]
+    assert docker_commands == [
+        {
+            "command": [
+                "docker",
+                "login",
+                "assetallocationacr.azurecr.io",
+                "--username",
+                module.ACR_REFRESH_TOKEN_USERNAME,
+                "--password-stdin",
+            ],
+            "input": "acr-refresh-token",
+        }
+    ]
+
+
+def test_acr_docker_login_surfaces_missing_push_permission(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = load_module("scripts/workflows/acr_docker_login.py", "acr_docker_login_missing_push")
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"refresh_token": "acr-refresh-token"}'
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/oauth2/exchange"):
+            return FakeResponse()
+        raise HTTPError(
+            request.full_url,
+            401,
+            "Unauthorized",
+            {},
+            BytesIO(b'{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}'),
+        )
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["az", "account", "get-access-token"]:
+            return subprocess.CompletedProcess(command, 0, stdout="aad-token\n", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setenv("AZURE_CLIENT_ID", "client-id")
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert (
+        module.main(
+            [
+                "--acr-name",
+                "assetallocationacr",
+                "--tenant-id",
+                "tenant-id",
+                "--push-repository",
+                "asset-allocation-jobs",
+            ]
+        )
+        == 1
+    )
+
+    stderr = capsys.readouterr().err
+    assert "ACR push authorization failed for repository 'asset-allocation-jobs'" in stderr
+    assert "Grant the GitHub OIDC principal configured by AZURE_CLIENT_ID (client-id) the AcrPush role" in stderr
+
+
 def test_release_workflow_uses_acr_oauth_login_without_registry_control_plane_read() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
     assert "python asset-allocation-jobs/scripts/workflows/acr_docker_login.py \\" in workflow_text
+    assert "--push-repository asset-allocation-jobs" in workflow_text
     assert 'registry="${ACR_LOGIN_SERVER:-${ACR_NAME}.azurecr.io}"' in workflow_text
     assert "az acr login" not in workflow_text
     assert "az acr show" not in workflow_text
