@@ -20,9 +20,9 @@ from asset_allocation_runtime_common.providers.massive_gateway_client import (
     MassiveGatewayNotFoundError,
     MassiveGatewayRateLimitError,
 )
-from asset_allocation_runtime_common.market_data import symbol_availability
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.market_data.pipeline import ListManager
+from tasks.common import symbol_availability
 from tasks.common.bronze_backfill_coverage import (
     load_coverage_marker,
     normalize_date,

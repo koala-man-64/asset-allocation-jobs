@@ -1,4 +1,5 @@
 import asyncio
+import os
 import uuid
 from datetime import date
 from pathlib import Path
@@ -1595,13 +1596,22 @@ def test_main_async_debug_mode_preserves_seeded_frames_during_bucket_rewrite():
         ), patch(
             "tasks.market_data.bronze_market_data.bronze_bucketing.bronze_layout_mode",
             return_value="alpha26",
-        ), patch.object(
-            bronze.cfg,
-            "DEBUG_SYMBOLS",
-            ["AAPL"],
+        ), patch.dict(
+            os.environ,
+            {
+                "DEBUG_SYMBOLS": "AAPL",
+                "MARKET_REFRESH_SCOPE_MODE": "scheduled",
+                "MARKET_REFRESH_SCOPE_SYMBOLS": "",
+            },
         ), patch(
             "tasks.market_data.bronze_market_data._load_alpha26_existing_market_bucket",
             side_effect=_fake_load_bucket,
+        ), patch(
+            "tasks.market_data.bronze_market_data._load_active_bronze_symbol_to_bucket_map",
+            return_value={"AAPL": "A", "MSFT": "A"},
+        ), patch(
+            "tasks.market_data.bronze_market_data._load_active_bronze_bucket_paths",
+            return_value=[{"bucket": "A", "path": "market-data/A.parquet"}],
         ), patch(
             "tasks.market_data.bronze_market_data._fetch_snapshot_daily_rows",
             return_value={},

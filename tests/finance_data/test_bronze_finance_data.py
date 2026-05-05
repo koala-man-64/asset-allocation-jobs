@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from tasks.common import symbol_availability as tolerant_symbol_availability
 from tasks.finance_data import bronze_finance_data as bronze
+
+
+def test_bronze_finance_uses_tolerant_symbol_availability_shim() -> None:
+    assert bronze.symbol_availability is tolerant_symbol_availability
 
 
 @pytest.fixture

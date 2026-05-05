@@ -24,7 +24,6 @@ from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client impo
     AlphaVantageGatewayError,
 )
 from asset_allocation_contracts.market_history import MARKET_HISTORY_START_DATE, MARKET_HISTORY_STATUS_NO_HISTORY
-from asset_allocation_runtime_common.market_data import symbol_availability
 from asset_allocation_runtime_common.market_data.symbol_identity import (
     canonicalize_provider_symbol,
     provider_symbol_for_query,
@@ -51,6 +50,7 @@ from tasks.common.bronze_symbol_policy import (
 )
 from tasks.common.job_status import resolve_job_run_status
 from tasks.common.market_refresh_scope import current_market_refresh_scope
+from tasks.common import symbol_availability
 from tasks.market_data import config as cfg
 
 
