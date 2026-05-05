@@ -2,6 +2,7 @@ param(
   [string]$ResourceGroup = "",
   [string]$JobName = "",
   [string]$SubscriptionId = "",
+  [string]$StorageAccountName = "",
   [string]$EnvFile = ""
 )
 
@@ -10,10 +11,12 @@ $ErrorActionPreference = "Stop"
 
 function Write-Usage {
   @"
-Usage: ensure_job_start_rbac.ps1 [-ResourceGroup <rg>] [-JobName <job>] [-SubscriptionId <sub>] [-EnvFile <path>]
+Usage: ensure_job_start_rbac.ps1 [-ResourceGroup <rg>] [-JobName <job>] [-SubscriptionId <sub>] [-StorageAccountName <account>] [-EnvFile <path>]
 
 Ensures Container App Job identities can start downstream jobs and wake
 container apps by assigning a least-privilege starter role at the resource group scope.
+When a storage account is configured, also grants Blob Data Contributor at that
+storage-account scope so identity-backed storage locks can acquire leases.
 "@
 }
 
@@ -101,6 +104,14 @@ if ([string]::IsNullOrWhiteSpace($resolvedResourceGroup)) {
   exit 2
 }
 
+$resolvedStorageAccountName = $StorageAccountName
+if ([string]::IsNullOrWhiteSpace($resolvedStorageAccountName)) {
+  $resolvedStorageAccountName = Get-EnvValue -Key "AZURE_STORAGE_ACCOUNT_NAME" -Lines $envLines
+}
+if ([string]::IsNullOrWhiteSpace($resolvedStorageAccountName)) {
+  $resolvedStorageAccountName = $env:AZURE_STORAGE_ACCOUNT_NAME
+}
+
 function Resolve-JobNames {
   param(
     [string]$ResourceGroup,
@@ -129,7 +140,7 @@ function Resolve-JobNames {
   }
 }
 
-$jobNames = Resolve-JobNames -ResourceGroup $resolvedResourceGroup -SingleJobName $resolvedJobName -EnvLines $envLines
+$jobNames = @(Resolve-JobNames -ResourceGroup $resolvedResourceGroup -SingleJobName $resolvedJobName -EnvLines $envLines)
 if ($jobNames.Count -eq 0) {
   Write-Usage
   Write-Error "No job names found. Provide -JobName, set SYSTEM_HEALTH_ARM_JOBS, or ensure jobs exist in the resource group."
@@ -138,6 +149,7 @@ if ($jobNames.Count -eq 0) {
 
 $rgScope = "/subscriptions/$SubscriptionId/resourceGroups/$resolvedResourceGroup"
 $starterRoleName = "Asset Allocation Container App Starter"
+$storageBlobRoleName = "Storage Blob Data Contributor"
 $starterRoleActions = @(
   "Microsoft.App/containerApps/read",
   "Microsoft.App/containerApps/start/action",
@@ -146,6 +158,25 @@ $starterRoleActions = @(
   "Microsoft.App/managedEnvironments/read",
   "Microsoft.Resources/subscriptions/resourceGroups/read"
 )
+
+$storageScope = ""
+if (-not [string]::IsNullOrWhiteSpace($resolvedStorageAccountName)) {
+  try {
+    $storageScope = (az storage account show `
+      --name $resolvedStorageAccountName `
+      --resource-group $resolvedResourceGroup `
+      --query id `
+      -o tsv `
+      --only-show-errors) -replace "`r", ""
+  } catch {
+    Write-Error "Failed to resolve storage account '$resolvedStorageAccountName' in resource group '$resolvedResourceGroup': $($_.Exception.Message)"
+    exit 1
+  }
+  if ([string]::IsNullOrWhiteSpace($storageScope) -or $storageScope -eq "None") {
+    Write-Error "Storage account '$resolvedStorageAccountName' did not return a resource ID."
+    exit 1
+  }
+}
 
 function Ensure-StarterRoleDefinition {
   param(
@@ -243,6 +274,33 @@ foreach ($job in $jobNames) {
     }
   } else {
     Write-Host "$starterRoleName already present at RG scope for $jobName identity ($principalId)."
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($storageScope)) {
+    $existingStorageRole = "0"
+    try {
+      $existingStorageRole = (az role assignment list --assignee-object-id $principalId --scope $storageScope --query "[?roleDefinitionName=='$storageBlobRoleName'] | length(@)" -o tsv --only-show-errors) -replace "`r", ""
+      if ([string]::IsNullOrWhiteSpace($existingStorageRole)) { $existingStorageRole = "0" }
+    } catch {
+      $existingStorageRole = "0"
+    }
+
+    if ([int]$existingStorageRole -eq 0) {
+      try {
+        az role assignment create `
+          --assignee-object-id $principalId `
+          --assignee-principal-type ServicePrincipal `
+          --role $storageBlobRoleName `
+          --scope $storageScope `
+          --only-show-errors 1>$null
+        Write-Host "Granted $storageBlobRoleName at storage account scope to $jobName identity ($principalId)."
+      } catch {
+        Write-Warning "Failed to grant $storageBlobRoleName at storage account scope for $jobName ($principalId): $($_.Exception.Message)"
+        $failed += 1
+      }
+    } else {
+      Write-Host "$storageBlobRoleName already present at storage account scope for $jobName identity ($principalId)."
+    }
   }
 }
 

@@ -137,6 +137,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 
 - Some jobs declare downstream sequencing through env-driven names such as `TRIGGER_NEXT_JOB_NAME`.
 - Job-side startup of dependent container apps is handled through controlled helpers such as `tasks/common/job_trigger.py` and must be treated as RBAC-governed behavior rather than ambient capability.
+- Jobs that use `AZURE_STORAGE_ACCOUNT_NAME` for identity-backed Blob leases require `Storage Blob Data Contributor` on the storage account for the attached runtime identity.
 - Local runtime behavior differs from Azure runtime behavior: startup helpers can normalize local API addresses and runtime markers when ACA/Kubernetes environment variables are absent.
 
 ### Evidence
@@ -235,7 +236,7 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 
 - Jobs require `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE`.
 - Jobs call the control plane over authenticated HTTP via runtime-common transport and clients.
-- Prod jobs target an internal control-plane service URL. The current restore target is `http://asset-allocation-api`; `http://asset-allocation-api-vnet` is the durable target after the VNet-backed app is deployed and reachable. Public ACA ingress FQDNs are out of contract for jobs runtime configuration.
+- Prod jobs target an internal control-plane service URL. The approved same-environment repair target is `http://asset-allocation-api` with jobs deployed into the same Container Apps environment as the API and UI. Public ACA ingress FQDNs are out of contract for jobs runtime configuration.
 - Jobs must not import control-plane Python modules directly for normal runtime behavior.
 - Backtesting worker preflight depends on a dedicated authenticated readiness endpoint in the control plane before claim/start flow is allowed to proceed.
 - Universe selection payloads now use stable public field ids at the contract edge. Jobs resolves those ids to warehouse columns through runtime-common strategy/ranking services; the warehouse mapping is not part of the external contract.
@@ -283,7 +284,6 @@ This repo is not the control plane, not the UI, and not the shared Azure bootstr
 
 ### Unverified / Needs confirmation
 
-- Exact Azure RBAC grants for the runtime identity are not fully defined in the inspected files.
 - Detailed token acquisition internals live in shared packages and are not re-specified here.
 
 ## 7. Deployment And Operations Contract

@@ -35,7 +35,7 @@ Cross-repo control data is read from the control-plane over HTTP. Configure:
 - `ASSET_ALLOCATION_API_BASE_URL`
 - `ASSET_ALLOCATION_API_SCOPE`
 
-In prod, set `ASSET_ALLOCATION_API_BASE_URL` to an internal control-plane service URL. The current restore target is `http://asset-allocation-api`; switch to `http://asset-allocation-api-vnet` only after the VNet-backed app exists and resolves from ACA Jobs. Do not point jobs at a public ACA ingress FQDN.
+In prod, set `ASSET_ALLOCATION_API_BASE_URL` to an internal control-plane service URL. The approved same-environment repair target is `http://asset-allocation-api` with jobs deployed into the same Container Apps environment as the API and UI. Do not point jobs at a public ACA ingress FQDN.
 
 ## Quiver Pipeline
 

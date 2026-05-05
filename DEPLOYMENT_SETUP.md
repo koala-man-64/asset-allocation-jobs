@@ -73,9 +73,11 @@ Run shared Azure bootstrap from the sibling `asset-allocation-control-plane` rep
 
 The GitHub OIDC identity used by `release.yml` needs `AcrPush` on the shared ACR. The jobs workflows derive the login server from `ACR_NAME`, so they do not require `Microsoft.ContainerRegistry/registries/read` only to build or validate image references. Set optional GitHub variable `ACR_LOGIN_SERVER` only if the login server is not `<ACR_NAME>.azurecr.io`.
 
-Run this repo-local helper after jobs exist if they need to start downstream jobs or wake apps:
+Run this repo-local helper after jobs exist if they need to start downstream jobs, wake apps, or acquire identity-backed storage locks:
 
-6. `powershell -ExecutionPolicy Bypass -File .\scripts\ensure_job_start_rbac.ps1 -ResourceGroup AssetAllocationRG -SubscriptionId <subscription-id>`
+6. `powershell -ExecutionPolicy Bypass -File .\scripts\ensure_job_start_rbac.ps1 -ResourceGroup AssetAllocationRG -SubscriptionId <subscription-id> -StorageAccountName assetallocstorage001`
+
+When `-StorageAccountName` is provided, the helper grants the job identity `Storage Blob Data Contributor` at the storage-account scope. That role is required for jobs that use `AZURE_STORAGE_ACCOUNT_NAME` with managed identity to acquire Blob lease locks.
 
 Deploy jobs cost guardrails from this repo with Azure CLI rather than a repo-local provisioner script:
 
@@ -91,7 +93,7 @@ GitHub secrets:
 - `NASDAQ_API_KEY`
 - `POSTGRES_DSN`
 
-Prod jobs should treat the control-plane as internal-only. Set `ASSET_ALLOCATION_API_BASE_URL` to `http://asset-allocation-api` for the current same-environment restore path, not to a public ACA ingress URL. Switch to `http://asset-allocation-api-vnet` only after that app is deployed and reachable from jobs.
+Prod jobs should treat the control-plane as internal-only. Set `CONTAINER_APPS_ENVIRONMENT_NAME` to `asset-allocation-env` and `ASSET_ALLOCATION_API_BASE_URL` to `http://asset-allocation-api` so jobs, API, and UI share one Container Apps environment. Do not point jobs at a public ACA ingress URL.
 
 GitHub variables:
 
@@ -179,6 +181,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 - If `release.yml` fails to build the image, verify Docker is building with repo-local context `asset-allocation-jobs` and that shared package versions resolve cleanly from `pyproject.toml`.
 - If `deploy-prod.yml` fails during apply, inspect the workflow logs for render/apply errors. Uploaded support artifacts contain only redacted manifests under `artifacts/deploy-support/redacted-manifests/*`.
 - If `deploy-prod.yml` verifies the wrong image, inspect `artifacts/previous-job-images.json` and the job image queries returned by Azure CLI.
+- If a job logs `Startup API health probe failed` with `Name or service not known`, treat it as control-plane DNS misrouting. Short ACA service names such as `http://asset-allocation-api` only resolve when the API app is in the same Container Apps environment as the job. Verify the job `environmentId`, the API app `environmentId`, `CONTAINER_APPS_ENVIRONMENT_NAME`, `ASSET_ALLOCATION_API_BASE_URL`, and `JOB_STARTUP_API_CONTAINER_APPS`; the approved repair is to delete/recreate jobs into `asset-allocation-env` with `ASSET_ALLOCATION_API_BASE_URL=http://asset-allocation-api`.
 - If `scripts\ops\trigger_job.py` fails, verify the selected job name exists in `AssetAllocationRG`, `RESOURCE_GROUP` is set, and your Azure CLI session can run `az containerapp job start`.
 - If `results-reconcile-job` does not process regime publication signals, verify `job_results_reconcile.yaml` is deployed with the `*/30 * * * *` schedule, check `core.strategy_publication_reconcile_signals` for stale `pending` or `error` rows, and start it manually with `python scripts\ops\trigger_job.py --job results-reconcile --resource-group AssetAllocationRG` for immediate repair.
 - If intraday watchlists stay due but no runs are claimed, verify `job_intraday_monitor.yaml` is deployed, the job schedule is active, and the control plane still allows the `intraday-monitor-job` caller name.
@@ -208,7 +211,7 @@ Deployment manifest tags are repo-owned defaults, not GitHub variables.
 
 - `core/control_plane_transport.py` hard-requires `ASSET_ALLOCATION_API_BASE_URL` and `ASSET_ALLOCATION_API_SCOPE`.
 - Jobs use bearer tokens to call the control-plane and must not import control-plane Python modules directly.
-- The prod control-plane transport target is the internal ACA service URL `http://asset-allocation-api` until the VNet-backed `asset-allocation-api-vnet` path is proven from jobs.
+- The prod control-plane transport target is the same-environment ACA service URL `http://asset-allocation-api`; API, UI, and jobs should share `asset-allocation-env` for this repair.
 - One jobs repo can own many ACA Jobs. Do not create one Azure resource group per job.
 - Route shared network hardening through the sibling `asset-allocation-control-plane` repo; this repo only adopts the resulting endpoint, identity, and configuration changes.
 

@@ -1212,6 +1212,123 @@ def test_render_and_apply_manifests_allows_public_control_plane_url_only_with_ov
     )
 
 
+def test_render_and_apply_manifests_allows_short_control_plane_name_in_same_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    job_environment_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/"
+        "managedEnvironments/asset-allocation-env"
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+
+    def _fake_run(command, **kwargs):
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout=f"{job_environment_id}\n", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+
+    module.ensure_short_control_plane_target_in_job_environment(
+        environment={
+            "ASSET_ALLOCATION_API_BASE_URL": "http://asset-allocation-api",
+            "CONTAINER_APPS_ENVIRONMENT_ID": job_environment_id,
+        },
+        resource_group="rg",
+    )
+
+    assert commands == [
+        [
+            "az",
+            "containerapp",
+            "show",
+            "--name",
+            "asset-allocation-api",
+            "--resource-group",
+            "rg",
+            "--query",
+            "properties.environmentId",
+            "-o",
+            "tsv",
+        ]
+    ]
+
+
+def test_render_and_apply_manifests_blocks_short_control_plane_name_in_different_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+    api_environment_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/"
+        "managedEnvironments/asset-allocation-env"
+    )
+    job_environment_id = (
+        "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/"
+        "managedEnvironments/asset-allocation-env-vnet"
+    )
+
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, stdout=f"{api_environment_id}\n", stderr=""),
+    )
+
+    with pytest.raises(SystemExit, match="Short ACA service names only resolve"):
+        module.ensure_short_control_plane_target_in_job_environment(
+            environment={
+                "ASSET_ALLOCATION_API_BASE_URL": "http://asset-allocation-api",
+                "CONTAINER_APPS_ENVIRONMENT_ID": job_environment_id,
+            },
+            resource_group="rg",
+        )
+
+
+def test_render_and_apply_manifests_blocks_missing_short_control_plane_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="ERROR: ResourceNotFound",
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="not found or is not readable"):
+        module.ensure_short_control_plane_target_in_job_environment(
+            environment={
+                "ASSET_ALLOCATION_API_BASE_URL": "http://asset-allocation-api-vnet",
+                "CONTAINER_APPS_ENVIRONMENT_ID": (
+                    "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/jobs-env"
+                ),
+            },
+            resource_group="rg",
+        )
+
+
+def test_render_and_apply_manifests_blocks_short_control_plane_validation_without_azure_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module("scripts/workflows/render_and_apply_job_manifests.py", "render_and_apply_job_manifests")
+
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda command, **kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    with pytest.raises(SystemExit, match="Azure CLI was not found"):
+        module.query_container_app_environment_id(app_name="asset-allocation-api", resource_group="rg")
+
+
 def test_deploy_prod_workflow_does_not_define_ranking_override_env_vars() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
