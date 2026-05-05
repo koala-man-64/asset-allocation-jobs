@@ -863,6 +863,20 @@ def test_deploy_prod_workflow_exports_bronze_runtime_safety_vars() -> None:
     assert "python scripts/workflows/verify_deployed_job_runtime.py" in workflow_text
 
 
+def test_deploy_prod_workflow_ensures_job_start_rbac_after_manifest_apply() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    render_index = workflow_text.index("- name: Render and apply job manifests")
+    rbac_index = workflow_text.index("- name: Ensure job wake/start RBAC")
+    verify_index = workflow_text.index("- name: Verify deployed job images")
+
+    assert render_index < rbac_index < verify_index
+    assert "shell: pwsh" in workflow_text[rbac_index:verify_index]
+    assert "./scripts/ensure_job_start_rbac.ps1 `" in workflow_text[rbac_index:verify_index]
+    assert "-ResourceGroup $env:RESOURCE_GROUP `" in workflow_text[rbac_index:verify_index]
+    assert "-SubscriptionId $env:AZURE_SUBSCRIPTION_ID" in workflow_text[rbac_index:verify_index]
+
+
 def test_deploy_prod_workflow_deletes_retired_quiver_jobs_after_runtime_verify() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 

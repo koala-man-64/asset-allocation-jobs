@@ -237,6 +237,13 @@ jobs:
             --redacted-dir artifacts/deploy-support/redacted-manifests \
             --resource-group "${RESOURCE_GROUP}"
 
+      - name: Ensure job wake/start RBAC
+        shell: pwsh
+        run: |
+          ./scripts/ensure_job_start_rbac.ps1 `
+            -ResourceGroup $env:RESOURCE_GROUP `
+            -SubscriptionId $env:AZURE_SUBSCRIPTION_ID
+
       - name: Write deploy provenance
         shell: bash
         run: |
