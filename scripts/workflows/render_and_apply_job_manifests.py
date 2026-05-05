@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from urllib.parse import urlparse
 
@@ -159,6 +160,92 @@ def ensure_control_plane_base_url_policy(environment: dict[str, str]) -> None:
     )
 
 
+def _resource_id_key(raw: str) -> str:
+    return str(raw or "").strip().rstrip("/").lower()
+
+
+def _base_url_host(base_url: str) -> str:
+    parsed = urlparse(str(base_url or "").strip())
+    return (parsed.hostname or str(base_url or "").strip()).lower()
+
+
+def _is_short_aca_service_host(base_url: str) -> bool:
+    host = _base_url_host(base_url)
+    return bool(host) and "." not in host
+
+
+def query_container_app_environment_id(*, app_name: str, resource_group: str) -> str:
+    az_cli = shutil.which("az") or "az"
+    command = [
+        az_cli,
+        "containerapp",
+        "show",
+        "--name",
+        app_name,
+        "--resource-group",
+        resource_group,
+        "--query",
+        "properties.environmentId",
+        "-o",
+        "tsv",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "Azure CLI was not found while validating ASSET_ALLOCATION_API_BASE_URL. "
+            "Install Azure CLI or run this workflow in the hosted deploy environment."
+        ) from exc
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise SystemExit(
+            "ASSET_ALLOCATION_API_BASE_URL uses short ACA service name "
+            f"{app_name!r}, but that container app was not found or is not readable in resource group "
+            f"{resource_group!r}. Short ACA service names only resolve inside the same Container Apps "
+            f"environment. Azure CLI detail: {detail or 'not provided'}"
+        )
+
+    environment_id = (completed.stdout or "").strip()
+    if not environment_id:
+        raise SystemExit(
+            "ASSET_ALLOCATION_API_BASE_URL uses short ACA service name "
+            f"{app_name!r}, but Azure did not return a Container Apps environment ID for that app."
+        )
+    return environment_id
+
+
+def ensure_short_control_plane_target_in_job_environment(
+    *,
+    environment: dict[str, str],
+    resource_group: str,
+) -> None:
+    base_url = str(environment.get("ASSET_ALLOCATION_API_BASE_URL") or "").strip()
+    job_environment_id = str(environment.get("CONTAINER_APPS_ENVIRONMENT_ID") or "").strip()
+    if not (base_url and job_environment_id and _is_short_aca_service_host(base_url)):
+        return
+
+    app_name = _base_url_host(base_url)
+    app_environment_id = query_container_app_environment_id(app_name=app_name, resource_group=resource_group)
+    if _resource_id_key(app_environment_id) == _resource_id_key(job_environment_id):
+        return
+
+    raise SystemExit(
+        "ASSET_ALLOCATION_API_BASE_URL uses short ACA service name "
+        f"{app_name!r}, but that app is in Container Apps environment {app_environment_id!r} while jobs "
+        f"are being rendered for {job_environment_id!r}. Short ACA service names only resolve inside the "
+        "same Container Apps environment. Deploy the control-plane app into the jobs environment and point "
+        "ASSET_ALLOCATION_API_BASE_URL/JOB_STARTUP_API_CONTAINER_APPS at that app name, or use an approved "
+        "reachable FQDN rollback path."
+    )
+
+
 def unresolved_placeholders(text: str) -> list[str]:
     return sorted({match.group(1) for match in PLACEHOLDER_PATTERN.finditer(text)})
 
@@ -262,6 +349,10 @@ def render_and_apply_manifests(
 ) -> None:
     resolved_environment = render_environment(environment)
     ensure_control_plane_base_url_policy(resolved_environment)
+    ensure_short_control_plane_target_in_job_environment(
+        environment=resolved_environment,
+        resource_group=resource_group,
+    )
     rendered_dir.mkdir(parents=True, exist_ok=True)
     if redacted_dir is not None:
         redacted_dir.mkdir(parents=True, exist_ok=True)
