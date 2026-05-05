@@ -514,9 +514,11 @@ def test_acr_docker_login_uses_aad_token_exchange_and_docker_password_stdin(
         return FakeResponse()
 
     docker_commands: list[dict[str, object]] = []
+    token_commands: list[list[str]] = []
 
     def fake_run(command, **kwargs):
         if command[:3] == ["az", "account", "get-access-token"]:
+            token_commands.append(list(command))
             return subprocess.CompletedProcess(command, 0, stdout="aad-token\n", stderr="")
         if command[:2] == ["docker", "login"]:
             docker_commands.append({"command": list(command), "input": kwargs.get("input")})
@@ -528,6 +530,19 @@ def test_acr_docker_login_uses_aad_token_exchange_and_docker_password_stdin(
 
     assert module.main(["--acr-name", "assetallocationacr", "--tenant-id", "tenant-id"]) == 0
 
+    assert token_commands == [
+        [
+            "az",
+            "account",
+            "get-access-token",
+            "--scope",
+            "https://management.azure.com/.default",
+            "--query",
+            "accessToken",
+            "-o",
+            "tsv",
+        ]
+    ]
     assert seen_requests == [
         {
             "url": "https://assetallocationacr.azurecr.io/oauth2/exchange",
