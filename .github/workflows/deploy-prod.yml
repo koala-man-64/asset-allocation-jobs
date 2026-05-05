@@ -30,6 +30,7 @@ jobs:
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
       ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
       ACR_PULL_IDENTITY_NAME: ${{ vars.ACR_PULL_IDENTITY_NAME || 'asset-allocation-acr-pull-mi' }}
       CONTAINER_APPS_ENVIRONMENT_NAME: ${{ vars.CONTAINER_APPS_ENVIRONMENT_NAME || 'asset-allocation-env' }}
       SERVICE_ACCOUNT_NAME: ${{ vars.SERVICE_ACCOUNT_NAME || 'asset-allocation-sa' }}
@@ -197,7 +198,14 @@ jobs:
             az containerapp env list --resource-group "${RESOURCE_GROUP}" --query "[].name" -o tsv >&2 || true
             exit 1
           fi
-          expected_prefix="$(az acr show --name "${ACR_NAME}" --resource-group "${RESOURCE_GROUP}" --query loginServer -o tsv)/asset-allocation-jobs@sha256:"
+          registry="${ACR_LOGIN_SERVER:-${ACR_NAME}.azurecr.io}"
+          registry="${registry#https://}"
+          registry="${registry%/}"
+          if [ -z "${registry}" ] || [[ "${registry}" == */* ]]; then
+            echo "ACR_LOGIN_SERVER must be a registry host such as assetallocationacr.azurecr.io." >&2
+            exit 1
+          fi
+          expected_prefix="${registry}/asset-allocation-jobs@sha256:"
           image_digest="${{ steps.image.outputs.image_digest }}"
           case "${image_digest}" in
             "${expected_prefix}"*)

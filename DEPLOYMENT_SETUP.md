@@ -71,6 +71,8 @@ Run shared Azure bootstrap from the sibling `asset-allocation-control-plane` rep
 4. `powershell -ExecutionPolicy Bypass -File ..\asset-allocation-control-plane\scripts\ops\provision\provision_entra_oidc.ps1`
 5. `powershell -ExecutionPolicy Bypass -File ..\asset-allocation-control-plane\scripts\ops\validate\validate_azure_permissions.ps1`
 
+The GitHub OIDC identity used by `release.yml` needs `AcrPush` on the shared ACR. The jobs workflows derive the login server from `ACR_NAME`, so they do not require `Microsoft.ContainerRegistry/registries/read` only to build or validate image references. Set optional GitHub variable `ACR_LOGIN_SERVER` only if the login server is not `<ACR_NAME>.azurecr.io`.
+
 Run this repo-local helper after jobs exist if they need to start downstream jobs or wake apps:
 
 6. `powershell -ExecutionPolicy Bypass -File .\scripts\ensure_job_start_rbac.ps1 -ResourceGroup AssetAllocationRG -SubscriptionId <subscription-id>`
@@ -98,6 +100,7 @@ GitHub variables:
 - `AZURE_SUBSCRIPTION_ID`
 - `RESOURCE_GROUP`
 - `ACR_NAME`
+- `ACR_LOGIN_SERVER` (optional; defaults to `<ACR_NAME>.azurecr.io`)
 - `ACR_PULL_IDENTITY_NAME`
 - `CONTAINER_APPS_ENVIRONMENT_NAME`
 - `SERVICE_ACCOUNT_NAME`

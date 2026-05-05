@@ -516,6 +516,7 @@ def test_container_workflows_prevent_stale_build_inputs() -> None:
     )
 
     assert ":latest" not in workflow_texts
+    assert "az acr show" not in workflow_texts
     assert "az acr repository show-manifests" not in workflow_texts
     assert '"--pull"' in (repo_root() / "scripts" / "workflows" / "build_jobs_image.py").read_text(
         encoding="utf-8"
