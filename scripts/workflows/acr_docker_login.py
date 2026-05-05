@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import subprocess
@@ -146,6 +148,61 @@ def exchange_acr_access_token(*, login_server: str, acr_refresh_token: str, repo
     return access_token
 
 
+def decode_jwt_payload(token: str) -> dict[str, object]:
+    parts = token.split(".")
+    if len(parts) != 3 or not parts[1]:
+        raise RuntimeError("ACR access token is not a JWT with a payload")
+
+    payload_segment = parts[1]
+    padded_payload = payload_segment + ("=" * (-len(payload_segment) % 4))
+    try:
+        payload_bytes = base64.b64decode(padded_payload.encode("ascii"), altchars=b"-_", validate=True)
+    except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
+        raise RuntimeError("ACR access token payload is not valid base64url") from exc
+
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("ACR access token payload is not valid JSON") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("ACR access token payload must be a JSON object")
+    return payload
+
+
+def validate_acr_push_access_token(*, access_token: str, repository: str) -> None:
+    repository_name = repository.strip()
+    if not repository_name:
+        raise ValueError("ACR push repository must be provided")
+
+    payload = decode_jwt_payload(access_token)
+    access_entries = payload.get("access")
+    if not isinstance(access_entries, list) or not access_entries:
+        raise RuntimeError("ACR access token does not include repository access claims")
+
+    granted_actions: set[str] = set()
+    found_repository = False
+    for entry in access_entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "repository" or entry.get("name") != repository_name:
+            continue
+
+        found_repository = True
+        actions = entry.get("actions")
+        if not isinstance(actions, list):
+            continue
+        granted_actions.update(action.lower() for action in actions if isinstance(action, str))
+
+    if not found_repository:
+        raise RuntimeError(f"ACR access token does not include access for repository '{repository_name}'")
+
+    missing_actions = {"pull", "push"} - granted_actions
+    if missing_actions:
+        missing = ", ".join(sorted(missing_actions))
+        raise RuntimeError(f"ACR access token for repository '{repository_name}' is missing required actions: {missing}")
+
+
 def verify_push_authorization(
     *,
     login_server: str,
@@ -154,11 +211,12 @@ def verify_push_authorization(
     azure_client_id: str,
 ) -> None:
     try:
-        exchange_acr_access_token(
+        access_token = exchange_acr_access_token(
             login_server=login_server,
             acr_refresh_token=acr_refresh_token,
             repository=repository,
         )
+        validate_acr_push_access_token(access_token=access_token, repository=repository)
     except Exception as exc:
         principal = f" ({azure_client_id.strip()})" if azure_client_id.strip() else ""
         raise RuntimeError(
