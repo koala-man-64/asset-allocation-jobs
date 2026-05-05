@@ -9,8 +9,8 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
-ACR_AAD_SCOPE = "https://containerregistry.azure.net/.default"
-ACR_AAD_RESOURCE = "https://containerregistry.azure.net"
+AZURE_RESOURCE_MANAGER_SCOPE = "https://management.azure.com/.default"
+AZURE_RESOURCE_MANAGER_RESOURCE = "https://management.azure.com/"
 ACR_REFRESH_TOKEN_USERNAME = "00000000-0000-0000-0000-000000000000"
 
 
@@ -45,7 +45,7 @@ def get_aad_access_token() -> str:
             "account",
             "get-access-token",
             "--scope",
-            ACR_AAD_SCOPE,
+            AZURE_RESOURCE_MANAGER_SCOPE,
             "--query",
             "accessToken",
             "-o",
@@ -56,7 +56,7 @@ def get_aad_access_token() -> str:
             "account",
             "get-access-token",
             "--resource",
-            ACR_AAD_RESOURCE,
+            AZURE_RESOURCE_MANAGER_RESOURCE,
             "--query",
             "accessToken",
             "-o",
