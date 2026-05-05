@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from urllib.error import HTTPError, URLError
@@ -12,6 +13,7 @@ from urllib.request import Request, urlopen
 AZURE_RESOURCE_MANAGER_SCOPE = "https://management.azure.com/.default"
 AZURE_RESOURCE_MANAGER_RESOURCE = "https://management.azure.com/"
 ACR_REFRESH_TOKEN_USERNAME = "00000000-0000-0000-0000-000000000000"
+ACR_PUSH_ROLE_NAME = "AcrPush"
 
 
 def resolve_login_server(*, acr_name: str, login_server: str) -> str:
@@ -110,6 +112,62 @@ def exchange_acr_refresh_token(*, login_server: str, tenant_id: str, aad_access_
     return refresh_token
 
 
+def exchange_acr_access_token(*, login_server: str, acr_refresh_token: str, repository: str) -> str:
+    repository_name = repository.strip()
+    if not repository_name:
+        raise ValueError("ACR push repository must be provided")
+
+    body = urlencode(
+        {
+            "grant_type": "refresh_token",
+            "service": login_server,
+            "scope": f"repository:{repository_name}:pull,push",
+            "refresh_token": acr_refresh_token,
+        }
+    ).encode("utf-8")
+    request = Request(
+        f"https://{login_server}/oauth2/token",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"ACR token request failed with HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"ACR token request failed: {exc.reason}") from exc
+
+    access_token = str(payload.get("access_token") or "").strip()
+    if not access_token:
+        raise RuntimeError("ACR token request did not return an access token")
+    return access_token
+
+
+def verify_push_authorization(
+    *,
+    login_server: str,
+    acr_refresh_token: str,
+    repository: str,
+    azure_client_id: str,
+) -> None:
+    try:
+        exchange_acr_access_token(
+            login_server=login_server,
+            acr_refresh_token=acr_refresh_token,
+            repository=repository,
+        )
+    except Exception as exc:
+        principal = f" ({azure_client_id.strip()})" if azure_client_id.strip() else ""
+        raise RuntimeError(
+            f"ACR push authorization failed for repository '{repository}' on {login_server}: {exc}. "
+            f"Grant the GitHub OIDC principal configured by AZURE_CLIENT_ID{principal} the {ACR_PUSH_ROLE_NAME} "
+            "role at the registry scope, or an equivalent repository-scoped push permission if ACR ABAC is enabled."
+        ) from exc
+
+
 def docker_login(*, login_server: str, acr_refresh_token: str) -> None:
     subprocess.run(
         [
@@ -133,6 +191,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--acr-name", default="", help="Azure Container Registry resource name.")
     parser.add_argument("--login-server", default="", help="ACR login server host. Defaults to <acr-name>.azurecr.io.")
     parser.add_argument("--tenant-id", required=True, help="Microsoft Entra tenant id for the active OIDC session.")
+    parser.add_argument(
+        "--push-repository",
+        default="",
+        help="Optional ACR repository name to validate for pull,push authorization before Docker login.",
+    )
     return parser.parse_args(argv)
 
 
@@ -146,6 +209,14 @@ def main(argv: list[str] | None = None) -> int:
             tenant_id=args.tenant_id,
             aad_access_token=aad_token,
         )
+        if args.push_repository:
+            verify_push_authorization(
+                login_server=login_server,
+                acr_refresh_token=acr_refresh_token,
+                repository=args.push_repository,
+                azure_client_id=os.environ.get("AZURE_CLIENT_ID", ""),
+            )
+            print(f"ACR push authorization verified for {login_server}/{args.push_repository}.")
         docker_login(login_server=login_server, acr_refresh_token=acr_refresh_token)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
