@@ -85,17 +85,33 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Login to ACR
+        env:
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
         shell: bash
         run: |
           set -euo pipefail
-          az acr login --name "${{ vars.ACR_NAME }}"
+          python asset-allocation-jobs/scripts/workflows/acr_docker_login.py \
+            --acr-name "${ACR_NAME}" \
+            --login-server "${ACR_LOGIN_SERVER}" \
+            --tenant-id "${AZURE_TENANT_ID}"
 
       - name: Build and push jobs image
         id: image
+        env:
+          ACR_NAME: ${{ vars.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
         shell: bash
         run: |
           set -euo pipefail
-          registry="$(az acr show --name "${{ vars.ACR_NAME }}" --resource-group "${{ vars.RESOURCE_GROUP }}" --query loginServer -o tsv)"
+          registry="${ACR_LOGIN_SERVER:-${ACR_NAME}.azurecr.io}"
+          registry="${registry#https://}"
+          registry="${registry%/}"
+          if [ -z "${registry}" ] || [[ "${registry}" == */* ]]; then
+            echo "ACR_LOGIN_SERVER must be a registry host such as assetallocationacr.azurecr.io." >&2
+            exit 1
+          fi
           image_ref="${registry}/asset-allocation-jobs:${{ steps.source.outputs.release_git_sha }}"
           build_args=(
             python

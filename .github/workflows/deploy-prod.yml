@@ -30,6 +30,7 @@ jobs:
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
       ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
       ACR_PULL_IDENTITY_NAME: ${{ vars.ACR_PULL_IDENTITY_NAME || 'asset-allocation-acr-pull-mi' }}
       CONTAINER_APPS_ENVIRONMENT_NAME: ${{ vars.CONTAINER_APPS_ENVIRONMENT_NAME || 'asset-allocation-env' }}
       SERVICE_ACCOUNT_NAME: ${{ vars.SERVICE_ACCOUNT_NAME || 'asset-allocation-sa' }}
@@ -191,8 +192,20 @@ jobs:
           az config set extension.use_dynamic_install=yes_without_prompt > /dev/null
           identity_id="$(az identity show --name "${ACR_PULL_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --query id -o tsv)"
           identity_client_id="$(az identity show --name "${ACR_PULL_IDENTITY_NAME}" --resource-group "${RESOURCE_GROUP}" --query clientId -o tsv)"
-          env_id="/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/managedEnvironments/${CONTAINER_APPS_ENVIRONMENT_NAME}"
-          expected_prefix="$(az acr show --name "${ACR_NAME}" --resource-group "${RESOURCE_GROUP}" --query loginServer -o tsv)/asset-allocation-jobs@sha256:"
+          if ! env_id="$(az containerapp env show --name "${CONTAINER_APPS_ENVIRONMENT_NAME}" --resource-group "${RESOURCE_GROUP}" --query id -o tsv)"; then
+            echo "Container Apps environment '${CONTAINER_APPS_ENVIRONMENT_NAME}' was not found in resource group '${RESOURCE_GROUP}'." >&2
+            echo "Available Container Apps environments in '${RESOURCE_GROUP}':" >&2
+            az containerapp env list --resource-group "${RESOURCE_GROUP}" --query "[].name" -o tsv >&2 || true
+            exit 1
+          fi
+          registry="${ACR_LOGIN_SERVER:-${ACR_NAME}.azurecr.io}"
+          registry="${registry#https://}"
+          registry="${registry%/}"
+          if [ -z "${registry}" ] || [[ "${registry}" == */* ]]; then
+            echo "ACR_LOGIN_SERVER must be a registry host such as assetallocationacr.azurecr.io." >&2
+            exit 1
+          fi
+          expected_prefix="${registry}/asset-allocation-jobs@sha256:"
           image_digest="${{ steps.image.outputs.image_digest }}"
           case "${image_digest}" in
             "${expected_prefix}"*)

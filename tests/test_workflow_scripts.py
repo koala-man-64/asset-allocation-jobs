@@ -469,6 +469,101 @@ def test_build_jobs_image_pushes_and_emits_outputs(monkeypatch: pytest.MonkeyPat
     assert "image_digest=registry/image:tag@sha256:1234" in output_path.read_text(encoding="utf-8")
 
 
+def test_acr_docker_login_resolves_default_and_explicit_login_servers() -> None:
+    module = load_module("scripts/workflows/acr_docker_login.py", "acr_docker_login")
+
+    assert (
+        module.resolve_login_server(acr_name="assetallocationacr", login_server="")
+        == "assetallocationacr.azurecr.io"
+    )
+    assert (
+        module.resolve_login_server(acr_name="", login_server="https://AssetAllocationAcr.azurecr.io/")
+        == "assetallocationacr.azurecr.io"
+    )
+
+    with pytest.raises(ValueError, match="registry host"):
+        module.resolve_login_server(acr_name="", login_server="https://assetallocationacr.azurecr.io/path")
+
+
+def test_acr_docker_login_uses_aad_token_exchange_and_docker_password_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module("scripts/workflows/acr_docker_login.py", "acr_docker_login_exchange")
+    from urllib.parse import parse_qs
+
+    seen_requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"refresh_token": "acr-refresh-token"}'
+
+    def fake_urlopen(request, timeout):
+        seen_requests.append(
+            {
+                "url": request.full_url,
+                "timeout": timeout,
+                "body": parse_qs(request.data.decode("utf-8")),
+            }
+        )
+        return FakeResponse()
+
+    docker_commands: list[dict[str, object]] = []
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["az", "account", "get-access-token"]:
+            return subprocess.CompletedProcess(command, 0, stdout="aad-token\n", stderr="")
+        if command[:2] == ["docker", "login"]:
+            docker_commands.append({"command": list(command), "input": kwargs.get("input")})
+            return subprocess.CompletedProcess(command, 0)
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module.main(["--acr-name", "assetallocationacr", "--tenant-id", "tenant-id"]) == 0
+
+    assert seen_requests == [
+        {
+            "url": "https://assetallocationacr.azurecr.io/oauth2/exchange",
+            "timeout": 30,
+            "body": {
+                "grant_type": ["access_token"],
+                "service": ["assetallocationacr.azurecr.io"],
+                "tenant": ["tenant-id"],
+                "access_token": ["aad-token"],
+            },
+        }
+    ]
+    assert docker_commands == [
+        {
+            "command": [
+                "docker",
+                "login",
+                "assetallocationacr.azurecr.io",
+                "--username",
+                module.ACR_REFRESH_TOKEN_USERNAME,
+                "--password-stdin",
+            ],
+            "input": "acr-refresh-token",
+        }
+    ]
+
+
+def test_release_workflow_uses_acr_oauth_login_without_registry_control_plane_read() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+    assert "python asset-allocation-jobs/scripts/workflows/acr_docker_login.py \\" in workflow_text
+    assert 'registry="${ACR_LOGIN_SERVER:-${ACR_NAME}.azurecr.io}"' in workflow_text
+    assert "az acr login" not in workflow_text
+    assert "az acr show" not in workflow_text
+
+
 def test_quality_and_release_workflows_build_with_repo_local_docker_context() -> None:
     root = repo_root()
     for relative_path in (".github/workflows/quality.yml", ".github/workflows/release.yml"):
@@ -829,6 +924,26 @@ def test_deploy_prod_workflow_exports_subscription_id_for_manifest_rendering() -
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
     assert "AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}" in workflow_text
+
+
+def test_deploy_prod_workflow_validates_acr_digest_without_registry_control_plane_read() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+
+    assert "ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}" in workflow_text
+    assert 'registry="${ACR_LOGIN_SERVER:-${ACR_NAME}.azurecr.io}"' in workflow_text
+    assert 'expected_prefix="${registry}/asset-allocation-jobs@sha256:"' in workflow_text
+    assert "az acr show" not in workflow_text
+
+
+def test_deploy_prod_workflow_resolves_container_apps_environment_from_azure() -> None:
+    workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
+    expected_command = (
+        'az containerapp env show --name "${CONTAINER_APPS_ENVIRONMENT_NAME}" '
+        '--resource-group "${RESOURCE_GROUP}" --query id -o tsv'
+    )
+
+    assert expected_command in workflow_text
+    assert 'env_id="/subscriptions/${{ vars.AZURE_SUBSCRIPTION_ID }}' not in workflow_text
 
 
 def test_deploy_prod_workflow_defaults_to_internal_api_var_not_public_secret() -> None:

@@ -4,6 +4,7 @@ AZURE_TENANT_ID,deploy_var,var,deploy_config,true,Azure tenant id discovered fro
 AZURE_SUBSCRIPTION_ID,deploy_var,var,deploy_config,true,Azure subscription id discovered from az account show when available.
 RESOURCE_GROUP,deploy_var,var,deploy_config,true,Shared runtime resource group owned by control-plane provisioning.
 ACR_NAME,deploy_var,var,deploy_config,true,Shared Azure Container Registry name.
+ACR_LOGIN_SERVER,deploy_var,var,deploy_config,false,Optional ACR login server host for workflows. Defaults to <ACR_NAME>.azurecr.io and avoids Azure control-plane registry reads.
 ACR_PULL_IDENTITY_NAME,deploy_var,var,deploy_config,true,User-assigned identity used by jobs to pull from ACR.
 CONTAINER_APPS_ENVIRONMENT_NAME,deploy_var,var,deploy_config,true,Shared Container Apps environment name.
 SERVICE_ACCOUNT_NAME,deploy_var,var,deploy_config,true,Shared workload identity or service account name.
