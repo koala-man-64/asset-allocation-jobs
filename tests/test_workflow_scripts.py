@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tomllib
@@ -35,6 +37,16 @@ def load_module(relative_path: str, module_name: str) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def unsigned_jwt(payload: dict[str, object]) -> str:
+    header = {"alg": "none", "typ": "JWT"}
+
+    def encode_json(value: dict[str, object]) -> str:
+        raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{encode_json(header)}.{encode_json(payload)}.signature"
 
 
 def test_install_jobs_dependencies_relies_on_requirement_files_and_editables(
@@ -603,7 +615,18 @@ def test_acr_docker_login_validates_push_scope_before_docker_login(
         if request.full_url.endswith("/oauth2/exchange"):
             return FakeResponse(b'{"refresh_token": "acr-refresh-token"}')
         if request.full_url.endswith("/oauth2/token"):
-            return FakeResponse(b'{"access_token": "acr-access-token"}')
+            access_token = unsigned_jwt(
+                {
+                    "access": [
+                        {
+                            "type": "repository",
+                            "name": "asset-allocation-jobs",
+                            "actions": ["pull", "push"],
+                        }
+                    ]
+                }
+            )
+            return FakeResponse(json.dumps({"access_token": access_token}).encode("utf-8"))
         raise AssertionError(f"unexpected request URL: {request.full_url}")
 
     docker_commands: list[dict[str, object]] = []
@@ -669,6 +692,109 @@ def test_acr_docker_login_validates_push_scope_before_docker_login(
             "input": "acr-refresh-token",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("access_token", "expected_error"),
+    [
+        (
+            unsigned_jwt(
+                {
+                    "access": [
+                        {
+                            "type": "repository",
+                            "name": "asset-allocation-jobs",
+                            "actions": ["pull"],
+                        }
+                    ]
+                }
+            ),
+            "missing required actions: push",
+        ),
+        (unsigned_jwt({"access": []}), "does not include repository access claims"),
+        (
+            unsigned_jwt(
+                {
+                    "access": [
+                        {
+                            "type": "repository",
+                            "name": "asset-allocation-api",
+                            "actions": ["pull", "push"],
+                        }
+                    ]
+                }
+            ),
+            "does not include access for repository 'asset-allocation-jobs'",
+        ),
+        ("not-a-jwt", "is not a JWT with a payload"),
+        ("header.%%%.signature", "payload is not valid base64url"),
+    ],
+)
+def test_acr_docker_login_rejects_tokens_without_push_claims(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    access_token: str,
+    expected_error: str,
+) -> None:
+    module = load_module("scripts/workflows/acr_docker_login.py", "acr_docker_login_token_claims")
+    from urllib.parse import parse_qs
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.payload
+
+    seen_token_request = False
+
+    def fake_urlopen(request, timeout):
+        nonlocal seen_token_request
+        body = parse_qs(request.data.decode("utf-8"))
+        if request.full_url.endswith("/oauth2/exchange"):
+            return FakeResponse(b'{"refresh_token": "acr-refresh-token"}')
+        if request.full_url.endswith("/oauth2/token"):
+            seen_token_request = True
+            assert body["scope"] == ["repository:asset-allocation-jobs:pull,push"]
+            return FakeResponse(json.dumps({"access_token": access_token}).encode("utf-8"))
+        raise AssertionError(f"unexpected request URL: {request.full_url}")
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["az", "account", "get-access-token"]:
+            return subprocess.CompletedProcess(command, 0, stdout="aad-token\n", stderr="")
+        if command[:2] == ["docker", "login"]:
+            raise AssertionError("docker login must not run after failed push-scope validation")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setenv("AZURE_CLIENT_ID", "client-id")
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert (
+        module.main(
+            [
+                "--acr-name",
+                "assetallocationacr",
+                "--tenant-id",
+                "tenant-id",
+                "--push-repository",
+                "asset-allocation-jobs",
+            ]
+        )
+        == 1
+    )
+
+    stderr = capsys.readouterr().err
+    assert seen_token_request is True
+    assert "ACR push authorization failed for repository 'asset-allocation-jobs'" in stderr
+    assert expected_error in stderr
+    assert "Grant the GitHub OIDC principal configured by AZURE_CLIENT_ID (client-id) the AcrPush role" in stderr
 
 
 def test_acr_docker_login_surfaces_missing_push_permission(
