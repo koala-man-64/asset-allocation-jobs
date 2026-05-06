@@ -1055,6 +1055,85 @@ def test_main_async_transient_gateway_errors_do_not_record_invalid_candidates(un
     asyncio.run(run_test())
 
 
+def test_main_async_publishes_when_some_symbols_fail(unique_ticker):
+    good_symbol = unique_ticker
+    failed_symbol = f"{unique_ticker}_FAIL"
+    mock_av = MagicMock()
+    mock_av.get_earnings_calendar_csv.return_value = (
+        "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n"
+    )
+
+    transient_error = bronze.AlphaVantageGatewayError(
+        "gateway unavailable",
+        status_code=502,
+        detail="bad gateway",
+        payload={"path": "/api/providers/alpha-vantage/earnings"},
+    )
+
+    def _fetch(symbol, *_args, **_kwargs):
+        if symbol == failed_symbol:
+            raise transient_error
+        return True
+
+    async def run_test():
+        with patch(
+            "tasks.earnings_data.bronze_earnings_data._validate_environment"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": [good_symbol, failed_symbol]}),
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.resolve_backfill_start_date",
+            return_value=None,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.AlphaVantageGatewayClient.from_env",
+            return_value=mock_av,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.fetch_and_save_raw",
+            side_effect=_fetch,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.record_invalid_symbol_candidate"
+        ) as mock_record_invalid, patch(
+            "tasks.earnings_data.bronze_earnings_data.clear_invalid_candidate_marker"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data._write_alpha26_earnings_buckets",
+            return_value=(1, "earnings-data/buckets/index.parquet"),
+        ) as mock_write, patch(
+            "tasks.earnings_data.bronze_earnings_data._delete_flat_symbol_blobs",
+            return_value=0,
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.resolve_job_run_status",
+            return_value=("succeededWithWarnings", 0),
+        ) as mock_resolve_status, patch(
+            "tasks.earnings_data.bronze_earnings_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_warning"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_line"
+        ), patch(
+            "tasks.earnings_data.bronze_earnings_data.mdc.write_error"
+        ) as mock_write_error:
+            mock_list_manager.is_blacklisted.return_value = False
+
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 0
+        mock_write.assert_called_once()
+        mock_record_invalid.assert_not_called()
+        mock_resolve_status.assert_called_once_with(failed_count=0, warning_count=1)
+        error_messages = [str(call.args[0]) for call in mock_write_error.call_args_list if call.args]
+        assert not any("publish withheld" in message for message in error_messages)
+
+    asyncio.run(run_test())
+
+
 def test_main_async_empty_listing_status_fails_without_active_publish():
     async def run_test():
         with patch(

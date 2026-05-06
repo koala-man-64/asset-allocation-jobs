@@ -1660,6 +1660,7 @@ async def main_async() -> int:
     retry_next_run: set[str] = set()
     failure_counts: dict[str, int] = {}
     failure_examples: dict[str, str] = {}
+    blocking_failures = 0
     progress_lock = asyncio.Lock()
 
     max_workers = _get_max_workers()
@@ -1964,6 +1965,7 @@ async def main_async() -> int:
         except Exception as exc:
             bucket_publish_error = exc
             progress["failed"] += 1
+            blocking_failures += 1
             mdc.write_error(f"Bronze market alpha26 bucket publish failed: {exc}")
     finally:
         _active_alpha_vantage_client_manager = None
@@ -2005,6 +2007,7 @@ async def main_async() -> int:
                 log_bronze_success(domain="market", operation="list_flush")
         except Exception as exc:
             progress["failed"] += 1
+            blocking_failures += 1
             mdc.write_error(f"Bronze market alpha26 publish failed: {exc}")
 
     if failure_counts:
@@ -2016,17 +2019,21 @@ async def main_async() -> int:
             if example:
                 mdc.write_warning(f"Bronze market failure example ({name}): {example}")
 
+    nonblocking_symbol_failures = max(int(progress["failed"]) - blocking_failures, 0)
     job_status, exit_code = resolve_job_run_status(
-        failed_count=progress["failed"],
-        warning_count=progress["invalid_candidates"] + progress["no_history_candidates"],
+        failed_count=blocking_failures,
+        warning_count=progress["invalid_candidates"] + progress["no_history_candidates"] + nonblocking_symbol_failures,
     )
     mdc.write_line(
         "Bronze Massive market ingest complete: processed={processed} downloaded={downloaded} "
         "invalid_candidates={invalid_candidates} no_history_candidates={no_history_candidates} "
         "unavailable={unavailable} blacklist_promotions={blacklist_promotions} "
         "no_history_promotions={no_history_promotions} reprobe_recovered={reprobe_recovered} "
-        "reprobe_retained={reprobe_retained} failed={failed} job_status={job_status}".format(
+        "reprobe_retained={reprobe_retained} failed={failed} blocking_failures={blocking_failures} "
+        "nonblocking_symbol_failures={nonblocking_symbol_failures} job_status={job_status}".format(
             **progress,
+            blocking_failures=blocking_failures,
+            nonblocking_symbol_failures=nonblocking_symbol_failures,
             job_status=job_status,
         )
     )
