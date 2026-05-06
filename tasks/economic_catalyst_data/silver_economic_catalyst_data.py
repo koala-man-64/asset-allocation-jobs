@@ -16,7 +16,7 @@ from tasks.common.watermarks import (
 )
 from tasks.economic_catalyst_data import constants
 from tasks.economic_catalyst_data.config import EconomicCatalystConfig
-from tasks.economic_catalyst_data.storage import load_blob_infos, load_json_batches, load_parquet_snapshot, write_domain_artifact, write_parquet_snapshot
+from tasks.economic_catalyst_data.storage import load_blob_infos, load_parquet_snapshot, read_json_batches, write_domain_artifact, write_parquet_snapshot
 from tasks.economic_catalyst_data.transform import (
     canonicalize_source_state,
     dedupe_source_frames,
@@ -59,7 +59,7 @@ def main() -> int:
         mdc.write_line("Economic catalyst silver skipped: no changed bronze raw blobs.")
         return 0
 
-    batches = load_json_batches(client=bronze_client, blob_infos=candidate_blobs)
+    batches = read_json_batches(client=bronze_client, blob_infos=candidate_blobs)
     new_source_events, new_source_headlines, new_quarantine = parse_raw_batches_to_source_frames(batches)
 
     existing_source_events = load_parquet_snapshot(

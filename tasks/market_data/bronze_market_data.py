@@ -28,6 +28,7 @@ from asset_allocation_runtime_common.market_data.symbol_identity import (
     canonicalize_provider_symbol,
     provider_symbol_for_query,
 )
+from asset_allocation_runtime_common.market_data.market_symbols import REGIME_REQUIRED_MARKET_SYMBOLS
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.market_data.pipeline import ListManager
 from asset_allocation_runtime_common.market_data import bronze_bucketing
@@ -66,7 +67,7 @@ _RECOVERY_SLEEP_SECONDS = 5.0
 _FULL_HISTORY_START_DATE = MARKET_HISTORY_START_DATE
 _SNAPSHOT_BATCH_SIZE = 250
 _SNAPSHOT_ASSET_TYPE = "stocks"
-_REGIME_REQUIRED_MARKET_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "ACWI", "^VIX", "^VIX3M"})
+_REGIME_REQUIRED_MARKET_SYMBOLS = frozenset(REGIME_REQUIRED_MARKET_SYMBOLS)
 _REGIME_REQUIRED_EQUITY_MARKET_SYMBOLS = frozenset({"SPY", "QQQ", "IWM", "ACWI"})
 _BUCKET_COLUMNS = [
     "symbol",

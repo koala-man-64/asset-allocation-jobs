@@ -6,7 +6,7 @@ WORKDIR /app
 RUN addgroup --system app && adduser --system --ingroup app app
 
 ARG CONTRACTS_VERSION=3.18.0
-ARG RUNTIME_COMMON_VERSION=3.7.0
+ARG RUNTIME_COMMON_VERSION=3.7.2
 
 COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
