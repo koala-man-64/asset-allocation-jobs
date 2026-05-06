@@ -514,11 +514,6 @@ def _build_requests(
 def main(config: QuiverDataConfig | None = None) -> int:
     mdc.log_environment_diagnostics()
     config = config or QuiverDataConfig.from_env()
-    if not config.enabled:
-        mdc.write_line(
-            "Quiver bronze disabled: QUIVER_DATA_ENABLED=false; skipping client, publish, health marker, and downstream trigger."
-        )
-        return 0
 
     if QuiverGatewayClient is None:
         raise RuntimeError("QuiverGatewayClient is unavailable. Update asset-allocation-runtime-common before running Quiver jobs.")
@@ -636,21 +631,16 @@ if __name__ == "__main__":
     runtime_config = QuiverDataConfig.from_env()
     job_name = _runtime_job_name(constants.BRONZE_JOB_NAME)
     success_callbacks = (
-        (
-            lambda: write_system_health_marker(
-                layer="bronze",
-                domain=constants.domain_slug_for_layer("bronze"),
-                job_name=job_name,
-            ),
-            trigger_next_job_from_env,
-        )
-        if runtime_config.enabled
-        else ()
+        lambda: write_system_health_marker(
+            layer="bronze",
+            domain=constants.domain_slug_for_layer("bronze"),
+            job_name=job_name,
+        ),
+        trigger_next_job_from_env,
     )
     lock_conflict_policy = "fail" if runtime_config.job_mode == "historical_backfill" else "skip_success"
     with mdc.JobLock(job_name, conflict_policy=lock_conflict_policy):
-        if runtime_config.enabled:
-            ensure_api_awake_from_env(required=True)
+        ensure_api_awake_from_env(required=True)
         raise SystemExit(
             run_logged_job(
                 job_name=job_name,

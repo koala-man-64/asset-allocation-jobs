@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from tasks.economic_catalyst_data.config import EconomicCatalystConfig, NasdaqTableConfig
 from tasks.economic_catalyst_data.sources import RawSourceBatch, fetch_requested_sources
 from tasks.economic_catalyst_data import sources as source_module
@@ -18,8 +20,6 @@ def _config(
         bronze_container="bronze",
         silver_container="silver",
         gold_container="gold",
-        official_sources=("fred_releases",),
-        vendor_sources=("massive_news", "nasdaq_tables"),
         structured_lookback_days=90,
         headline_lookback_days=14,
         future_schedule_days=180,
@@ -45,7 +45,7 @@ def _config(
     )
 
 
-def test_fetch_requested_sources_respects_selected_sources_and_reports_missing_creds(
+def test_fetch_requested_sources_respects_selected_sources(
     monkeypatch,
 ) -> None:
     called: list[str] = []
@@ -75,15 +75,24 @@ def test_fetch_requested_sources_respects_selected_sources_and_reports_missing_c
     monkeypatch.setattr(source_module.mdc, "write_warning", lambda *_args, **_kwargs: None)
 
     batches, warnings, failures = fetch_requested_sources(
-        _config(fred_api_key=""),
+        _config(fred_api_key="fred"),
         now=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
-        source_names=("fred_releases", "massive_news", "nasdaq_tables"),
+        source_names=("massive_news", "nasdaq_tables"),
     )
 
     assert [batch.source_name for batch in batches] == ["massive_news"]
-    assert any("fred_releases: FRED_API_KEY is not configured." in warning for warning in warnings)
+    assert warnings == []
     assert failures == ["nasdaq_tables: RuntimeError: entitlement denied"]
     assert called == ["massive_news", "nasdaq_tables"]
+
+
+def test_fetch_requested_sources_rejects_selected_source_missing_config() -> None:
+    with pytest.raises(RuntimeError, match="fred_releases: FRED_API_KEY is not configured"):
+        fetch_requested_sources(
+            _config(fred_api_key=""),
+            now=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+            source_names=("fred_releases",),
+        )
 
 
 def test_fetch_requested_sources_sanitizes_failure_details(monkeypatch) -> None:
@@ -148,9 +157,25 @@ def test_official_calendar_fetchers_send_public_calendar_headers(monkeypatch) ->
     assert captured[1]["Accept"].startswith("text/html")
 
 
-def test_economic_catalyst_vendor_sources_default_to_structured_only(monkeypatch) -> None:
-    monkeypatch.delenv("ECONOMIC_CATALYST_VENDOR_SOURCES", raising=False)
+def test_economic_catalyst_sources_ignore_allow_list_envs(monkeypatch) -> None:
+    monkeypatch.setenv("ECONOMIC_CATALYST_OFFICIAL_SOURCES", "")
+    monkeypatch.setenv("ECONOMIC_CATALYST_VENDOR_SOURCES", "")
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    monkeypatch.delenv("NASDAQ_API_KEY", raising=False)
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_KEY_ID", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+    monkeypatch.setenv("ECONOMIC_CATALYST_NASDAQ_TABLES", "[]")
 
     config = EconomicCatalystConfig.from_env()
 
-    assert config.vendor_sources == ("nasdaq_tables",)
+    assert config.configured_sources() == (
+        "bls_release_calendar",
+        "bea_release_schedule",
+        "fomc_schedule",
+        "ecb_policy_calendar",
+        "boe_mpc_calendar",
+        "boj_release_schedule",
+        "treasury_auction_schedule",
+    )

@@ -9,36 +9,36 @@ from tasks.economic_catalyst_data.sources import RawSourceBatch
 _selected_sources = bronze._selected_sources
 
 
-def _config() -> EconomicCatalystConfig:
-    return EconomicCatalystConfig(
-        bronze_container="bronze",
-        silver_container="silver",
-        gold_container="gold",
-        official_sources=("fred_releases", "bls_release_calendar", "bea_release_schedule"),
-        vendor_sources=("nasdaq_tables", "massive_news", "alpaca_news", "alpha_vantage_news"),
-        structured_lookback_days=90,
-        headline_lookback_days=14,
-        future_schedule_days=180,
-        general_poll_minutes=15,
-        fred_api_key="fred",
-        alpha_vantage_api_key="av",
-        massive_api_key="massive",
-        alpaca_key_id="alpaca-key",
-        alpaca_secret_key="alpaca-secret",
-        nasdaq_api_key="nasdaq",
-        alpha_vantage_news_topics="economy_macro",
-        fomc_schedule_urls=("https://example.com/fomc",),
-        bls_ics_url="https://example.com/bls.ics",
-        bea_schedule_url="https://example.com/bea",
-        ecb_calendar_url="https://example.com/ecb",
-        boe_calendar_url="https://example.com/boe",
-        boj_schedule_url="https://example.com/boj",
-        treasury_auctions_url="https://example.com/treasury.xml",
-        nasdaq_table_configs=(NasdaqTableConfig(table="DB/TEST", dataset_name="macro_table"),),
-        massive_base_url="https://api.massive.com",
-        alpaca_news_base_url="https://data.alpaca.markets/v1beta1",
-        http_timeout_seconds=30.0,
-    )
+def _config(**overrides: object) -> EconomicCatalystConfig:
+    base = {
+        "bronze_container": "bronze",
+        "silver_container": "silver",
+        "gold_container": "gold",
+        "structured_lookback_days": 90,
+        "headline_lookback_days": 14,
+        "future_schedule_days": 180,
+        "general_poll_minutes": 15,
+        "fred_api_key": "fred",
+        "alpha_vantage_api_key": "av",
+        "massive_api_key": "massive",
+        "alpaca_key_id": "alpaca-key",
+        "alpaca_secret_key": "alpaca-secret",
+        "nasdaq_api_key": "nasdaq",
+        "alpha_vantage_news_topics": "economy_macro",
+        "fomc_schedule_urls": ("https://example.com/fomc",),
+        "bls_ics_url": "https://example.com/bls.ics",
+        "bea_schedule_url": "https://example.com/bea",
+        "ecb_calendar_url": "https://example.com/ecb",
+        "boe_calendar_url": "https://example.com/boe",
+        "boj_schedule_url": "https://example.com/boj",
+        "treasury_auctions_url": "https://example.com/treasury.xml",
+        "nasdaq_table_configs": (NasdaqTableConfig(table="DB/TEST", dataset_name="macro_table"),),
+        "massive_base_url": "https://api.massive.com",
+        "alpaca_news_base_url": "https://data.alpaca.markets/v1beta1",
+        "http_timeout_seconds": 30.0,
+    }
+    base.update(overrides)
+    return EconomicCatalystConfig(**base)
 
 
 def test_selected_sources_uses_general_poll_on_full_cycle() -> None:
@@ -48,7 +48,7 @@ def test_selected_sources_uses_general_poll_on_full_cycle() -> None:
     )
 
     assert poll_mode == "general"
-    assert selected == _config().enabled_sources()
+    assert selected == _config().configured_sources()
 
 
 def test_selected_sources_limits_hot_window_runs_to_fast_sources() -> None:
@@ -135,9 +135,22 @@ def test_main_downgrades_optional_source_failure_and_saves_success(monkeypatch) 
     assert saved_success and saved_success[0]["status"] == "succeededWithWarnings"
 
 
-def test_main_does_not_save_last_success_on_failed_source_run(monkeypatch) -> None:
-    config = EconomicCatalystConfig(
-        **{**_config().__dict__, "official_sources": (), "vendor_sources": ()}
+def test_main_does_not_save_last_success_when_no_sources_are_configured(monkeypatch) -> None:
+    config = _config(
+        fred_api_key="",
+        alpha_vantage_api_key="",
+        massive_api_key="",
+        alpaca_key_id="",
+        alpaca_secret_key="",
+        nasdaq_api_key="",
+        fomc_schedule_urls=(),
+        bls_ics_url="",
+        bea_schedule_url="",
+        ecb_calendar_url="",
+        boe_calendar_url="",
+        boj_schedule_url="",
+        treasury_auctions_url="",
+        nasdaq_table_configs=(),
     )
     saved_success: list[dict[str, object]] = []
 

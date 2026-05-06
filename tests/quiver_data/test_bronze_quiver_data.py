@@ -92,7 +92,6 @@ def _config(**overrides) -> QuiverDataConfig:
         "bronze_container": "bronze",
         "silver_container": "silver",
         "gold_container": "gold",
-        "enabled": True,
         "job_mode": "incremental",
         "ticker_batch_size": 2,
         "historical_batch_size": 1,
@@ -259,29 +258,9 @@ def test_bronze_watermark_keys_remain_mode_specific() -> None:
     assert bronze._cursor_watermark_key("historical_backfill") == "quiver_bronze_cursor_historical_backfill"
 
 
-def test_main_disabled_quiver_exits_before_client_or_publish(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = _config(enabled=False)
-
+def test_main_fails_when_quiver_gateway_client_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bronze.mdc, "log_environment_diagnostics", lambda: None)
-    monkeypatch.setattr(bronze.mdc, "write_line", lambda _message: None)
-    monkeypatch.setattr(
-        bronze.mdc,
-        "get_storage_client",
-        lambda _container: (_ for _ in ()).throw(AssertionError("storage client should not be created")),
-    )
-    monkeypatch.setattr(
-        bronze,
-        "QuiverGatewayClient",
-        type(
-            "ForbiddenClient",
-            (),
-            {"from_env": staticmethod(lambda: (_ for _ in ()).throw(AssertionError("client should not be created")))},
-        ),
-    )
-    monkeypatch.setattr(
-        bronze,
-        "write_domain_artifact",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("domain artifact should not be written")),
-    )
+    monkeypatch.setattr(bronze, "QuiverGatewayClient", None)
 
-    assert bronze.main(config) == 0
+    with pytest.raises(RuntimeError, match="QuiverGatewayClient is unavailable"):
+        bronze.main(_config())

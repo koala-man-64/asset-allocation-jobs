@@ -1381,13 +1381,10 @@ def test_deploy_prod_workflow_exports_economic_catalyst_secret_vars() -> None:
     assert "ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}" in workflow_text
 
 
-def test_deploy_prod_workflow_exports_bronze_runtime_safety_vars() -> None:
+def test_deploy_prod_workflow_exports_bronze_runtime_cadence_vars() -> None:
     workflow_text = (repo_root() / ".github" / "workflows" / "deploy-prod.yml").read_text(encoding="utf-8")
 
-    assert "BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED: ${{ vars.BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED || 'false' }}" in workflow_text
-    assert "ECONOMIC_CATALYST_VENDOR_SOURCES: ${{ vars.ECONOMIC_CATALYST_VENDOR_SOURCES || 'nasdaq_tables' }}" in workflow_text
     assert "ECONOMIC_CATALYST_GENERAL_POLL_MINUTES: ${{ vars.ECONOMIC_CATALYST_GENERAL_POLL_MINUTES || '30' }}" in workflow_text
-    assert "QUIVER_DATA_ENABLED: ${{ vars.QUIVER_DATA_ENABLED || 'false' }}" in workflow_text
     assert "uses: ./.github/actions/setup-python-jobs" in workflow_text
     assert "python scripts/workflows/install_jobs_dependencies.py \\" in workflow_text
     assert "--requirements requirements.lock.txt \\" in workflow_text

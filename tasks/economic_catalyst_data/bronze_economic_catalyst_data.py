@@ -39,7 +39,7 @@ def _persist_manifest(
     batch_paths: list[str],
     warnings: list[str],
     failures: list[str],
-    enabled_sources: tuple[str, ...],
+    selected_sources: tuple[str, ...],
     poll_mode: str,
 ) -> dict[str, Any]:
     payload = {
@@ -49,7 +49,7 @@ def _persist_manifest(
         "domain": constants.DOMAIN_SLUG,
         "updatedAt": computed_at_iso(),
         "batchPaths": batch_paths,
-        "enabledSources": list(enabled_sources),
+        "selectedSources": list(selected_sources),
         "pollMode": poll_mode,
         "warnings": list(warnings),
         "failures": list(failures),
@@ -59,20 +59,20 @@ def _persist_manifest(
 
 
 def _selected_sources(config: EconomicCatalystConfig, *, now: datetime) -> tuple[str, tuple[str, ...]]:
-    enabled_sources = config.enabled_sources()
-    if not enabled_sources:
+    configured_sources = config.configured_sources()
+    if not configured_sources:
         return "general", ()
     general_minutes = max(int(config.general_poll_minutes), 1)
     if now.minute % general_minutes == 0:
-        return "general", enabled_sources
+        return "general", configured_sources
     hot_sources = tuple(
         source_name
-        for source_name in enabled_sources
+        for source_name in configured_sources
         if source_name in constants.STRUCTURED_VENDOR_SOURCES
         or source_name in constants.HEADLINE_SOURCES
         or source_name == "fred_releases"
     )
-    return "hot_window", hot_sources or enabled_sources
+    return "hot_window", hot_sources or configured_sources
 
 
 def _failure_source_name(message: str) -> str:
@@ -91,7 +91,7 @@ def _source_failure_decision(
     required = selected & set(constants.OFFICIAL_SOURCES)
 
     if not selected:
-        return True, "no_enabled_sources", failed, succeeded
+        return True, "no_configured_sources", failed, succeeded
     if selected and not succeeded:
         return True, "all_selected_sources_failed", failed, succeeded
     if required and not (required - failed):
@@ -133,7 +133,7 @@ def main() -> int:
         batch_paths=batch_paths,
         warnings=warnings,
         failures=failures,
-        enabled_sources=selected_sources,
+        selected_sources=selected_sources,
         poll_mode=poll_mode,
     )
     write_domain_artifact(
@@ -171,7 +171,7 @@ def main() -> int:
                 "status": status,
                 "poll_mode": poll_mode,
                 "batch_count": len(batches),
-                "enabled_sources": list(selected_sources),
+                "selected_sources": list(selected_sources),
                 "warnings": warnings,
                 "failures": failures,
                 "batch_paths": batch_paths,

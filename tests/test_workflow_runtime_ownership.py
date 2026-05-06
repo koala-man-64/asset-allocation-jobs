@@ -357,8 +357,8 @@ def test_market_job_manifests_keep_folder_envs_aligned_to_contract_names() -> No
             "value: ${AZURE_FOLDER_FINANCE}",
             "value: ${AZURE_FOLDER_EARNINGS}",
             "value: ${AZURE_FOLDER_TARGETS}",
-            "name: BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED",
-            "value: ${BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED}",
+            "name: ALPHA_VANTAGE_API_KEY",
+            "secretRef: alpha-vantage-api-key",
         ),
         "job_silver_market_data.yaml": (
             "value: ${AZURE_FOLDER_MARKET}",
@@ -420,7 +420,6 @@ def test_quiver_bronze_manifests_define_mode_and_runtime_envs() -> None:
     manifest_name = "job_bronze_quiver.yaml"
     text = (deploy_dir / manifest_name).read_text(encoding="utf-8")
     for required_name in (
-        "QUIVER_DATA_ENABLED",
         "QUIVER_DATA_JOB_MODE",
         "QUIVER_DATA_TICKER_BATCH_SIZE",
         "QUIVER_DATA_HISTORICAL_BATCH_SIZE",
@@ -432,6 +431,27 @@ def test_quiver_bronze_manifests_define_mode_and_runtime_envs() -> None:
         assert f"name: {required_name}" in text, f"{manifest_name} missing {required_name}"
     assert 'name: ASSET_ALLOCATION_API_TIMEOUT_SECONDS' in text, manifest_name
     assert 'value: "120"' in text, manifest_name
+
+
+def test_deployed_jobs_do_not_define_data_source_enable_gates() -> None:
+    root = repo_root()
+    stale_source_gate_names = (
+        "QUIVER_DATA_ENABLED",
+        "BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED",
+        "ECONOMIC_CATALYST_OFFICIAL_SOURCES",
+        "ECONOMIC_CATALYST_VENDOR_SOURCES",
+    )
+    checked_paths = [
+        root / ".env.template",
+        root / ".github" / "workflows" / "deploy-prod.yml",
+        root / "docs" / "ops" / "env-contract.csv",
+        *sorted((root / "deploy").glob("job_*.yaml")),
+    ]
+
+    for path in checked_paths:
+        text = path.read_text(encoding="utf-8")
+        for stale_name in stale_source_gate_names:
+            assert stale_name not in text, f"{path} still defines data-source gate {stale_name}"
 
 
 def test_economic_catalyst_bronze_manifest_runs_weekdays_every_30_minutes_without_retries() -> None:

@@ -116,8 +116,6 @@ class EconomicCatalystConfig:
     bronze_container: str
     silver_container: str
     gold_container: str
-    official_sources: tuple[str, ...]
-    vendor_sources: tuple[str, ...]
     structured_lookback_days: int
     headline_lookback_days: int
     future_schedule_days: int
@@ -143,14 +141,6 @@ class EconomicCatalystConfig:
 
     @staticmethod
     def from_env() -> "EconomicCatalystConfig":
-        official_sources = _csv_or_default(
-            os.environ.get("ECONOMIC_CATALYST_OFFICIAL_SOURCES", ""),
-            tuple(sorted(constants.OFFICIAL_SOURCES)),
-        )
-        vendor_sources = _csv_or_default(
-            os.environ.get("ECONOMIC_CATALYST_VENDOR_SOURCES", ""),
-            ("nasdaq_tables",),
-        )
         nasdaq_table_configs = tuple(
             NasdaqTableConfig.from_dict(item)
             for item in _json_list(os.environ.get("ECONOMIC_CATALYST_NASDAQ_TABLES", ""))
@@ -165,8 +155,6 @@ class EconomicCatalystConfig:
             bronze_container=_env_text("AZURE_CONTAINER_BRONZE", "bronze"),
             silver_container=_env_text("AZURE_CONTAINER_SILVER", "silver"),
             gold_container=_env_text("AZURE_CONTAINER_GOLD", "gold"),
-            official_sources=official_sources,
-            vendor_sources=vendor_sources,
             structured_lookback_days=_env_int("ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS", 90),
             headline_lookback_days=_env_int("ECONOMIC_CATALYST_HEADLINE_CORRECTION_LOOKBACK_DAYS", 14),
             future_schedule_days=_env_int("ECONOMIC_CATALYST_FUTURE_SCHEDULE_DAYS", 180),
@@ -199,43 +187,65 @@ class EconomicCatalystConfig:
             http_timeout_seconds=http_timeout_seconds,
         )
 
-    def requested_sources(self) -> tuple[str, ...]:
-        requested = [*self.official_sources, *self.vendor_sources]
-        return tuple(dict.fromkeys(source for source in requested if source in constants.ALL_SOURCES))
+    def configured_sources(self) -> tuple[str, ...]:
+        sources: list[str] = []
+        if self.fred_api_key:
+            sources.append("fred_releases")
+        sources.extend(
+            source_name
+            for source_name, configured in (
+                ("bls_release_calendar", self.bls_ics_url),
+                ("bea_release_schedule", self.bea_schedule_url),
+                ("fomc_schedule", self.fomc_schedule_urls),
+                ("ecb_policy_calendar", self.ecb_calendar_url),
+                ("boe_mpc_calendar", self.boe_calendar_url),
+                ("boj_release_schedule", self.boj_schedule_url),
+                ("treasury_auction_schedule", self.treasury_auctions_url),
+            )
+            if configured
+        )
+        if self.nasdaq_table_configs:
+            sources.append("nasdaq_tables")
+        if self.massive_api_key:
+            sources.append("massive_news")
+        if self.alpaca_key_id and self.alpaca_secret_key:
+            sources.append("alpaca_news")
+        if self.alpha_vantage_api_key:
+            sources.append("alpha_vantage_news")
+        return tuple(dict.fromkeys(source for source in sources if source in constants.ALL_SOURCES))
 
-    def enabled_sources(self) -> tuple[str, ...]:
-        enabled: list[str] = []
-        for source_name in self.requested_sources():
+    def source_configuration_errors(self, source_names: tuple[str, ...] | None = None) -> dict[str, str]:
+        selected = tuple(dict.fromkeys(source_names or self.configured_sources()))
+        errors: dict[str, str] = {}
+        for source_name in selected:
             if source_name == "fred_releases" and not self.fred_api_key:
-                continue
-            if source_name == "nasdaq_tables" and (not self.nasdaq_api_key or not self.nasdaq_table_configs):
-                continue
-            if source_name == "massive_news" and not self.massive_api_key:
-                continue
-            if source_name == "alpaca_news" and (not self.alpaca_key_id or not self.alpaca_secret_key):
-                continue
-            if source_name == "alpha_vantage_news" and not self.alpha_vantage_api_key:
-                continue
-            enabled.append(source_name)
-        return tuple(enabled)
-
-    def missing_credentials(self) -> dict[str, str]:
-        missing: dict[str, str] = {}
-        for source_name in self.requested_sources():
-            if source_name == "fred_releases" and not self.fred_api_key:
-                missing[source_name] = "FRED_API_KEY is not configured."
+                errors[source_name] = "FRED_API_KEY is not configured."
+            elif source_name == "bls_release_calendar" and not self.bls_ics_url:
+                errors[source_name] = "ECONOMIC_CATALYST_BLS_ICS_URL is not configured."
+            elif source_name == "bea_release_schedule" and not self.bea_schedule_url:
+                errors[source_name] = "ECONOMIC_CATALYST_BEA_SCHEDULE_URL is not configured."
+            elif source_name == "fomc_schedule" and not self.fomc_schedule_urls:
+                errors[source_name] = "ECONOMIC_CATALYST_FOMC_SCHEDULE_URLS is not configured."
+            elif source_name == "ecb_policy_calendar" and not self.ecb_calendar_url:
+                errors[source_name] = "ECONOMIC_CATALYST_ECB_CALENDAR_URL is not configured."
+            elif source_name == "boe_mpc_calendar" and not self.boe_calendar_url:
+                errors[source_name] = "ECONOMIC_CATALYST_BOE_CALENDAR_URL is not configured."
+            elif source_name == "boj_release_schedule" and not self.boj_schedule_url:
+                errors[source_name] = "ECONOMIC_CATALYST_BOJ_SCHEDULE_URL is not configured."
+            elif source_name == "treasury_auction_schedule" and not self.treasury_auctions_url:
+                errors[source_name] = "ECONOMIC_CATALYST_TREASURY_AUCTIONS_URL is not configured."
             elif source_name == "nasdaq_tables":
-                if not self.nasdaq_api_key:
-                    missing[source_name] = "NASDAQ_API_KEY is not configured."
-                elif not self.nasdaq_table_configs:
-                    missing[source_name] = "ECONOMIC_CATALYST_NASDAQ_TABLES is empty."
+                if not self.nasdaq_table_configs:
+                    errors[source_name] = "ECONOMIC_CATALYST_NASDAQ_TABLES is empty."
+                elif not self.nasdaq_api_key:
+                    errors[source_name] = "NASDAQ_API_KEY is not configured."
             elif source_name == "massive_news" and not self.massive_api_key:
-                missing[source_name] = "MASSIVE_API_KEY is not configured."
+                errors[source_name] = "MASSIVE_API_KEY is not configured."
             elif source_name == "alpaca_news" and (not self.alpaca_key_id or not self.alpaca_secret_key):
-                missing[source_name] = "ALPACA_KEY_ID or ALPACA_SECRET_KEY is not configured."
+                errors[source_name] = "ALPACA_KEY_ID or ALPACA_SECRET_KEY is not configured."
             elif source_name == "alpha_vantage_news" and not self.alpha_vantage_api_key:
-                missing[source_name] = "ALPHA_VANTAGE_API_KEY is not configured."
-        return missing
+                errors[source_name] = "ALPHA_VANTAGE_API_KEY is not configured."
+        return errors
 
     def structured_window_start(self, *, now: datetime | None = None) -> datetime:
         anchor = now or datetime.now(timezone.utc)
