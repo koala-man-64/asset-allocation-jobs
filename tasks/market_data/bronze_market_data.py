@@ -100,6 +100,8 @@ _PROMOTED_REPROBE_LIMIT = 25
 _DOMAIN = "market"
 _PROVIDER = "massive"
 _NO_MARKET_HISTORY_REASON_CODE = "provider_no_market_history"
+_MARKET_HISTORY_FORBIDDEN_REASON_CODE = "provider_market_history_forbidden"
+_MASSIVE_MARKET_HISTORY_PATH = "/api/providers/massive/market-history"
 _ALPHA_VANTAGE_ENRICHMENT_ENV = "BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED"
 _DEFAULT_DIVIDEND_AMOUNT = 0.0
 _DEFAULT_SPLIT_COEFFICIENT = 1.0
@@ -259,6 +261,33 @@ def _failure_bucket_key(exc: BaseException) -> str:
         if path:
             key += f" path={_truncate_trace_text(path, limit=80)}"
     return key
+
+
+def _retryable_failure_candidate_reason(exc: BaseException) -> str | None:
+    if not isinstance(exc, MassiveGatewayError):
+        return None
+    status_code = getattr(exc, "status_code", None)
+    payload = getattr(exc, "payload", None)
+    path = str(payload.get("path") or "").strip() if isinstance(payload, dict) else ""
+    if status_code in {401, 403} and path == _MASSIVE_MARKET_HISTORY_PATH:
+        return _MARKET_HISTORY_FORBIDDEN_REASON_CODE
+    return None
+
+
+def _all_market_provider_calls_failed(progress: dict[str, int]) -> bool:
+    retryable_failures = int(progress.get("failed", 0) or 0)
+    if retryable_failures <= 0:
+        return False
+    provider_non_failure_outcomes = sum(
+        int(progress.get(name, 0) or 0)
+        for name in (
+            "downloaded",
+            "invalid_candidates",
+            "unavailable",
+            "reprobe_retained",
+        )
+    )
+    return provider_non_failure_outcomes == 0
 
 
 def _validate_environment() -> None:
@@ -1649,6 +1678,7 @@ async def main_async() -> int:
         "processed": 0,
         "downloaded": 0,
         "failed": 0,
+        "fatal_failed": 0,
         "invalid_candidates": 0,
         "no_history_candidates": 0,
         "unavailable": 0,
@@ -1656,10 +1686,13 @@ async def main_async() -> int:
         "no_history_promotions": 0,
         "reprobe_recovered": 0,
         "reprobe_retained": 0,
+        "retryable_failure_candidates": 0,
+        "retryable_failure_promotions": 0,
     }
     retry_next_run: set[str] = set()
     failure_counts: dict[str, int] = {}
     failure_examples: dict[str, str] = {}
+    retryable_failure_candidates: dict[str, str] = {}
     progress_lock = asyncio.Lock()
 
     max_workers = _get_max_workers()
@@ -1670,11 +1703,14 @@ async def main_async() -> int:
     async def record_failure(symbol: str, exc: BaseException) -> None:
         failure_reason = _format_failure_reason(exc)
         failure_key = _failure_bucket_key(exc)
+        candidate_reason = _retryable_failure_candidate_reason(exc)
         async with progress_lock:
             progress["failed"] += 1
             retry_next_run.add(symbol)
             failure_counts[failure_key] = failure_counts.get(failure_key, 0) + 1
             failure_examples.setdefault(failure_key, f"symbol={symbol} {failure_reason}")
+            if candidate_reason:
+                retryable_failure_candidates[str(symbol or "").strip().upper()] = candidate_reason
             failed_total = progress["failed"]
             key_total = failure_counts[failure_key]
 
@@ -1963,7 +1999,7 @@ async def main_async() -> int:
                 )
         except Exception as exc:
             bucket_publish_error = exc
-            progress["failed"] += 1
+            progress["fatal_failed"] += 1
             mdc.write_error(f"Bronze market alpha26 bucket publish failed: {exc}")
     finally:
         _active_alpha_vantage_client_manager = None
@@ -2004,8 +2040,43 @@ async def main_async() -> int:
             else:
                 log_bronze_success(domain="market", operation="list_flush")
         except Exception as exc:
-            progress["failed"] += 1
+            progress["fatal_failed"] += 1
             mdc.write_error(f"Bronze market alpha26 publish failed: {exc}")
+
+    all_provider_calls_failed = _all_market_provider_calls_failed(progress)
+    if retryable_failure_candidates and all_provider_calls_failed:
+        mdc.write_error(
+            "Bronze market provider failure gate blocked retryable symbol candidate promotion: "
+            f"retryable_failed={progress['failed']} downloaded={progress['downloaded']} "
+            f"invalid_candidates={progress['invalid_candidates']} unavailable={progress['unavailable']}"
+        )
+    elif retryable_failure_candidates:
+        for symbol, reason_code in sorted(retryable_failure_candidates.items()):
+            promotion = record_invalid_symbol_candidate(
+                common_client=common_client,
+                bronze_client=bronze_client,
+                domain=_DOMAIN,
+                symbol=symbol,
+                provider=_PROVIDER,
+                reason_code=reason_code,
+                run_id=run_id,
+            )
+            progress["retryable_failure_candidates"] += 1
+            if promotion.get("promoted"):
+                progress["retryable_failure_promotions"] += 1
+            message = (
+                "Bronze market retryable failure candidate: symbol={symbol} reason={reason} "
+                "observed_runs={observed_runs}"
+            ).format(
+                symbol=symbol,
+                reason=reason_code,
+                observed_runs=promotion.get("observedRunCount", 1),
+            )
+            if promotion.get("promoted"):
+                message += " promoted_to_domain_blacklist_after_2_runs=true"
+            if promotion.get("already_promoted"):
+                message += " already_promoted=true"
+            mdc.write_warning(message)
 
     if failure_counts:
         ordered = sorted(failure_counts.items(), key=lambda item: item[1], reverse=True)
@@ -2016,17 +2087,23 @@ async def main_async() -> int:
             if example:
                 mdc.write_warning(f"Bronze market failure example ({name}): {example}")
 
+    run_failed_count = progress["fatal_failed"] + (1 if all_provider_calls_failed else 0)
+    warning_count = progress["invalid_candidates"] + progress["no_history_candidates"] + progress["failed"]
     job_status, exit_code = resolve_job_run_status(
-        failed_count=progress["failed"],
-        warning_count=progress["invalid_candidates"] + progress["no_history_candidates"],
+        failed_count=run_failed_count,
+        warning_count=warning_count,
     )
     mdc.write_line(
         "Bronze Massive market ingest complete: processed={processed} downloaded={downloaded} "
         "invalid_candidates={invalid_candidates} no_history_candidates={no_history_candidates} "
         "unavailable={unavailable} blacklist_promotions={blacklist_promotions} "
         "no_history_promotions={no_history_promotions} reprobe_recovered={reprobe_recovered} "
-        "reprobe_retained={reprobe_retained} failed={failed} job_status={job_status}".format(
+        "reprobe_retained={reprobe_retained} failed={failed} "
+        "retryable_failure_candidates={retryable_failure_candidates} "
+        "retryable_failure_promotions={retryable_failure_promotions} fatal_failed={fatal_failed} "
+        "all_provider_calls_failed={all_provider_calls_failed} job_status={job_status}".format(
             **progress,
+            all_provider_calls_failed=str(all_provider_calls_failed).lower(),
             job_status=job_status,
         )
     )

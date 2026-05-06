@@ -1777,7 +1777,7 @@ def test_main_async_normal_run_drops_unscheduled_seeded_rows_during_bucket_rewri
     assert bucket_a["date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-01-03"]
 
 
-def test_main_async_failed_scheduled_symbol_retains_seeded_rows_in_bucket_rewrite():
+def test_main_async_retryable_symbol_failure_promotes_blacklist_and_still_succeeds():
     captured_bucket_frames: dict[str, pd.DataFrame] = {}
 
     def _fake_load_bucket(*, bucket: str) -> pd.DataFrame:
@@ -1844,7 +1844,12 @@ def test_main_async_failed_scheduled_symbol_retains_seeded_rows_in_bucket_rewrit
                 collected_lock=collected_lock,
             )
             return
-        raise bronze.MassiveGatewayError(f"boom for {symbol}")
+        raise bronze.MassiveGatewayError(
+            f"boom for {symbol}",
+            status_code=403,
+            detail="Massive auth failed.",
+            payload={"path": bronze._MASSIVE_MARKET_HISTORY_PATH},
+        )
 
     def _fake_bucket_write(_session, *, bucket, frame, symbol_to_bucket=None):
         del symbol_to_bucket
@@ -1889,8 +1894,11 @@ def test_main_async_failed_scheduled_symbol_retains_seeded_rows_in_bucket_rewrit
             return_value=_fake_publish_result(written_symbols=2),
         ), patch(
             "tasks.market_data.bronze_market_data.resolve_job_run_status",
-            return_value=("failed", 1),
-        ), patch(
+            wraps=bronze.resolve_job_run_status,
+        ) as mock_resolve_status, patch(
+            "tasks.market_data.bronze_market_data.record_invalid_symbol_candidate",
+            return_value={"promoted": True, "observedRunCount": 2, "blacklistPath": "market-data/blacklist.csv"},
+        ) as mock_record_candidate, patch(
             "tasks.market_data.bronze_market_data.list_manager"
         ) as mock_list_manager, patch(
             "tasks.market_data.bronze_market_data.mdc.write_line"
@@ -1900,7 +1908,11 @@ def test_main_async_failed_scheduled_symbol_retains_seeded_rows_in_bucket_rewrit
             mock_list_manager.is_blacklisted.return_value = False
             exit_code = await bronze.main_async()
 
-        assert exit_code == 1
+        assert exit_code == 0
+        mock_resolve_status.assert_called_once_with(failed_count=0, warning_count=1)
+        mock_record_candidate.assert_called_once()
+        assert mock_record_candidate.call_args.kwargs["symbol"] == "AMZN"
+        assert mock_record_candidate.call_args.kwargs["reason_code"] == "provider_market_history_forbidden"
 
     asyncio.run(run_test())
 
@@ -1908,6 +1920,87 @@ def test_main_async_failed_scheduled_symbol_retains_seeded_rows_in_bucket_rewrit
     assert bucket_a["symbol"].tolist() == ["AAPL", "AMZN"]
     assert bucket_a.loc[bucket_a["symbol"] == "AAPL", "date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-01-03"]
     assert bucket_a.loc[bucket_a["symbol"] == "AMZN", "date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-01-02"]
+
+
+def test_main_async_fails_when_all_provider_calls_fail():
+    def _raise_provider_failure(
+        symbol,
+        _client_manager,
+        *,
+        snapshot_row=None,
+        collected_symbol_frames=None,
+        collected_lock=None,
+        existing_symbol_df=None,
+        max_attempts=0,
+        sleep_seconds=0.0,
+    ):
+        del _client_manager, snapshot_row, collected_symbol_frames, collected_lock, existing_symbol_df
+        del max_attempts, sleep_seconds
+        raise bronze.MassiveGatewayError(
+            f"boom for {symbol}",
+            status_code=403,
+            detail="Massive auth failed.",
+            payload={"path": bronze._MASSIVE_MARKET_HISTORY_PATH},
+        )
+
+    async def run_test():
+        with patch("tasks.market_data.bronze_market_data._validate_environment"), patch(
+            "tasks.market_data.bronze_market_data.mdc.log_environment_diagnostics"
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": ["AAPL", "AMZN"]}),
+        ), patch(
+            "tasks.market_data.bronze_market_data.bronze_bucketing.bronze_layout_mode",
+            return_value="alpha26",
+        ), patch(
+            "tasks.market_data.bronze_market_data._load_alpha26_existing_market_bucket",
+            side_effect=_fake_empty_bucket_load,
+        ), patch(
+            "tasks.market_data.bronze_market_data._fetch_snapshot_daily_rows",
+            return_value={},
+        ), patch(
+            "tasks.market_data.bronze_market_data._ThreadLocalMassiveClientManager",
+            return_value=MagicMock(),
+        ), patch(
+            "tasks.market_data.bronze_market_data._get_max_workers",
+            return_value=1,
+        ), patch(
+            "tasks.market_data.bronze_market_data._download_and_save_raw_with_recovery",
+            side_effect=_raise_provider_failure,
+        ), patch(
+            "tasks.market_data.bronze_market_data.start_alpha26_bronze_publish",
+            return_value=object(),
+        ), patch(
+            "tasks.market_data.bronze_market_data.write_alpha26_bronze_bucket",
+            return_value={"size": 0},
+        ), patch(
+            "tasks.market_data.bronze_market_data.finalize_alpha26_bronze_publish",
+            return_value=_fake_publish_result(written_symbols=0),
+        ), patch(
+            "tasks.market_data.bronze_market_data.resolve_job_run_status",
+            wraps=bronze.resolve_job_run_status,
+        ) as mock_resolve_status, patch(
+            "tasks.market_data.bronze_market_data.record_invalid_symbol_candidate",
+        ) as mock_record_candidate, patch(
+            "tasks.market_data.bronze_market_data.list_manager"
+        ) as mock_list_manager, patch(
+            "tasks.market_data.bronze_market_data.mdc.write_line"
+        ), patch(
+            "tasks.market_data.bronze_market_data.mdc.write_warning"
+        ), patch(
+            "tasks.market_data.bronze_market_data.mdc.write_error"
+        ):
+            mock_list_manager.is_blacklisted.return_value = False
+            exit_code = await bronze.main_async()
+
+        assert exit_code == 1
+        mock_resolve_status.assert_called_once_with(failed_count=1, warning_count=2)
+        mock_record_candidate.assert_not_called()
+
+    asyncio.run(run_test())
 
 
 def test_bronze_source_contains_no_symbol_csv_contract():
