@@ -7,7 +7,7 @@ The `economic_catalyst_data` domain ingests official macro calendars, structured
 - Official schedule and release sources: FRED, BLS, BEA, Federal Reserve, Treasury, ECB, BOE, BOJ.
 - Structured vendor overlays: Nasdaq Data Link table mappings configured through `ECONOMIC_CATALYST_NASDAQ_TABLES`.
 - Headline overlays: Massive primary, Alpaca and Alpha Vantage secondary.
-- Production defaults enable only the structured vendor overlay (`ECONOMIC_CATALYST_VENDOR_SOURCES=nasdaq_tables`); headline vendors are opt-in until their credentials, entitlements, and rate limits are verified.
+- Bronze selects sources from concrete runtime configuration: default official URLs, configured API credentials, and Nasdaq table mappings when present.
 - Postgres stores structured event surfaces plus headline metadata only. Raw payloads and full article text remain in Bronze storage.
 
 ## Storage Layout
@@ -51,9 +51,9 @@ Serving views:
 
 ## Operations
 
-- Configure source mix and cadence from `.env.web` using the `ECONOMIC_CATALYST_*` contract surface.
-- Validate `ECONOMIC_CATALYST_NASDAQ_TABLES` against the entitled table schema before enabling `nasdaq_tables`.
-- Source failure details in logs and manifests are sanitized. Optional source outages are recorded as warnings when at least one selected source succeeds; the Bronze run fails only when no sources are enabled, all selected sources fail, or all selected official sources fail.
+- Configure cadence, source URLs, credentials, and Nasdaq table mappings from `.env.web` using the `ECONOMIC_CATALYST_*` contract surface.
+- Validate `ECONOMIC_CATALYST_NASDAQ_TABLES` against the entitled table schema before supplying mappings.
+- Source failure details in logs and manifests are sanitized. Optional source outages are recorded as warnings when at least one selected source succeeds; the Bronze run fails when no sources are configured, all selected sources fail, or all selected official sources fail.
 - Failed Bronze runs do not update the `bronze_economic_catalyst_data` last-success marker, so downstream monitoring should use the latest manifest and job exit code instead of assuming a fresh success watermark.
 - Expect quarantine rows when a source payload cannot be normalized or reconciled. Quarantined rows stay out of Gold and Postgres.
 - Gold uses staged Postgres apply. The serving replica advances only after all target tables apply successfully.

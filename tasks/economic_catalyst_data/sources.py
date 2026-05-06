@@ -13,6 +13,7 @@ from alpha_vantage import AlphaVantageClient
 from alpha_vantage.config import AlphaVantageConfig
 from asset_allocation_runtime_common.market_data import core as mdc
 
+from tasks.economic_catalyst_data import constants
 from tasks.economic_catalyst_data.config import EconomicCatalystConfig
 
 
@@ -497,16 +498,16 @@ def fetch_requested_sources(
     batches: list[RawSourceBatch] = []
     warnings: list[str] = []
     failures: list[str] = []
-    missing = config.missing_credentials()
     requested_sources = tuple(
-        source_name
-        for source_name in (source_names or config.enabled_sources())
-        if source_name in config.enabled_sources()
+        dict.fromkeys(str(source_name or "").strip() for source_name in (source_names or config.configured_sources()))
     )
-    for source_name, message in missing.items():
-        if source_names is not None and source_name not in source_names:
-            continue
-        warnings.append(f"{source_name}: {message}")
+    invalid_sources = tuple(source_name for source_name in requested_sources if source_name not in constants.ALL_SOURCES)
+    if invalid_sources:
+        raise ValueError(f"Unknown economic catalyst source(s): {', '.join(invalid_sources)}")
+    configuration_errors = config.source_configuration_errors(requested_sources)
+    if configuration_errors:
+        details = "; ".join(f"{source_name}: {message}" for source_name, message in configuration_errors.items())
+        raise RuntimeError(f"Economic catalyst source configuration invalid: {details}")
     for source_name in requested_sources:
         fetcher = _FETCHERS.get(source_name)
         if fetcher is None:
