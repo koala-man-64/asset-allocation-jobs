@@ -1445,6 +1445,7 @@ async def main_async() -> int:
     retry_next_run: set[str] = set()
     failure_counts: dict[str, int] = {}
     failure_examples: dict[str, str] = {}
+    blocking_failures = 0
     progress_lock = asyncio.Lock()
 
     def worker(symbol: str, *, is_reprobe: bool = False) -> _FinanceSymbolOutcome:
@@ -1680,6 +1681,7 @@ async def main_async() -> int:
         else:
             log_bronze_success(domain="finance", operation="list_flush")
     except Exception as exc:
+        blocking_failures += 1
         progress["failed"] += 1
         mdc.write_error(f"Bronze finance alpha26 bucket write failed: {exc}")
 
@@ -1698,15 +1700,17 @@ async def main_async() -> int:
             f"Retry-on-next-run candidates (not promoted): count={len(retry_next_run)} symbols={preview}{suffix}"
         )
 
+    nonblocking_symbol_failures = max(int(progress["failed"]) - blocking_failures, 0)
     job_status, exit_code = resolve_job_run_status(
-        failed_count=progress["failed"],
-        warning_count=progress["invalid_candidates"],
+        failed_count=blocking_failures,
+        warning_count=progress["invalid_candidates"] + nonblocking_symbol_failures,
     )
     mdc.write_line(
         "Bronze Massive finance ingest complete: processed={processed} written={written} skipped={skipped} "
         "invalid_candidates={invalid_candidates} unavailable={unavailable} "
         "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
-        "reprobe_retained={reprobe_retained} failed={failed} coverage_checked={coverage_checked} "
+        "reprobe_retained={reprobe_retained} failed={failed} blocking_failures={blocking_failures} "
+        "nonblocking_symbol_failures={nonblocking_symbol_failures} coverage_checked={coverage_checked} "
         "coverage_forced_refetch={coverage_forced_refetch} coverage_marked_covered={coverage_marked_covered} "
         "coverage_marked_limited={coverage_marked_limited} coverage_skipped_limited_marker={coverage_skipped_limited_marker} "
         "provider_statement_requests={provider_statement_requests} "
@@ -1724,6 +1728,8 @@ async def main_async() -> int:
         "job_status={job_status}".format(
             **progress,
             **coverage_progress,
+            blocking_failures=blocking_failures,
+            nonblocking_symbol_failures=nonblocking_symbol_failures,
             job_status=job_status,
         )
     )

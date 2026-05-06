@@ -999,6 +999,7 @@ async def main_async() -> int:
     event_progress = _empty_event_summary()
     failure_counts: dict[str, int] = {}
     failure_examples: dict[str, str] = {}
+    blocking_failures = 0
     progress_lock = asyncio.Lock()
     provider_unavailable_event = asyncio.Event()
     provider_unavailable_abort: dict[str, Any] = {
@@ -1280,14 +1281,13 @@ async def main_async() -> int:
     publish_block_reason: str | None = None
     if provider_unavailable_abort["triggered"]:
         publish_block_reason = "provider_unavailable"
-    elif progress["failed"] > 0:
-        publish_block_reason = "symbol_failures"
     elif progress["written"] <= 0:
         publish_block_reason = "empty_output"
     elif calendar_degraded and (progress["unavailable"] > 0 or progress["invalid_candidates"] > 0):
         publish_block_reason = "calendar_degraded_incomplete_history"
 
     if publish_block_reason:
+        blocking_failures += 1
         progress["failed"] += 1
         mdc.write_error(
             "Bronze earnings alpha26 publish withheld: "
@@ -1313,6 +1313,7 @@ async def main_async() -> int:
             else:
                 log_bronze_success(domain="earnings", operation="list_flush")
         except Exception as exc:
+            blocking_failures += 1
             progress["failed"] += 1
             mdc.write_error(f"Bronze earnings alpha26 bucket write failed: {exc}")
 
@@ -1325,10 +1326,12 @@ async def main_async() -> int:
             if example:
                 mdc.write_warning(f"Bronze AV earnings failure example ({name}): {example}")
 
+    nonblocking_symbol_failures = max(int(progress["failed"]) - blocking_failures, 0)
     job_status, exit_code = resolve_job_run_status(
-        failed_count=progress["failed"],
+        failed_count=blocking_failures,
         warning_count=progress["invalid_candidates"]
         + progress["gateway_blacklist_candidates"]
+        + nonblocking_symbol_failures
         + (1 if calendar_degraded else 0),
     )
     mdc.write_line(
@@ -1336,7 +1339,8 @@ async def main_async() -> int:
         "invalid_candidates={invalid_candidates} gateway_blacklist_candidates={gateway_blacklist_candidates} "
         "unavailable={unavailable} "
         "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
-        "reprobe_retained={reprobe_retained} failed={failed} coverage_checked={coverage_checked} "
+        "reprobe_retained={reprobe_retained} failed={failed} blocking_failures={blocking_failures} "
+        "nonblocking_symbol_failures={nonblocking_symbol_failures} coverage_checked={coverage_checked} "
         "coverage_forced_refetch={coverage_forced_refetch} coverage_marked_covered={coverage_marked_covered} "
         "coverage_marked_limited={coverage_marked_limited} coverage_skipped_limited_marker={coverage_skipped_limited_marker} "
         "scheduled_rows_retained={scheduled_rows_retained} actual_over_scheduled_replacements={actual_over_scheduled_replacements} "
@@ -1344,6 +1348,8 @@ async def main_async() -> int:
             **progress,
             **coverage_progress,
             **event_progress,
+            blocking_failures=blocking_failures,
+            nonblocking_symbol_failures=nonblocking_symbol_failures,
             provider_unavailable_abort=str(provider_unavailable_abort["triggered"]).lower(),
             job_status=job_status,
         )

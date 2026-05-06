@@ -963,7 +963,7 @@ def test_main_async_promoted_reprobe_still_invalid_updates_marker(unique_ticker)
     asyncio.run(run_test())
 
 
-def test_main_async_promoted_reprobe_transient_failure_counts_as_failed_symbol(unique_ticker):
+def test_main_async_promoted_reprobe_transient_failure_counts_as_warning(unique_ticker):
     symbol = unique_ticker
     client_manager = MagicMock()
     coverage_summary = bronze._empty_coverage_summary()
@@ -1030,7 +1030,10 @@ def test_main_async_promoted_reprobe_transient_failure_counts_as_failed_symbol(u
             ),
             patch("tasks.finance_data.bronze_finance_data.bronze_client") as mock_bronze_client,
             patch("tasks.finance_data.bronze_finance_data.list_manager") as mock_list_manager,
-            patch("tasks.finance_data.bronze_finance_data.resolve_job_run_status", return_value=("failed", 1)),
+            patch(
+                "tasks.finance_data.bronze_finance_data.resolve_job_run_status",
+                return_value=("succeededWithWarnings", 0),
+            ) as mock_resolve_status,
             patch("tasks.finance_data.bronze_finance_data.mdc.write_line"),
             patch("tasks.finance_data.bronze_finance_data.mdc.write_warning"),
         ):
@@ -1040,10 +1043,11 @@ def test_main_async_promoted_reprobe_transient_failure_counts_as_failed_symbol(u
 
             exit_code = await bronze.main_async()
 
-        assert exit_code == 1
+        assert exit_code == 0
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["outcome"] == "failed_massivegatewayerror"
         mock_clear.assert_not_called()
+        mock_resolve_status.assert_called_once_with(failed_count=0, warning_count=1)
 
     asyncio.run(run_test())
 
