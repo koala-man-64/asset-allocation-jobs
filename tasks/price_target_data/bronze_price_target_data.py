@@ -16,7 +16,7 @@ from asset_allocation_runtime_common.market_data import bronze_bucketing
 from tasks.common.bronze_alpha26_publish import publish_alpha26_bronze_domain
 from tasks.common.bronze_observability import log_bronze_success, should_log_bronze_success
 from tasks.common.bronze_symbol_policy import build_bronze_run_id, validate_bronze_storage_clients
-from tasks.common.job_status import resolve_job_run_status
+from tasks.common.job_status import resolve_provider_gated_job_run_status
 from tasks.common.bronze_backfill_coverage import (
     extract_min_date_from_dataframe,
     load_coverage_marker,
@@ -383,6 +383,7 @@ async def process_batch_bronze(
         "save_failed": 0,
         "filtered_missing": 0,
         "api_error": False,
+        "provider_batch_attempted": 0,
     }
     batch_summary.update(_empty_coverage_summary())
     batch_failure_counts: Dict[str, int] = {}
@@ -551,6 +552,7 @@ async def process_batch_bronze(
 
         loop = asyncio.get_event_loop()
         api_error_message = ""
+        batch_summary["provider_batch_attempted"] = 1
 
         def fetch_api():
             nonlocal api_error_message
@@ -564,7 +566,7 @@ async def process_batch_bronze(
             except Exception as e:
                 api_error_message = str(e)
                 _record_batch_failure("api_fetch", e)
-                mdc.write_error(f"API Batch Error: {_format_failure_reason(e)}")
+                mdc.write_warning(f"API Batch Error: {_format_failure_reason(e)}")
                 return pd.DataFrame()
 
         mdc.write_line(f"Fetching {len(stale_symbols)} symbols from Nasdaq...")
@@ -702,7 +704,7 @@ async def process_batch_bronze(
         mdc.write_line(
             "Bronze price target batch summary: requested={requested} stale={stale} api_rows={api_rows} "
             "saved={saved} deleted={deleted} save_failed={save_failed} filtered_missing={filtered_missing} "
-            "api_error={api_error}".format(**batch_summary)
+            "api_error={api_error} provider_batch_attempted={provider_batch_attempted}".format(**batch_summary)
         )
         batch_summary["failure_counts"] = dict(batch_failure_counts)
         batch_summary["failure_examples"] = dict(batch_failure_examples)
@@ -793,6 +795,7 @@ async def main_async() -> int:
         "deleted": 0,
         "save_failed": 0,
         "filtered_missing": 0,
+        "provider_batches_attempted": 0,
         "api_error_batches": 0,
         "coverage_checked": 0,
         "coverage_forced_refetch": 0,
@@ -824,6 +827,7 @@ async def main_async() -> int:
             aggregate["deleted"] += int(result.get("deleted", 0) or 0)
             aggregate["save_failed"] += int(result.get("save_failed", 0) or 0)
             aggregate["filtered_missing"] += int(result.get("filtered_missing", 0) or 0)
+            aggregate["provider_batches_attempted"] += int(result.get("provider_batch_attempted", 0) or 0)
             aggregate["coverage_checked"] += int(result.get("coverage_checked", 0) or 0)
             aggregate["coverage_forced_refetch"] += int(result.get("coverage_forced_refetch", 0) or 0)
             aggregate["coverage_marked_covered"] += int(result.get("coverage_marked_covered", 0) or 0)
@@ -850,22 +854,42 @@ async def main_async() -> int:
         alpha26_index_path: Optional[str] = None
         flat_deleted = 0
         alpha26_publish_succeeded = not alpha26_mode
+        fatal_failures = batch_exception_count + int(aggregate.get("save_failed", 0) or 0)
+        status_decision = resolve_provider_gated_job_run_status(
+            fatal_failure_count=fatal_failures,
+            provider_call_count=int(aggregate.get("provider_batches_attempted", 0) or 0),
+            retryable_provider_failure_count=int(aggregate.get("api_error_batches", 0) or 0),
+        )
         if alpha26_mode:
-            try:
-                alpha26_written_symbols, alpha26_index_path = _write_alpha26_price_target_buckets(
-                    bucket_symbol_frames,
-                    run_id=run_id,
+            if status_decision.all_provider_calls_failed:
+                mdc.write_error(
+                    "Bronze price-target alpha26 publish withheld: "
+                    f"reason=all_provider_calls_failed "
+                    f"provider_calls_attempted={aggregate.get('provider_batches_attempted', 0)} "
+                    f"provider_retryable_failures={aggregate.get('api_error_batches', 0)}"
                 )
-                alpha26_publish_succeeded = True
-                flat_deleted = _delete_flat_symbol_blobs()
-                mdc.write_line(
-                    "Bronze price-target alpha26 buckets written: "
-                    f"symbols={alpha26_written_symbols} index={alpha26_index_path or 'n/a'} "
-                    f"flat_deleted={flat_deleted}"
-                )
-            except Exception as exc:
-                batch_exception_count += 1
-                mdc.write_error(f"Bronze price-target alpha26 bucket write failed: {exc}")
+            else:
+                try:
+                    alpha26_written_symbols, alpha26_index_path = _write_alpha26_price_target_buckets(
+                        bucket_symbol_frames,
+                        run_id=run_id,
+                    )
+                    alpha26_publish_succeeded = True
+                    flat_deleted = _delete_flat_symbol_blobs()
+                    mdc.write_line(
+                        "Bronze price-target alpha26 buckets written: "
+                        f"symbols={alpha26_written_symbols} index={alpha26_index_path or 'n/a'} "
+                        f"flat_deleted={flat_deleted}"
+                    )
+                except Exception as exc:
+                    batch_exception_count += 1
+                    fatal_failures += 1
+                    status_decision = resolve_provider_gated_job_run_status(
+                        fatal_failure_count=fatal_failures,
+                        provider_call_count=int(aggregate.get("provider_batches_attempted", 0) or 0),
+                        retryable_provider_failure_count=int(aggregate.get("api_error_batches", 0) or 0),
+                    )
+                    mdc.write_error(f"Bronze price-target alpha26 bucket write failed: {exc}")
         if alpha26_publish_succeeded:
             try:
                 list_manager.flush()
@@ -873,23 +897,23 @@ async def main_async() -> int:
                 mdc.write_warning(f"Failed to flush whitelist/blacklist updates: {exc}")
             else:
                 log_bronze_success(domain="price-target", operation="list_flush")
-        job_status, exit_code = resolve_job_run_status(
-            failed_count=(
-                batch_exception_count
-                + int(aggregate.get("save_failed", 0) or 0)
-                + int(aggregate.get("api_error_batches", 0) or 0)
-            ),
-            warning_count=0,
-        )
+        job_status = status_decision.job_status
+        exit_code = status_decision.exit_code
         mdc.write_line(
             "Bronze price target overall summary: requested={requested} stale={stale} api_rows={api_rows} "
             "saved={saved} deleted={deleted} save_failed={save_failed} filtered_missing={filtered_missing} "
             "coverage_checked={coverage_checked} coverage_forced_refetch={coverage_forced_refetch} "
             "coverage_marked_covered={coverage_marked_covered} coverage_marked_limited={coverage_marked_limited} "
             "coverage_skipped_limited_marker={coverage_skipped_limited_marker} "
-            "api_error_batches={api_error_batches} "
+            "api_error_batches={api_error_batches} provider_calls_attempted={provider_batches_attempted} "
+            "provider_retryable_failures={provider_retryable_failures} fatal_failures={fatal_failures} "
+            "all_provider_calls_failed={all_provider_calls_failed} warning_count={warning_count} "
             "batch_exceptions={batch_exception_count} job_status={job_status}".format(
                 batch_exception_count=batch_exception_count,
+                provider_retryable_failures=int(aggregate.get("api_error_batches", 0) or 0),
+                fatal_failures=fatal_failures,
+                all_provider_calls_failed=str(status_decision.all_provider_calls_failed).lower(),
+                warning_count=status_decision.warning_count,
                 job_status=job_status,
                 **aggregate,
             )

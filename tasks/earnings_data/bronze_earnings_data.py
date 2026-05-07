@@ -7,7 +7,7 @@ import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
-from io import StringIO
+from io import BytesIO, StringIO
 from typing import Any, Callable, Optional, Dict, Sequence
 
 import pandas as pd
@@ -23,7 +23,7 @@ from asset_allocation_runtime_common.market_data import symbol_availability
 from asset_allocation_runtime_common.foundation import config as cfg
 from asset_allocation_runtime_common.market_data import core as mdc
 from asset_allocation_runtime_common.market_data.pipeline import ListManager
-from asset_allocation_runtime_common.market_data import bronze_bucketing
+from asset_allocation_runtime_common.market_data import bronze_bucketing, domain_artifacts
 from tasks.common.bronze_alpha26_publish import publish_alpha26_bronze_domain
 from tasks.common.bronze_observability import log_bronze_success, should_log_bronze_success
 from tasks.common.bronze_symbol_policy import (
@@ -35,7 +35,7 @@ from tasks.common.bronze_symbol_policy import (
     record_invalid_symbol_candidate,
     validate_bronze_storage_clients,
 )
-from tasks.common.job_status import resolve_job_run_status
+from tasks.common.job_status import resolve_provider_gated_job_run_status
 from tasks.common.bronze_backfill_coverage import (
     extract_min_date_from_rows,
     normalize_date,
@@ -595,6 +595,87 @@ def _write_alpha26_earnings_buckets(
     return publish_result.written_symbols, publish_result.index_path
 
 
+def _load_active_earnings_data_prefix() -> str:
+    artifact_path = domain_artifacts.domain_artifact_path(layer="bronze", domain="earnings")
+    raw = mdc.read_raw_bytes(artifact_path, client=bronze_client, missing_ok=True)
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        mdc.write_warning(f"Failed to parse active earnings domain artifact for prior-row retention: {exc}")
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("activeDataPrefix") or payload.get("dataPrefix") or "").strip().strip("/")
+
+
+def _load_active_earnings_symbol_to_bucket_map() -> dict[str, str]:
+    existing = bronze_bucketing.load_symbol_index("earnings")
+    if existing is None or existing.empty or "symbol" not in existing.columns or "bucket" not in existing.columns:
+        return {}
+    out: dict[str, str] = {}
+    for row in existing[["symbol", "bucket"]].to_dict(orient="records"):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        bucket = str(row.get("bucket") or "").strip().upper()
+        if symbol and bucket in bronze_bucketing.ALPHABET_BUCKETS:
+            out[symbol] = bucket
+    return out
+
+
+def _load_active_earnings_bucket(prefix: str, bucket: str) -> pd.DataFrame:
+    path = bronze_bucketing.bucket_blob_path(prefix, bucket)
+    raw = mdc.read_raw_bytes(path, client=bronze_client, missing_ok=True)
+    if not raw:
+        return pd.DataFrame(columns=_BUCKET_COLUMNS)
+    try:
+        return pd.read_parquet(BytesIO(raw))
+    except Exception as exc:
+        mdc.write_warning(f"Failed to load active earnings bucket for prior-row retention: bucket={bucket} path={path} error={exc}")
+        return pd.DataFrame(columns=_BUCKET_COLUMNS)
+
+
+def _retain_active_earnings_rows_for_symbols(
+    symbol_frames: Dict[str, pd.DataFrame],
+    symbols: set[str],
+) -> int:
+    missing_symbols = {str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()}
+    missing_symbols = {symbol for symbol in missing_symbols if symbol not in symbol_frames}
+    if not missing_symbols:
+        return 0
+
+    active_prefix = _load_active_earnings_data_prefix()
+    active_symbol_to_bucket = _load_active_earnings_symbol_to_bucket_map()
+    if not active_prefix or not active_symbol_to_bucket:
+        return 0
+
+    symbols_by_bucket: dict[str, set[str]] = {}
+    for symbol in missing_symbols:
+        bucket = active_symbol_to_bucket.get(symbol)
+        if bucket:
+            symbols_by_bucket.setdefault(bucket, set()).add(symbol)
+
+    retained = 0
+    for bucket, bucket_symbols in symbols_by_bucket.items():
+        bucket_df = _load_active_earnings_bucket(active_prefix, bucket)
+        if bucket_df.empty or "symbol" not in bucket_df.columns:
+            continue
+        normalized_symbols = bucket_df["symbol"].astype(str).str.strip().str.upper()
+        for symbol in sorted(bucket_symbols):
+            symbol_df = bucket_df.loc[normalized_symbols == symbol].copy()
+            if symbol_df.empty:
+                continue
+            symbol_frames[symbol] = symbol_df.reset_index(drop=True)
+            retained += 1
+
+    if retained:
+        mdc.write_line(
+            "Bronze earnings retained prior active rows for retryable failures: "
+            f"retained_symbols={retained} requested_symbols={len(missing_symbols)}"
+        )
+    return retained
+
+
 def _safe_close_alpha_vantage_client(client: AlphaVantageGatewayClient | None) -> None:
     if client is None:
         return
@@ -999,9 +1080,9 @@ async def main_async() -> int:
     event_progress = _empty_event_summary()
     failure_counts: dict[str, int] = {}
     failure_examples: dict[str, str] = {}
+    retry_next_run: set[str] = set()
     blocking_failures = 0
     progress_lock = asyncio.Lock()
-    provider_unavailable_event = asyncio.Event()
     provider_unavailable_abort: dict[str, Any] = {
         "triggered": False,
         "reason": None,
@@ -1035,32 +1116,13 @@ async def main_async() -> int:
     async def record_failure(symbol: str, exc: BaseException) -> None:
         failure_reason = _format_failure_reason(exc)
         failure_key = _failure_bucket_key(exc)
-        provider_abort_message: str | None = None
         async with progress_lock:
             progress["failed"] += 1
+            retry_next_run.add(symbol)
             failure_counts[failure_key] = failure_counts.get(failure_key, 0) + 1
             failure_examples.setdefault(failure_key, f"symbol={symbol} {failure_reason}")
             failed_total = progress["failed"]
             key_total = failure_counts[failure_key]
-            if (
-                _is_global_provider_failure(exc)
-                and key_total >= _PROVIDER_UNAVAILABLE_FAILURE_THRESHOLD
-                and not provider_unavailable_abort["triggered"]
-            ):
-                provider_unavailable_abort.update(
-                    {
-                        "triggered": True,
-                        "reason": failure_key,
-                        "symbol": symbol,
-                        "failed": failed_total,
-                    }
-                )
-                provider_unavailable_event.set()
-                provider_abort_message = (
-                    "Bronze AV earnings provider unavailable; aborting remaining symbols: "
-                    f"reason={failure_key} threshold={_PROVIDER_UNAVAILABLE_FAILURE_THRESHOLD} "
-                    f"failed={failed_total} scheduled={len(execution_symbols)} example_symbol={symbol}"
-                )
 
         # Sample detailed failures to avoid log flooding while still exposing root causes.
         if key_total <= 3 or failed_total % 250 == 0:
@@ -1073,8 +1135,6 @@ async def main_async() -> int:
                     key_total=key_total,
                 )
             )
-        if provider_abort_message:
-            mdc.write_warning(provider_abort_message)
 
     async def record_gateway_retry_exhausted_blacklist_candidate(
         symbol: str,
@@ -1116,13 +1176,9 @@ async def main_async() -> int:
             )
 
     async def run_symbol(symbol: str) -> None:
-        if provider_unavailable_event.is_set():
-            return
         is_reprobe = symbol in reprobe_symbol_set
         attempted = False
         async with semaphore:
-            if provider_unavailable_event.is_set():
-                return
             attempted = True
             try:
                 wrote, coverage_summary, symbol_event_summary = await loop.run_in_executor(
@@ -1278,25 +1334,39 @@ async def main_async() -> int:
         except Exception:
             pass
 
+    nonblocking_symbol_failures = max(int(progress["failed"]) - blocking_failures, 0)
+    provider_calls_attempted = int(progress["processed"])
+    provider_retryable_failures = nonblocking_symbol_failures
+    warning_count = (
+        int(progress["invalid_candidates"])
+        + int(progress["gateway_blacklist_candidates"])
+        + int(progress["unavailable"])
+        + int(progress["reprobe_retained"])
+        + int(progress["blacklist_promotions"])
+        + (1 if calendar_degraded else 0)
+    )
+    pre_publish_status = resolve_provider_gated_job_run_status(
+        fatal_failure_count=0,
+        provider_call_count=provider_calls_attempted,
+        retryable_provider_failure_count=provider_retryable_failures,
+        warning_count=warning_count,
+    )
+    if retry_next_run and not pre_publish_status.all_provider_calls_failed:
+        _retain_active_earnings_rows_for_symbols(collected_symbol_frames, retry_next_run)
+
     publish_block_reason: str | None = None
-    if provider_unavailable_abort["triggered"]:
-        publish_block_reason = "provider_unavailable"
-    elif progress["written"] <= 0:
-        publish_block_reason = "empty_output"
-    elif calendar_degraded and (progress["unavailable"] > 0 or progress["invalid_candidates"] > 0):
-        publish_block_reason = "calendar_degraded_incomplete_history"
+    if pre_publish_status.all_provider_calls_failed:
+        publish_block_reason = "all_provider_calls_failed"
 
     if publish_block_reason:
-        blocking_failures += 1
-        progress["failed"] += 1
         mdc.write_error(
             "Bronze earnings alpha26 publish withheld: "
             f"reason={publish_block_reason} calendar_degraded={str(calendar_degraded).lower()} "
             f"written={progress['written']} skipped={progress['skipped']} unavailable={progress['unavailable']} "
             f"invalid_candidates={progress['invalid_candidates']} "
             f"gateway_blacklist_candidates={progress['gateway_blacklist_candidates']} "
-            f"provider_abort={str(provider_unavailable_abort['triggered']).lower()} "
-            f"provider_abort_reason={provider_unavailable_abort.get('reason') or 'n/a'}"
+            f"provider_calls_attempted={provider_calls_attempted} "
+            f"provider_retryable_failures={provider_retryable_failures}"
         )
     else:
         try:
@@ -1326,21 +1396,28 @@ async def main_async() -> int:
             if example:
                 mdc.write_warning(f"Bronze AV earnings failure example ({name}): {example}")
 
-    nonblocking_symbol_failures = max(int(progress["failed"]) - blocking_failures, 0)
-    job_status, exit_code = resolve_job_run_status(
-        failed_count=blocking_failures,
+    status_decision = resolve_provider_gated_job_run_status(
+        fatal_failure_count=blocking_failures,
+        provider_call_count=provider_calls_attempted,
+        retryable_provider_failure_count=provider_retryable_failures,
         warning_count=progress["invalid_candidates"]
         + progress["gateway_blacklist_candidates"]
-        + nonblocking_symbol_failures
+        + progress["unavailable"]
+        + progress["reprobe_retained"]
+        + progress["blacklist_promotions"]
         + (1 if calendar_degraded else 0),
     )
+    job_status = status_decision.job_status
+    exit_code = status_decision.exit_code
     mdc.write_line(
         "Bronze AV earnings ingest complete: processed={processed} written={written} skipped={skipped} "
         "invalid_candidates={invalid_candidates} gateway_blacklist_candidates={gateway_blacklist_candidates} "
         "unavailable={unavailable} "
         "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
         "reprobe_retained={reprobe_retained} failed={failed} blocking_failures={blocking_failures} "
-        "nonblocking_symbol_failures={nonblocking_symbol_failures} coverage_checked={coverage_checked} "
+        "nonblocking_symbol_failures={nonblocking_symbol_failures} provider_calls_attempted={provider_calls_attempted} "
+        "provider_retryable_failures={provider_retryable_failures} fatal_failures={fatal_failures} "
+        "all_provider_calls_failed={all_provider_calls_failed} warning_count={warning_count} coverage_checked={coverage_checked} "
         "coverage_forced_refetch={coverage_forced_refetch} coverage_marked_covered={coverage_marked_covered} "
         "coverage_marked_limited={coverage_marked_limited} coverage_skipped_limited_marker={coverage_skipped_limited_marker} "
         "scheduled_rows_retained={scheduled_rows_retained} actual_over_scheduled_replacements={actual_over_scheduled_replacements} "
@@ -1350,6 +1427,11 @@ async def main_async() -> int:
             **event_progress,
             blocking_failures=blocking_failures,
             nonblocking_symbol_failures=nonblocking_symbol_failures,
+            provider_calls_attempted=provider_calls_attempted,
+            provider_retryable_failures=provider_retryable_failures,
+            fatal_failures=blocking_failures,
+            all_provider_calls_failed=str(status_decision.all_provider_calls_failed).lower(),
+            warning_count=status_decision.warning_count,
             provider_unavailable_abort=str(provider_unavailable_abort["triggered"]).lower(),
             job_status=job_status,
         )

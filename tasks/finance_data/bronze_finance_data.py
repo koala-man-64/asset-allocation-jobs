@@ -43,7 +43,7 @@ from tasks.common.bronze_symbol_policy import (
 )
 from asset_allocation_runtime_common.market_data import bronze_bucketing
 from tasks.common.bronze_alpha26_publish import publish_alpha26_bronze_domain
-from tasks.common.job_status import resolve_job_run_status
+from tasks.common.job_status import resolve_provider_gated_job_run_status
 from tasks.common.silver_contracts import parse_wait_timeout_seconds
 from tasks.finance_data import config as cfg
 
@@ -143,6 +143,7 @@ def _empty_coverage_summary() -> dict[str, int]:
         "provider_statement_empty_raw_payloads": 0,
         "provider_statement_nonempty_raw_payloads": 0,
         "provider_statement_unexpected_raw_payloads": 0,
+        "provider_statement_errors": 0,
         "provider_statement_canonical_rows": 0,
         "provider_statement_canonical_empty_payloads": 0,
         "provider_valuation_requests": 0,
@@ -774,6 +775,8 @@ def _fetch_massive_finance_payload(
             pagination=True,
         )
     except BaseException as exc:
+        if coverage_summary is not None:
+            coverage_summary["provider_statement_errors"] += 1
         _emit_bounded_trace(
             "statement_error",
             f"Massive statement fetch failed symbol={symbol} report={report_name} {_summarize_exception(exc)}",
@@ -1701,22 +1704,44 @@ async def main_async() -> int:
         )
 
     nonblocking_symbol_failures = max(int(progress["failed"]) - blocking_failures, 0)
-    job_status, exit_code = resolve_job_run_status(
-        failed_count=blocking_failures,
-        warning_count=progress["invalid_candidates"] + nonblocking_symbol_failures,
+    provider_calls_attempted = (
+        int(progress["written"])
+        + int(progress["skipped"])
+        + int(progress["invalid_candidates"])
+        + int(progress["unavailable"])
+        + int(progress["reprobe_retained"])
+        + nonblocking_symbol_failures
     )
+    provider_retryable_failures = nonblocking_symbol_failures
+    warning_count = (
+        int(progress["invalid_candidates"])
+        + int(progress["unavailable"])
+        + int(progress["reprobe_retained"])
+        + int(progress["blacklist_promotions"])
+    )
+    status_decision = resolve_provider_gated_job_run_status(
+        fatal_failure_count=blocking_failures,
+        provider_call_count=provider_calls_attempted,
+        retryable_provider_failure_count=provider_retryable_failures,
+        warning_count=warning_count,
+    )
+    job_status = status_decision.job_status
+    exit_code = status_decision.exit_code
     mdc.write_line(
         "Bronze Massive finance ingest complete: processed={processed} written={written} skipped={skipped} "
         "invalid_candidates={invalid_candidates} unavailable={unavailable} "
         "blacklist_promotions={blacklist_promotions} reprobe_recovered={reprobe_recovered} "
         "reprobe_retained={reprobe_retained} failed={failed} blocking_failures={blocking_failures} "
-        "nonblocking_symbol_failures={nonblocking_symbol_failures} coverage_checked={coverage_checked} "
+        "nonblocking_symbol_failures={nonblocking_symbol_failures} provider_calls_attempted={provider_calls_attempted} "
+        "provider_retryable_failures={provider_retryable_failures} fatal_failures={fatal_failures} "
+        "all_provider_calls_failed={all_provider_calls_failed} warning_count={warning_count} coverage_checked={coverage_checked} "
         "coverage_forced_refetch={coverage_forced_refetch} coverage_marked_covered={coverage_marked_covered} "
         "coverage_marked_limited={coverage_marked_limited} coverage_skipped_limited_marker={coverage_skipped_limited_marker} "
         "provider_statement_requests={provider_statement_requests} "
         "provider_statement_empty_raw_payloads={provider_statement_empty_raw_payloads} "
         "provider_statement_nonempty_raw_payloads={provider_statement_nonempty_raw_payloads} "
         "provider_statement_unexpected_raw_payloads={provider_statement_unexpected_raw_payloads} "
+        "provider_statement_errors={provider_statement_errors} "
         "provider_statement_canonical_rows={provider_statement_canonical_rows} "
         "provider_statement_canonical_empty_payloads={provider_statement_canonical_empty_payloads} "
         "provider_valuation_requests={provider_valuation_requests} "
@@ -1730,6 +1755,11 @@ async def main_async() -> int:
             **coverage_progress,
             blocking_failures=blocking_failures,
             nonblocking_symbol_failures=nonblocking_symbol_failures,
+            provider_calls_attempted=provider_calls_attempted,
+            provider_retryable_failures=provider_retryable_failures,
+            fatal_failures=blocking_failures,
+            all_provider_calls_failed=str(status_decision.all_provider_calls_failed).lower(),
+            warning_count=status_decision.warning_count,
             job_status=job_status,
         )
     )
