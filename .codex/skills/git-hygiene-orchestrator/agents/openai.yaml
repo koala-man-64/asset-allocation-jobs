@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Hygiene Orchestrator"
+  short_description: "Audit and clean Git branches safely"
+  default_prompt: "Use $git-hygiene-orchestrator to audit repository branches, refs, and worktrees before recommending safe cleanup."
