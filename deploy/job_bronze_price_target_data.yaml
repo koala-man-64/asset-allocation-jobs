@@ -21,7 +21,7 @@ properties:
       cronExpression: "0 4 * * 1-5"
       parallelism: 1
       replicaCompletionCount: 1
-    replicaRetryLimit: 0
+    replicaRetryLimit: 3
     replicaTimeout: 14400
     registries:
     - server: assetallocationacr.azurecr.io

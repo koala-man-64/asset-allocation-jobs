@@ -20,7 +20,7 @@ The `economic_catalyst_data` domain ingests official macro calendars, structured
 
 ## Cadence
 
-- Bronze job runs every 30 minutes on weekdays with `replicaRetryLimit: 0`.
+- Bronze job runs every 30 minutes on weekdays with `replicaRetryLimit: 3`.
 - The Bronze runtime treats minutes divisible by `ECONOMIC_CATALYST_GENERAL_POLL_MINUTES` as full-source polls.
 - Intervening runs are hot-window polls that refresh structured vendor and headline feeds plus FRED release dates.
 - Silver and Gold are manual-trigger jobs chained from the prior layer.

@@ -20,7 +20,7 @@ properties:
     manualTriggerConfig:
       parallelism: 1
       replicaCompletionCount: 1
-    replicaRetryLimit: 1
+    replicaRetryLimit: 3
     replicaTimeout: 1800
     registries:
     - server: assetallocationacr.azurecr.io

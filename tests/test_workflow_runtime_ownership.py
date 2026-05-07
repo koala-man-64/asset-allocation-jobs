@@ -175,6 +175,13 @@ def test_job_manifests_are_utf8_without_bom() -> None:
         assert not manifest.read_bytes().startswith(b"\xef\xbb\xbf"), manifest.name
 
 
+def test_job_manifests_define_retry_limit_three() -> None:
+    for manifest in sorted((repo_root() / "deploy").glob("job_*.yaml")):
+        payload = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        configuration = payload["properties"]["configuration"]
+        assert configuration["replicaRetryLimit"] == 3, manifest.name
+
+
 def test_consolidated_quiver_bronze_job_metadata_is_cataloged() -> None:
     metadata = validate_job_metadata_tags(
         "bronze-quiver-job",
@@ -212,7 +219,7 @@ def test_strategy_compute_target_jobs_have_required_classifications() -> None:
         ) == classification
 
 
-def test_gold_regime_job_runs_after_market_chain_with_bounded_retry() -> None:
+def test_gold_regime_job_runs_after_market_chain_with_retry_limit_three() -> None:
     payload = yaml.safe_load((repo_root() / "deploy" / "job_gold_regime_data.yaml").read_text(encoding="utf-8"))
     configuration = payload["properties"]["configuration"]
     container = payload["properties"]["template"]["containers"][0]
@@ -225,7 +232,7 @@ def test_gold_regime_job_runs_after_market_chain_with_bounded_retry() -> None:
 
     assert configuration["triggerType"] == "Schedule"
     assert configuration["scheduleTriggerConfig"]["cronExpression"] == "30 2 * * 2-6"
-    assert configuration["replicaRetryLimit"] <= 1
+    assert configuration["replicaRetryLimit"] == 3
     assert configuration["scheduleTriggerConfig"]["parallelism"] == 1
     assert configuration["scheduleTriggerConfig"]["replicaCompletionCount"] == 1
     assert secrets == {"azure-storage-connection-string", "pg-dsn"}
@@ -454,12 +461,12 @@ def test_deployed_jobs_do_not_define_data_source_enable_gates() -> None:
             assert stale_name not in text, f"{path} still defines data-source gate {stale_name}"
 
 
-def test_economic_catalyst_bronze_manifest_runs_weekdays_every_30_minutes_without_retries() -> None:
+def test_economic_catalyst_bronze_manifest_runs_weekdays_every_30_minutes_with_retry_limit_three() -> None:
     text = (repo_root() / "deploy" / "job_bronze_economic_catalyst_data.yaml").read_text(encoding="utf-8")
 
     assert "triggerType: Schedule" in text
     assert 'cronExpression: "*/30 * * * 1-5"' in text
-    assert "replicaRetryLimit: 0" in text
+    assert "replicaRetryLimit: 3" in text
 
 
 def test_platinum_rankings_job_does_not_define_deploy_time_ranking_overrides() -> None:

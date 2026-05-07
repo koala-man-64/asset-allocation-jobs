@@ -10,6 +10,7 @@ import yaml
 
 
 _BOOLEAN_TEXT = {"true": "true", "false": "false"}
+_REQUIRED_REPLICA_RETRY_LIMIT = 3
 _REQUIRED_MARKET_RUNTIME = {
     "bronze-market-job": {"triggerType": "schedule", "cronExpression": "0 22 * * 1-5"},
     "silver-market-job": {"triggerType": "manual"},
@@ -17,7 +18,6 @@ _REQUIRED_MARKET_RUNTIME = {
     "gold-regime-job": {
         "triggerType": "schedule",
         "cronExpression": "30 2 * * 2-6",
-        "maxReplicaRetryLimit": 1,
     },
 }
 
@@ -205,6 +205,22 @@ def _compare_manifest_to_live(
 
 def _manifest_runtime_invariant_errors(rendered_jobs: dict[str, dict[str, Any]]) -> list[str]:
     errors: list[str] = []
+    for job_name, rendered in sorted(rendered_jobs.items()):
+        configuration = _configuration(rendered)
+        try:
+            actual_retry = int(configuration.get("replicaRetryLimit"))
+        except (TypeError, ValueError):
+            errors.append(
+                f"{job_name}: replicaRetryLimit invariant mismatch: "
+                f"expected {_REQUIRED_REPLICA_RETRY_LIMIT}, found invalid"
+            )
+            continue
+        if actual_retry != _REQUIRED_REPLICA_RETRY_LIMIT:
+            errors.append(
+                f"{job_name}: replicaRetryLimit invariant mismatch: "
+                f"expected {_REQUIRED_REPLICA_RETRY_LIMIT}, found {actual_retry}"
+            )
+
     for job_name, expected in _REQUIRED_MARKET_RUNTIME.items():
         rendered = rendered_jobs.get(job_name)
         if rendered is None:
@@ -219,15 +235,6 @@ def _manifest_runtime_invariant_errors(rendered_jobs: dict[str, dict[str, Any]])
             actual_cron = _cron(configuration)
             if actual_cron != expected_cron:
                 errors.append(f"{job_name}: cronExpression invariant mismatch: expected {expected_cron}, found {actual_cron}")
-        max_retry = expected.get("maxReplicaRetryLimit")
-        if max_retry is not None:
-            try:
-                actual_retry = int(configuration.get("replicaRetryLimit"))
-            except (TypeError, ValueError):
-                errors.append(f"{job_name}: replicaRetryLimit invariant mismatch: expected <= {max_retry}, found invalid")
-                continue
-            if actual_retry > int(max_retry):
-                errors.append(f"{job_name}: replicaRetryLimit invariant mismatch: expected <= {max_retry}, found {actual_retry}")
     return errors
 
 
