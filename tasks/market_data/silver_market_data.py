@@ -31,6 +31,19 @@ from tasks.common.watermarks import (
     save_watermarks,
     should_process_blob_since_last_success,
 )
+from tasks.common.silver_processed_state import (
+    build_processed_state_index,
+    build_processed_state_record,
+    load_processed_state,
+    make_entity_key,
+    merge_processed_state_updates,
+    new_stats as new_processed_state_stats,
+    processed_state_enabled,
+    processed_state_force_rebuild,
+    record_decision as record_processed_state_decision,
+    save_processed_state,
+    should_process_entity,
+)
 from tasks.common.delta_write_policy import prepare_delta_write_frame
 from tasks.common.delta_write_sanitizer import sanitize_delta_write_frame
 from tasks.common.silver_contracts import normalize_columns_to_snake_case
@@ -63,6 +76,8 @@ _ALPHA26_MARKET_SCHEMA = tuple(SILVER_MARKET_COLUMNS)
 _LEGACY_ALPHA26_MARKET_SCHEMA = tuple(LEGACY_SILVER_MARKET_COLUMNS)
 _ALPHA26_MARKET_MIN_COLUMNS = list(SILVER_MARKET_COLUMNS)
 _ALPHA26_MARKET_NUMERIC_COLUMNS = list(SILVER_MARKET_NUMERIC_COLUMNS)
+_MARKET_PROCESSED_STATE_DOMAIN = "market"
+_MARKET_PROCESSED_STATE_PROCESSOR_VERSION = "silver-market-alpha26-v1"
 _BRONZE_TO_SILVER_REQUIRED_COLUMNS = {
     "symbol",
     "date",
@@ -180,9 +195,15 @@ def _merge_preserved_alpha26_market_bucket_symbols(
     bucket: str,
     df_bucket: pd.DataFrame,
     scoped_symbols: set[str],
+    replace_symbols: Optional[set[str]] = None,
 ) -> pd.DataFrame:
     normalized_bucket = _coerce_alpha26_market_bucket_frame(df_bucket)
-    if not scoped_symbols:
+    symbols_to_replace = {
+        str(symbol or "").strip().upper()
+        for symbol in (replace_symbols if replace_symbols is not None else scoped_symbols)
+        if str(symbol or "").strip()
+    }
+    if not symbols_to_replace:
         return normalized_bucket
 
     existing_bucket = _load_silver_market_bucket(DataPaths.get_silver_market_bucket_path(bucket))
@@ -194,7 +215,7 @@ def _merge_preserved_alpha26_market_bucket_symbols(
         return normalized_bucket
 
     preserved = existing_bucket.loc[
-        ~existing_bucket["symbol"].astype("string").str.upper().isin(scoped_symbols)
+        ~existing_bucket["symbol"].astype("string").str.upper().isin(symbols_to_replace)
     ].copy()
     if preserved.empty:
         return normalized_bucket
@@ -554,6 +575,10 @@ def process_alpha26_bucket_blob(
     watermarks: dict,
     alpha26_bucket_frames: dict[str, list[pd.DataFrame]],
     force_reprocess: bool = False,
+    processed_state_index: Optional[dict[str, dict]] = None,
+    processed_state_updates: Optional[list[dict]] = None,
+    processed_state_stats: Optional[dict[str, int]] = None,
+    force_processed_state: bool = False,
 ) -> str:
     blob_name = str(blob.get("name", ""))
     watermark_key = normalize_watermark_blob_name(blob_name)
@@ -618,6 +643,33 @@ def process_alpha26_bucket_blob(
         if debug_symbols and ticker not in debug_symbols:
             continue
         input_symbols += 1
+        if processed_state_index is not None:
+            bucket = _parse_alpha26_bucket_from_blob_name(blob_name) or layer_bucketing.bucket_letter(ticker)
+            entity_key = make_entity_key(domain=_MARKET_PROCESSED_STATE_DOMAIN, bucket=bucket, symbol=ticker)
+            current_state = build_processed_state_record(
+                domain=_MARKET_PROCESSED_STATE_DOMAIN,
+                bucket=bucket,
+                entity_key=entity_key,
+                symbol=ticker,
+                processor_version=_MARKET_PROCESSED_STATE_PROCESSOR_VERSION,
+                source_frame=group,
+                source_blob=blob,
+                source_date_columns=("date", "Date"),
+                output_paths=[DataPaths.get_silver_market_bucket_path(bucket)],
+            )
+            should_process, reason = should_process_entity(
+                current_state,
+                processed_state_index.get(entity_key),
+                force_reprocess=force_processed_state,
+            )
+            if processed_state_stats is not None:
+                record_processed_state_decision(
+                    processed_state_stats,
+                    should_process=should_process,
+                    reason=reason,
+                )
+            if not should_process:
+                continue
         status = _process_symbol_frame(
             ticker=ticker,
             df_new=group.copy(),
@@ -629,6 +681,8 @@ def process_alpha26_bucket_blob(
             failed_symbols += 1
         elif status == "ok":
             output_symbols += 1
+            if processed_state_updates is not None and processed_state_index is not None:
+                processed_state_updates.append(current_state)
 
     if not has_failed and signature:
         signature["updated_at"] = datetime.now(UTC).isoformat()
@@ -677,10 +731,18 @@ def _write_alpha26_market_buckets(
         else:
             df_bucket = _empty_alpha26_market_frame()
 
+        replace_symbols: Optional[set[str]] = None
+        if is_partial_update and not df_bucket.empty and "symbol" in df_bucket.columns:
+            replace_symbols = {
+                str(symbol or "").strip().upper()
+                for symbol in df_bucket["symbol"].dropna().astype(str).tolist()
+                if str(symbol or "").strip()
+            }
         df_bucket = _merge_preserved_alpha26_market_bucket_symbols(
             bucket=bucket,
             df_bucket=df_bucket,
             scoped_symbols=scoped_symbols,
+            replace_symbols=replace_symbols,
         )
         _validate_silver_market_bucket_output_contract(df_bucket, bucket=bucket)
         for symbol in df_bucket["symbol"].dropna().astype(str).tolist():
@@ -913,6 +975,11 @@ def main():
     watermarks = load_watermarks("bronze_market_data")
     last_success = load_last_success("silver_market_data")
     watermarks_dirty = False
+    processed_state_active = processed_state_enabled() and getattr(mdc, "common_storage_client", None) is not None
+    processed_state = load_processed_state(_MARKET_PROCESSED_STATE_DOMAIN) if processed_state_active else None
+    processed_state_index = build_processed_state_index(processed_state) if processed_state_active else None
+    processed_state_updates: list[dict] = []
+    processed_state_stats = new_processed_state_stats()
 
     blob_list = bronze_bucketing.list_active_bucket_blob_infos("market", bronze_client)
 
@@ -961,12 +1028,22 @@ def main():
         watermark_key = normalize_watermark_blob_name(blob_name)
         prior_signature = dict(watermarks[watermark_key]) if isinstance(watermarks.get(watermark_key), dict) else None
         alpha26_bucket_frames: dict[str, list[pd.DataFrame]] = {}
-        status = process_alpha26_bucket_blob(
-            blob,
-            watermarks=watermarks,
-            alpha26_bucket_frames=alpha26_bucket_frames,
-            force_reprocess=force_checkpoint_rebuild,
-        )
+        blob_state_updates: list[dict] = []
+        process_kwargs = {
+            "watermarks": watermarks,
+            "alpha26_bucket_frames": alpha26_bucket_frames,
+            "force_reprocess": force_checkpoint_rebuild,
+        }
+        if processed_state_index is not None:
+            process_kwargs.update(
+                {
+                    "processed_state_index": processed_state_index,
+                    "processed_state_updates": blob_state_updates,
+                    "processed_state_stats": processed_state_stats,
+                    "force_processed_state": force_checkpoint_rebuild or processed_state_force_rebuild(),
+                }
+            )
+        status = process_alpha26_bucket_blob(blob, **process_kwargs)
         if status == "ok":
             processed += 1
             touched = _parse_alpha26_bucket_from_blob_name(str(blob.get("name", "")))
@@ -989,6 +1066,8 @@ def main():
                 )
                 alpha26_flush_count += 1
                 watermarks_dirty = True
+                processed_state_updates.extend(blob_state_updates)
+                processed_state_stats["processed_state_updates"] = len(processed_state_updates)
                 mdc.write_line(
                     "Silver market alpha26 buckets written: "
                     f"touched_buckets=1 symbols={alpha26_written_symbols} "
@@ -1016,12 +1095,10 @@ def main():
     reconciliation_orphans = 0
     reconciliation_deleted_blobs = 0
     reconciliation_failed = 0
-    reconciliation_scope = current_reconciliation_scope(protected_symbols=_REGIME_REQUIRED_MARKET_SYMBOL_SET)
     if failed == 0:
         try:
             reconciliation_orphans, reconciliation_deleted_blobs = _run_market_reconciliation(
                 bronze_blob_list=blob_list,
-                scope=reconciliation_scope,
             )
         except Exception as exc:
             reconciliation_failed = 1
@@ -1050,6 +1127,20 @@ def main():
         f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} "
         f"failed={total_failed}"
     )
+    mdc.write_line(
+        "silver_processed_state_summary layer=silver domain=market "
+        f"entities_seen={processed_state_stats['entities_seen']} "
+        f"entities_changed={processed_state_stats['entities_changed']} "
+        f"entities_skipped_state={processed_state_stats['entities_skipped_state']} "
+        f"entities_reprocessed_calendar={processed_state_stats['entities_reprocessed_calendar']} "
+        f"output_buckets_touched={alpha26_flush_count} "
+        f"processed_state_updates={len(processed_state_updates)}"
+    )
+    if total_failed == 0 and processed_state_updates and processed_state_active:
+        save_processed_state(
+            _MARKET_PROCESSED_STATE_DOMAIN,
+            merge_processed_state_updates(processed_state, processed_state_updates),
+        )
     if watermarks_dirty and total_failed == 0:
         save_watermarks("bronze_market_data", watermarks)
     elif watermarks_dirty:

@@ -35,6 +35,7 @@ def read_json_batches(*, client: Any, blob_infos: Sequence[dict[str, Any]]) -> l
             mdc.write_error(f"Failed to read economic catalyst bronze payload {name}: {type(exc).__name__}: {exc}")
             continue
         if isinstance(payload, dict):
+            payload["__source_blob_name"] = name
             batches.append(payload)
     return batches
 

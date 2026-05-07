@@ -26,6 +26,19 @@ from tasks.common.watermarks import (
     save_watermarks,
     should_process_blob_since_last_success,
 )
+from tasks.common.silver_processed_state import (
+    build_processed_state_index,
+    build_processed_state_record,
+    load_processed_state,
+    make_entity_key,
+    merge_processed_state_updates,
+    new_stats as new_processed_state_stats,
+    processed_state_enabled,
+    processed_state_force_rebuild,
+    record_decision as record_processed_state_decision,
+    save_processed_state,
+    should_process_entity,
+)
 from tasks.common.delta_write_policy import prepare_delta_write_frame
 from tasks.common.silver_contracts import (
     align_to_existing_schema,
@@ -55,6 +68,8 @@ _ALPHA26_EARNINGS_MIN_COLUMNS = [
     "calendar_time_of_day",
     "calendar_currency",
 ]
+_EARNINGS_PROCESSED_STATE_DOMAIN = "earnings"
+_EARNINGS_PROCESSED_STATE_PROCESSOR_VERSION = "silver-earnings-alpha26-v1"
 
 
 def _utc_now() -> datetime:
@@ -244,6 +259,45 @@ def _dedupe_earnings_events(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     )
     out = out.drop(columns=["_event_identity"], errors="ignore")
     return out[_ALPHA26_EARNINGS_MIN_COLUMNS].sort_values(["date", "record_type"]).reset_index(drop=True)
+
+
+def _merge_preserved_alpha26_earnings_bucket_symbols(
+    *,
+    bucket: str,
+    bucket_path: str,
+    df_bucket: pd.DataFrame,
+    replace_symbols: set[str],
+) -> pd.DataFrame:
+    symbols_to_replace = {
+        str(symbol or "").strip().upper()
+        for symbol in replace_symbols
+        if str(symbol or "").strip()
+    }
+    if not symbols_to_replace:
+        return df_bucket
+    try:
+        existing_bucket = delta_core.load_delta(cfg.AZURE_CONTAINER_SILVER, bucket_path)
+    except Exception as exc:
+        mdc.write_warning(
+            f"Silver earnings preserve skipped bucket={bucket} path={bucket_path}: {exc}"
+        )
+        existing_bucket = None
+    if existing_bucket is None or existing_bucket.empty:
+        return df_bucket
+    existing_bucket = _canonicalize_earnings_frame(existing_bucket)
+    if existing_bucket.empty or "symbol" not in existing_bucket.columns:
+        return df_bucket
+    preserved = existing_bucket.loc[
+        ~existing_bucket["symbol"].astype("string").str.upper().isin(symbols_to_replace)
+    ].copy()
+    if preserved.empty:
+        return df_bucket
+    return _dedupe_earnings_events(
+        _concat_non_empty_frames(
+            [preserved, df_bucket],
+            columns=_ALPHA26_EARNINGS_MIN_COLUMNS,
+        )
+    )
 
 
 def process_file(blob_name: str) -> bool:
@@ -438,6 +492,10 @@ def process_alpha26_bucket_blob(
     include_history: bool = False,
     persist: bool = False,
     alpha26_bucket_frames: Optional[dict[str, list[pd.DataFrame]]] = None,
+    processed_state_index: Optional[dict[str, dict]] = None,
+    processed_state_updates: Optional[list[dict]] = None,
+    processed_state_stats: Optional[dict[str, int]] = None,
+    force_processed_state: bool = False,
 ) -> str:
     blob_name = str(blob.get("name", ""))
     watermark_key = normalize_watermark_blob_name(blob_name)
@@ -474,6 +532,40 @@ def process_alpha26_bucket_blob(
             continue
         if debug_symbols and ticker not in debug_symbols:
             continue
+        if processed_state_index is not None:
+            bucket = _parse_alpha26_bucket_from_blob_name(blob_name, prefix="earnings-data") or layer_bucketing.bucket_letter(ticker)
+            normalized_group = _canonicalize_earnings_frame(group.copy(), ticker=ticker)
+            has_scheduled = (
+                not normalized_group.empty
+                and "record_type" in normalized_group.columns
+                and normalized_group["record_type"].astype("string").str.lower().eq("scheduled").any()
+            )
+            entity_key = make_entity_key(domain=_EARNINGS_PROCESSED_STATE_DOMAIN, bucket=bucket, symbol=ticker)
+            current_state = build_processed_state_record(
+                domain=_EARNINGS_PROCESSED_STATE_DOMAIN,
+                bucket=bucket,
+                entity_key=entity_key,
+                symbol=ticker,
+                processor_version=_EARNINGS_PROCESSED_STATE_PROCESSOR_VERSION,
+                source_frame=group,
+                source_blob=blob,
+                source_date_columns=("date", "Date", "report_date", "fiscal_date_ending"),
+                as_of_date=_utc_today().date().isoformat() if has_scheduled else None,
+                output_paths=[DataPaths.get_silver_earnings_bucket_path(bucket)],
+            )
+            should_process, reason = should_process_entity(
+                current_state,
+                processed_state_index.get(entity_key),
+                force_reprocess=force_processed_state,
+            )
+            if processed_state_stats is not None:
+                record_processed_state_decision(
+                    processed_state_stats,
+                    should_process=should_process,
+                    reason=reason,
+                )
+            if not should_process:
+                continue
         status = _process_symbol_frame(
             ticker=ticker,
             df_new=group.copy(),
@@ -484,6 +576,8 @@ def process_alpha26_bucket_blob(
         )
         if status == "failed":
             has_failed = True
+        elif status == "ok" and processed_state_updates is not None and processed_state_index is not None:
+            processed_state_updates.append(current_state)
 
     if not has_failed and signature:
         signature["updated_at"] = _utc_now_iso()
@@ -532,13 +626,28 @@ def _write_alpha26_earnings_buckets(
                 df_bucket = df_bucket.sort_values(["symbol", "date"]).drop_duplicates(
                     subset=["symbol", "date"], keep="last"
                 )
-                for symbol in df_bucket["symbol"].dropna().astype(str).tolist():
-                    if symbol:
-                        touched_symbol_to_bucket[symbol] = bucket
             else:
                 df_bucket = pd.DataFrame(columns=_ALPHA26_EARNINGS_MIN_COLUMNS)
         else:
             df_bucket = pd.DataFrame(columns=_ALPHA26_EARNINGS_MIN_COLUMNS)
+        replace_symbols: set[str] = set()
+        if is_partial_update and "symbol" in df_bucket.columns:
+            replace_symbols = {
+                str(symbol or "").strip().upper()
+                for symbol in df_bucket["symbol"].dropna().astype(str).tolist()
+                if str(symbol or "").strip()
+            }
+            df_bucket = _merge_preserved_alpha26_earnings_bucket_symbols(
+                bucket=bucket,
+                bucket_path=bucket_path,
+                df_bucket=df_bucket,
+                replace_symbols=replace_symbols,
+            )
+        if "symbol" in df_bucket.columns:
+            for symbol in df_bucket["symbol"].dropna().astype(str).tolist():
+                clean_symbol = str(symbol or "").strip().upper()
+                if clean_symbol:
+                    touched_symbol_to_bucket[clean_symbol] = bucket
         scheduled_rows_retained = 0
         symbols_with_upcoming_earnings = 0
         future_date_range_max = None
@@ -700,6 +809,12 @@ def main():
     watermarks = load_watermarks("bronze_earnings_data")
     last_success = load_last_success("silver_earnings_data")
     watermarks_dirty = False
+    processed_state_active = processed_state_enabled() and getattr(mdc, "common_storage_client", None) is not None
+    processed_state = load_processed_state(_EARNINGS_PROCESSED_STATE_DOMAIN) if processed_state_active else None
+    processed_state_index = build_processed_state_index(processed_state) if processed_state_active else None
+    processed_state_updates: list[dict] = []
+    processed_state_stats = new_processed_state_stats()
+    force_processed_state = force_rebuild or processed_state_force_rebuild()
     blob_list = bronze_bucketing.list_active_bucket_blob_infos("earnings", bronze_client)
 
     checkpoint_skipped = 0
@@ -739,13 +854,23 @@ def main():
         watermark_key = normalize_watermark_blob_name(blob_name)
         prior_signature = dict(watermarks[watermark_key]) if isinstance(watermarks.get(watermark_key), dict) else None
         alpha26_bucket_frames: dict[str, list[pd.DataFrame]] = {}
-        status = process_alpha26_bucket_blob(
-            blob,
-            watermarks=watermarks,
-            include_history=False,
-            persist=False,
-            alpha26_bucket_frames=alpha26_bucket_frames,
-        )
+        blob_state_updates: list[dict] = []
+        process_kwargs = {
+            "watermarks": watermarks,
+            "include_history": False,
+            "persist": False,
+            "alpha26_bucket_frames": alpha26_bucket_frames,
+        }
+        if processed_state_index is not None:
+            process_kwargs.update(
+                {
+                    "processed_state_index": processed_state_index,
+                    "processed_state_updates": blob_state_updates,
+                    "processed_state_stats": processed_state_stats,
+                    "force_processed_state": force_processed_state,
+                }
+            )
+        status = process_alpha26_bucket_blob(blob, **process_kwargs)
         if status == "ok":
             processed += 1
             staged_rows = layer_bucketing.count_staged_frame_rows(alpha26_bucket_frames)
@@ -768,6 +893,8 @@ def main():
                 )
                 alpha26_flush_count += 1
                 watermarks_dirty = True
+                processed_state_updates.extend(blob_state_updates)
+                processed_state_stats["processed_state_updates"] = len(processed_state_updates)
                 mdc.write_line(
                     "Silver earnings alpha26 buckets written: "
                     f"touched_buckets=1 symbols={alpha26_written_symbols} "
@@ -807,8 +934,24 @@ def main():
         f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} "
         f"failed={total_failed}"
     )
-    if watermarks_dirty:
+    mdc.write_line(
+        "silver_processed_state_summary layer=silver domain=earnings "
+        f"entities_seen={processed_state_stats['entities_seen']} "
+        f"entities_changed={processed_state_stats['entities_changed']} "
+        f"entities_skipped_state={processed_state_stats['entities_skipped_state']} "
+        f"entities_reprocessed_calendar={processed_state_stats['entities_reprocessed_calendar']} "
+        f"output_buckets_touched={alpha26_flush_count} "
+        f"processed_state_updates={len(processed_state_updates)}"
+    )
+    if total_failed == 0 and processed_state_updates and processed_state_active:
+        save_processed_state(
+            _EARNINGS_PROCESSED_STATE_DOMAIN,
+            merge_processed_state_updates(processed_state, processed_state_updates),
+        )
+    if watermarks_dirty and total_failed == 0:
         save_watermarks("bronze_earnings_data", watermarks)
+    elif watermarks_dirty:
+        mdc.write_warning("Silver earnings watermarks not saved because the run did not pass final validation.")
     if total_failed == 0:
         save_last_success(
             "silver_earnings_data",

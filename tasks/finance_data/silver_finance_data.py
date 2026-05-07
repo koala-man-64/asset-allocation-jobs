@@ -43,6 +43,19 @@ from tasks.common.watermarks import (
     save_watermarks,
     should_process_blob_since_last_success,
 )
+from tasks.common.silver_processed_state import (
+    build_processed_state_index,
+    build_processed_state_record,
+    load_processed_state,
+    make_entity_key,
+    merge_processed_state_updates,
+    new_stats as new_processed_state_stats,
+    processed_state_enabled,
+    processed_state_force_rebuild,
+    record_decision as record_processed_state_decision,
+    save_processed_state,
+    should_process_entity,
+)
 from tasks.common.silver_contracts import (
     ContractViolation,
     assert_no_unexpected_mixed_empty,
@@ -95,6 +108,8 @@ _DEFAULT_FINANCE_SHARED_LOCK = "finance-pipeline-shared"
 _DEFAULT_SILVER_SHARED_LOCK_WAIT_SECONDS = 3600.0
 _FINANCE_ALPHA26_SUBDOMAINS: Tuple[str, ...] = SILVER_FINANCE_SUBDOMAINS
 _FINANCE_VALUATION_CALCULATED_COLUMNS = set(SILVER_FINANCE_COLUMNS_BY_SUBDOMAIN["valuation"][2:])
+_FINANCE_PROCESSED_STATE_DOMAIN = "finance"
+_FINANCE_PROCESSED_STATE_PROCESSOR_VERSION = "silver-finance-alpha26-v1"
 
 
 def _list_alpha26_finance_bucket_candidates() -> tuple[list[dict], int]:
@@ -193,6 +208,10 @@ def _restore_blob_watermark(
         watermarks.pop(watermark_key, None)
         return
     watermarks[watermark_key] = dict(prior_signature)
+
+
+def _parse_alpha26_finance_bucket_from_blob_name(blob_name: str) -> Optional[str]:
+    return bronze_bucketing.parse_bucket_from_blob_name(blob_name, expected_prefix="finance-data")
 
 
 def _empty_finance_symbol_maps() -> dict[str, dict[str, str]]:
@@ -335,6 +354,54 @@ def _resolve_existing_finance_symbol_maps(
     return existing, True
 
 
+def _merge_preserved_alpha26_finance_bucket_symbols(
+    *,
+    sub_domain: str,
+    bucket: str,
+    silver_bucket_path: str,
+    df_bucket: pd.DataFrame,
+    replace_symbols: set[str],
+) -> pd.DataFrame:
+    symbols_to_replace = {
+        str(symbol or "").strip().upper()
+        for symbol in replace_symbols
+        if str(symbol or "").strip()
+    }
+    if not symbols_to_replace:
+        return df_bucket
+
+    try:
+        existing_bucket = delta_core.load_delta(cfg.AZURE_CONTAINER_SILVER, silver_bucket_path)
+    except Exception as exc:
+        mdc.write_warning(
+            "Silver finance preserve skipped: "
+            f"sub_domain={sub_domain} bucket={bucket} path={silver_bucket_path} reason={exc}"
+        )
+        existing_bucket = None
+    if existing_bucket is None or existing_bucket.empty:
+        return df_bucket
+
+    existing_bucket = normalize_columns_to_snake_case(existing_bucket)
+    existing_bucket = _repair_symbol_column_aliases(existing_bucket, ticker="")
+    if "symbol" not in existing_bucket.columns:
+        return df_bucket
+    existing_bucket["symbol"] = existing_bucket["symbol"].astype("string").str.upper()
+    if "date" in existing_bucket.columns:
+        existing_bucket["date"] = coerce_to_naive_datetime(existing_bucket["date"])
+    preserved = existing_bucket.loc[~existing_bucket["symbol"].isin(symbols_to_replace)].copy()
+    if preserved.empty:
+        return df_bucket
+    merged = pd.concat([preserved, df_bucket], ignore_index=True)
+    if "symbol" in merged.columns and "date" in merged.columns:
+        identity_columns = _finance_row_identity_columns(merged)
+        merged = merged.sort_values(identity_columns).drop_duplicates(subset=identity_columns, keep="last")
+    return _align_finance_frame_to_contract(
+        merged.reset_index(drop=True),
+        sub_domain=sub_domain,
+        path=silver_bucket_path,
+    )
+
+
 def _write_alpha26_finance_silver_buckets(
     bucket_frames: dict[tuple[str, str], list[pd.DataFrame]],
     *,
@@ -390,6 +457,26 @@ def _write_alpha26_finance_silver_buckets(
                 df_bucket = pd.DataFrame(columns=["date", "symbol"])
         else:
             df_bucket = pd.DataFrame(columns=["date", "symbol"])
+
+        replace_symbols: set[str] = set()
+        if is_partial_update and "symbol" in df_bucket.columns:
+            replace_symbols = {
+                str(symbol or "").strip().upper()
+                for symbol in df_bucket["symbol"].dropna().astype(str).tolist()
+                if str(symbol or "").strip()
+            }
+            df_bucket = _merge_preserved_alpha26_finance_bucket_symbols(
+                sub_domain=sub_domain,
+                bucket=bucket,
+                silver_bucket_path=silver_bucket_path,
+                df_bucket=df_bucket,
+                replace_symbols=replace_symbols,
+            )
+        if "symbol" in df_bucket.columns:
+            for symbol in df_bucket["symbol"].dropna().astype(str).tolist():
+                clean_symbol = str(symbol or "").strip().upper()
+                if clean_symbol:
+                    touched_symbols_by_sub_domain[sub_domain][clean_symbol] = bucket
 
         write_decision = _prepare_finance_delta_write_frame(
             df_bucket.reset_index(drop=True),
@@ -864,6 +951,10 @@ def process_alpha26_bucket_blob(
     watermarks: dict,
     persist: bool = True,
     alpha26_bucket_frames: Optional[dict[tuple[str, str], list[pd.DataFrame]]] = None,
+    processed_state_index: Optional[dict[str, dict]] = None,
+    processed_state_updates: Optional[list[dict]] = None,
+    processed_state_stats: Optional[dict[str, int]] = None,
+    force_processed_state: bool = False,
 ) -> list[BlobProcessResult]:
     blob_name = str(blob.get("name", ""))
     watermark_key = normalize_watermark_blob_name(blob_name)
@@ -889,72 +980,143 @@ def process_alpha26_bucket_blob(
             watermarks[watermark_key] = signature
         return [BlobProcessResult(blob_name=blob_name, silver_path=None, ticker=None, status="skipped")]
 
+    symbol_col = "symbol" if "symbol" in df_bucket.columns else ("Symbol" if "Symbol" in df_bucket.columns else None)
+    if symbol_col is None:
+        return [
+            BlobProcessResult(
+                blob_name=blob_name,
+                silver_path=None,
+                ticker=None,
+                status="failed",
+                error=f"Missing symbol column in alpha26 bucket {blob_name}",
+            )
+        ]
+
     debug_symbols = set(getattr(cfg, "DEBUG_SYMBOLS", []) or [])
     results: list[BlobProcessResult] = []
-    for _, row in df_bucket.iterrows():
-        ticker = str(row.get("symbol") or "").strip().upper()
-        report_type = str(row.get("report_type") or "").strip().lower()
-        if not ticker or not report_type:
+    for symbol, symbol_rows in df_bucket.groupby(symbol_col):
+        ticker = str(symbol or "").strip().upper()
+        if not ticker:
             continue
         if debug_symbols and ticker not in debug_symbols:
             continue
-        mapped = _ALPHA26_REPORT_TYPE_TO_TABLE.get(report_type)
-        if not mapped:
-            results.append(
-                BlobProcessResult(
-                    blob_name=blob_name,
-                    silver_path=None,
-                    ticker=ticker,
-                    status="failed",
-                    error=f"Unsupported alpha26 report_type={report_type}",
-                )
+
+        bucket = _parse_alpha26_finance_bucket_from_blob_name(blob_name) or layer_bucketing.bucket_letter(ticker)
+        output_paths: list[str] = []
+        if "report_type" in symbol_rows.columns:
+            for report_type_value in symbol_rows["report_type"].dropna().astype(str).tolist():
+                mapped = _ALPHA26_REPORT_TYPE_TO_TABLE.get(str(report_type_value or "").strip().lower())
+                if mapped:
+                    output_paths.append(
+                        DataPaths.get_silver_finance_bucket_path(_finance_sub_domain(mapped[0]), bucket)
+                    )
+
+        current_state = None
+        if processed_state_index is not None:
+            entity_key = make_entity_key(domain=_FINANCE_PROCESSED_STATE_DOMAIN, bucket=bucket, symbol=ticker)
+            current_state = build_processed_state_record(
+                domain=_FINANCE_PROCESSED_STATE_DOMAIN,
+                bucket=bucket,
+                entity_key=entity_key,
+                symbol=ticker,
+                processor_version=_FINANCE_PROCESSED_STATE_PROCESSOR_VERSION,
+                source_frame=symbol_rows,
+                source_blob=blob,
+                output_paths=sorted(set(output_paths)),
             )
-            continue
-        folder_name, suffix = mapped
-        sub_domain = _finance_sub_domain(folder_name)
-        bucket = layer_bucketing.bucket_letter(ticker)
-        silver_path = DataPaths.get_silver_finance_bucket_path(sub_domain, bucket)
-        payload_raw = row.get("payload_json")
-        try:
-            payload = json.loads(str(payload_raw))
-        except Exception as exc:
-            results.append(
-                BlobProcessResult(
+            should_process, reason = should_process_entity(
+                current_state,
+                processed_state_index.get(entity_key),
+                force_reprocess=force_processed_state,
+            )
+            if processed_state_stats is not None:
+                record_processed_state_decision(
+                    processed_state_stats,
+                    should_process=should_process,
+                    reason=reason,
+                )
+            if not should_process:
+                results.append(
+                    BlobProcessResult(
+                        blob_name=blob_name,
+                        silver_path=None,
+                        ticker=ticker,
+                        status="skipped",
+                        reason="processed_state",
+                    )
+                )
+                continue
+
+        symbol_results: list[BlobProcessResult] = []
+        for _, row in symbol_rows.iterrows():
+            report_type = str(row.get("report_type") or "").strip().lower()
+            if not report_type:
+                continue
+            mapped = _ALPHA26_REPORT_TYPE_TO_TABLE.get(report_type)
+            if not mapped:
+                symbol_results.append(
+                    BlobProcessResult(
+                        blob_name=blob_name,
+                        silver_path=None,
+                        ticker=ticker,
+                        status="failed",
+                        error=f"Unsupported alpha26 report_type={report_type}",
+                    )
+                )
+                continue
+            folder_name, suffix = mapped
+            sub_domain = _finance_sub_domain(folder_name)
+            bucket = layer_bucketing.bucket_letter(ticker)
+            silver_path = DataPaths.get_silver_finance_bucket_path(sub_domain, bucket)
+            payload_raw = row.get("payload_json")
+            try:
+                payload = json.loads(str(payload_raw))
+            except Exception as exc:
+                symbol_results.append(
+                    BlobProcessResult(
+                        blob_name=blob_name,
+                        silver_path=silver_path,
+                        ticker=ticker,
+                        status="failed",
+                        error=f"Invalid payload_json for {ticker}/{report_type}: {exc}",
+                    )
+                )
+                continue
+            try:
+                raw_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                df_raw = _read_finance_json(raw_json, ticker=ticker, report_type=report_type)
+                result = _process_finance_frame(
                     blob_name=blob_name,
+                    ticker=ticker,
+                    folder_name=folder_name,
+                    suffix=suffix,
                     silver_path=silver_path,
-                    ticker=ticker,
-                    status="failed",
-                    error=f"Invalid payload_json for {ticker}/{report_type}: {exc}",
+                    df_raw=df_raw,
+                    desired_end=desired_end,
+                    backfill_start=backfill_start,
+                    signature=None,
+                    persist=persist,
+                    alpha26_bucket_frames=alpha26_bucket_frames,
                 )
-            )
-            continue
-        try:
-            raw_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            df_raw = _read_finance_json(raw_json, ticker=ticker, report_type=report_type)
-            result = _process_finance_frame(
-                blob_name=blob_name,
-                ticker=ticker,
-                folder_name=folder_name,
-                suffix=suffix,
-                silver_path=silver_path,
-                df_raw=df_raw,
-                desired_end=desired_end,
-                backfill_start=backfill_start,
-                signature=None,
-                persist=persist,
-                alpha26_bucket_frames=alpha26_bucket_frames,
-            )
-            results.append(result)
-        except Exception as exc:
-            results.append(
-                BlobProcessResult(
-                    blob_name=blob_name,
-                    silver_path=silver_path,
-                    ticker=ticker,
-                    status="failed",
-                    error=f"Failed alpha26 process for {ticker}/{report_type}: {exc}",
+                symbol_results.append(result)
+            except Exception as exc:
+                symbol_results.append(
+                    BlobProcessResult(
+                        blob_name=blob_name,
+                        silver_path=silver_path,
+                        ticker=ticker,
+                        status="failed",
+                        error=f"Failed alpha26 process for {ticker}/{report_type}: {exc}",
+                    )
                 )
-            )
+        if (
+            current_state is not None
+            and processed_state_updates is not None
+            and symbol_results
+            and all(result.status != "failed" for result in symbol_results)
+        ):
+            processed_state_updates.append(current_state)
+        results.extend(symbol_results)
 
     if all(result.status != "failed" for result in results) and signature:
         signature["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -971,6 +1133,10 @@ def _process_alpha26_candidate_blobs(
     persist: bool = True,
     alpha26_bucket_frames: Optional[dict[tuple[str, str], list[pd.DataFrame]]] = None,
     flush_state: Optional[_FinanceAlpha26FlushState] = None,
+    processed_state_index: Optional[dict[str, dict]] = None,
+    processed_state_updates: Optional[list[dict]] = None,
+    processed_state_stats: Optional[dict[str, int]] = None,
+    force_processed_state: bool = False,
 ) -> tuple[list[BlobProcessResult], float]:
     ingest_started = time.perf_counter()
     results: list[BlobProcessResult] = []
@@ -991,8 +1157,14 @@ def _process_alpha26_candidate_blobs(
             if flush_state is not None and not persist
             else alpha26_bucket_frames
         )
+        blob_state_updates: list[dict] = []
         if blob_bucket_frames is not None:
             call_kwargs["alpha26_bucket_frames"] = blob_bucket_frames
+        if processed_state_index is not None:
+            call_kwargs["processed_state_index"] = processed_state_index
+            call_kwargs["processed_state_updates"] = blob_state_updates
+            call_kwargs["processed_state_stats"] = processed_state_stats
+            call_kwargs["force_processed_state"] = force_processed_state
         blob_results = process_alpha26_bucket_blob(
             blob,
             **call_kwargs,
@@ -1017,6 +1189,8 @@ def _process_alpha26_candidate_blobs(
                             f"touched_keys={len(touched_bucket_keys)} symbols={flush_state.written_symbols} "
                             f"index_path={flush_state.index_path or 'unavailable'}"
                         )
+                    if processed_state_updates is not None:
+                        processed_state_updates.extend(blob_state_updates)
                 except Exception as exc:
                     _restore_blob_watermark(watermarks, blob_name=blob_name, prior_signature=prior_signature)
                     blob_results = [
@@ -1028,6 +1202,8 @@ def _process_alpha26_candidate_blobs(
                             error=f"Silver finance alpha26 bucket write failed: {exc}",
                         )
                     ]
+        elif processed_state_updates is not None:
+            processed_state_updates.extend(blob_state_updates)
         _log_alpha26_blob_results(blob_name=blob_name, results=blob_results)
         results.extend(blob_results)
         # Watermarks are updated per-bucket internally on all-success.
@@ -1044,9 +1220,15 @@ def main() -> int:
     watermarks = load_watermarks("bronze_finance_data")
     last_success = load_last_success("silver_finance_data")
     watermarks_dirty = False
+    processed_state_active = processed_state_enabled() and getattr(mdc, "common_storage_client", None) is not None
+    processed_state = load_processed_state(_FINANCE_PROCESSED_STATE_DOMAIN) if processed_state_active else None
+    processed_state_index = build_processed_state_index(processed_state) if processed_state_active else None
+    processed_state_updates: list[dict] = []
+    processed_state_stats = new_processed_state_stats()
     bronze_bucketing.bronze_layout_mode()
     layer_bucketing.silver_layout_mode()
     force_rebuild = layer_bucketing.silver_alpha26_force_rebuild()
+    force_processed_state = force_rebuild or processed_state_force_rebuild()
 
     desired_end = _utc_today()
     backfill_start, _ = get_backfill_range()
@@ -1075,14 +1257,24 @@ def main() -> int:
     all_results: list[BlobProcessResult] = []
     total_ingest_elapsed = 0.0
     if candidate_blobs:
-        all_results, total_ingest_elapsed = _process_alpha26_candidate_blobs(
-            candidate_blobs=candidate_blobs,
-            desired_end=desired_end,
-            backfill_start=backfill_start,
-            watermarks=watermarks,
-            persist=False,
-            flush_state=alpha26_flush_state,
-        )
+        process_kwargs = {
+            "candidate_blobs": candidate_blobs,
+            "desired_end": desired_end,
+            "backfill_start": backfill_start,
+            "watermarks": watermarks,
+            "persist": False,
+            "flush_state": alpha26_flush_state,
+        }
+        if processed_state_index is not None:
+            process_kwargs.update(
+                {
+                    "processed_state_index": processed_state_index,
+                    "processed_state_updates": processed_state_updates,
+                    "processed_state_stats": processed_state_stats,
+                    "force_processed_state": force_processed_state,
+                }
+            )
+        all_results, total_ingest_elapsed = _process_alpha26_candidate_blobs(**process_kwargs)
         watermarks_dirty = True
 
     processed = sum(1 for r in all_results if r.status == "ok")
@@ -1127,8 +1319,24 @@ def main() -> int:
         f"reconciled_orphans={reconciliation_orphans}, "
         f"reconciliation_deleted_blobs={reconciliation_deleted_blobs}"
     )
-    if watermarks_dirty:
+    mdc.write_line(
+        "silver_processed_state_summary layer=silver domain=finance "
+        f"entities_seen={processed_state_stats['entities_seen']} "
+        f"entities_changed={processed_state_stats['entities_changed']} "
+        f"entities_skipped_state={processed_state_stats['entities_skipped_state']} "
+        f"entities_reprocessed_calendar={processed_state_stats['entities_reprocessed_calendar']} "
+        f"output_buckets_touched={alpha26_flush_state.flush_count} "
+        f"processed_state_updates={len(processed_state_updates)}"
+    )
+    if total_failed == 0 and processed_state_updates and processed_state_active:
+        save_processed_state(
+            _FINANCE_PROCESSED_STATE_DOMAIN,
+            merge_processed_state_updates(processed_state, processed_state_updates),
+        )
+    if watermarks_dirty and total_failed == 0:
         save_watermarks("bronze_finance_data", watermarks)
+    elif watermarks_dirty:
+        mdc.write_warning("Silver finance watermarks not saved because the run did not pass final validation.")
 
     run_ended_at = datetime.now(timezone.utc)
     if total_failed == 0:

@@ -22,6 +22,19 @@ from tasks.common.watermarks import (
     save_watermarks,
     should_process_blob_since_last_success,
 )
+from tasks.common.silver_processed_state import (
+    build_processed_state_index,
+    build_processed_state_record,
+    load_processed_state,
+    make_entity_key,
+    merge_processed_state_updates,
+    new_stats as new_processed_state_stats,
+    processed_state_enabled,
+    processed_state_force_rebuild,
+    record_decision as record_processed_state_decision,
+    save_processed_state,
+    should_process_entity,
+)
 from tasks.common.delta_write_policy import prepare_delta_write_frame
 from tasks.common.silver_contracts import (
     ContractViolation,
@@ -55,6 +68,8 @@ _ALPHA26_PRICE_TARGET_MIN_COLUMNS = [
     "tp_cnt_est_rev_up",
     "tp_cnt_est_rev_down",
 ]
+_PRICE_TARGET_PROCESSED_STATE_DOMAIN = "price-target"
+_PRICE_TARGET_PROCESSED_STATE_PROCESSOR_VERSION = "silver-price-target-alpha26-v1"
 
 
 def _utc_now() -> datetime:
@@ -123,6 +138,54 @@ def _restore_blob_watermark(
         watermarks.pop(watermark_key, None)
         return
     watermarks[watermark_key] = dict(prior_signature)
+
+
+def _merge_preserved_alpha26_price_target_bucket_symbols(
+    *,
+    bucket: str,
+    bucket_path: str,
+    df_bucket: pd.DataFrame,
+    replace_symbols: set[str],
+) -> pd.DataFrame:
+    symbols_to_replace = {
+        str(symbol or "").strip().upper()
+        for symbol in replace_symbols
+        if str(symbol or "").strip()
+    }
+    if not symbols_to_replace:
+        return df_bucket
+    try:
+        existing_bucket = delta_core.load_delta(cfg.AZURE_CONTAINER_SILVER, bucket_path)
+    except Exception as exc:
+        mdc.write_warning(
+            f"Silver price-target preserve skipped bucket={bucket} path={bucket_path}: {exc}"
+        )
+        existing_bucket = None
+    if existing_bucket is None or existing_bucket.empty:
+        return df_bucket
+    existing_bucket = normalize_columns_to_snake_case(existing_bucket)
+    if "symbol" not in existing_bucket.columns:
+        return df_bucket
+    existing_bucket["symbol"] = existing_bucket["symbol"].astype("string").str.upper()
+    if "obs_date" in existing_bucket.columns:
+        existing_bucket["obs_date"] = pd.to_datetime(existing_bucket["obs_date"], errors="coerce")
+    preserved = existing_bucket.loc[~existing_bucket["symbol"].isin(symbols_to_replace)].copy()
+    if preserved.empty:
+        return df_bucket
+    merged = _concat_non_empty_frames(
+        [preserved, df_bucket],
+        columns=_ALPHA26_PRICE_TARGET_MIN_COLUMNS,
+    ).reset_index(drop=True)
+    if "symbol" in merged.columns and "obs_date" in merged.columns:
+        merged["symbol"] = merged["symbol"].astype("string").str.upper()
+        merged["obs_date"] = pd.to_datetime(merged["obs_date"], errors="coerce")
+        merged = (
+            merged.dropna(subset=["symbol", "obs_date"])
+            .sort_values(["symbol", "obs_date"])
+            .drop_duplicates(subset=["symbol", "obs_date"], keep="last")
+            .reset_index(drop=True)
+        )
+    return merged
 
 
 def _process_symbol_frame(
@@ -371,6 +434,10 @@ def process_alpha26_bucket_blob(
     include_history: bool = False,
     persist: bool = False,
     alpha26_bucket_frames: Optional[dict[str, list[pd.DataFrame]]] = None,
+    processed_state_index: Optional[dict[str, dict]] = None,
+    processed_state_updates: Optional[list[dict]] = None,
+    processed_state_stats: Optional[dict[str, int]] = None,
+    force_processed_state: bool = False,
 ) -> str:
     blob_name = str(blob.get("name", ""))
     watermark_key = normalize_watermark_blob_name(blob_name)
@@ -401,12 +468,41 @@ def process_alpha26_bucket_blob(
 
     debug_symbols = set(getattr(cfg, "DEBUG_SYMBOLS", []) or [])
     has_failed = False
+    as_of_date = pd.to_datetime("today").normalize().date().isoformat()
     for symbol, group in df_bucket.groupby(symbol_col):
         ticker = str(symbol or "").strip().upper()
         if not ticker:
             continue
         if debug_symbols and ticker not in debug_symbols:
             continue
+        if processed_state_index is not None:
+            bucket = _parse_alpha26_bucket_from_blob_name(blob_name) or layer_bucketing.bucket_letter(ticker)
+            entity_key = make_entity_key(domain=_PRICE_TARGET_PROCESSED_STATE_DOMAIN, bucket=bucket, symbol=ticker)
+            current_state = build_processed_state_record(
+                domain=_PRICE_TARGET_PROCESSED_STATE_DOMAIN,
+                bucket=bucket,
+                entity_key=entity_key,
+                symbol=ticker,
+                processor_version=_PRICE_TARGET_PROCESSED_STATE_PROCESSOR_VERSION,
+                source_frame=group,
+                source_blob=blob,
+                source_date_columns=("obs_date",),
+                as_of_date=as_of_date,
+                output_paths=[DataPaths.get_silver_price_target_bucket_path(bucket)],
+            )
+            should_process, reason = should_process_entity(
+                current_state,
+                processed_state_index.get(entity_key),
+                force_reprocess=force_processed_state,
+            )
+            if processed_state_stats is not None:
+                record_processed_state_decision(
+                    processed_state_stats,
+                    should_process=should_process,
+                    reason=reason,
+                )
+            if not should_process:
+                continue
         status = _process_symbol_frame(
             ticker=ticker,
             df_new=group.copy(),
@@ -417,6 +513,8 @@ def process_alpha26_bucket_blob(
         )
         if status == "failed":
             has_failed = True
+        elif status == "ok" and processed_state_updates is not None and processed_state_index is not None:
+            processed_state_updates.append(current_state)
 
     if not has_failed and signature:
         signature["updated_at"] = _utc_now_iso()
@@ -468,13 +566,28 @@ def _write_alpha26_price_target_buckets(
                 df_bucket = df_bucket.sort_values(["symbol", "obs_date"]).drop_duplicates(
                     subset=["symbol", "obs_date"], keep="last"
                 )
-                for symbol in df_bucket["symbol"].dropna().astype(str).tolist():
-                    if symbol:
-                        touched_symbol_to_bucket[symbol] = bucket
             else:
                 df_bucket = pd.DataFrame(columns=_ALPHA26_PRICE_TARGET_MIN_COLUMNS)
         else:
             df_bucket = pd.DataFrame(columns=_ALPHA26_PRICE_TARGET_MIN_COLUMNS)
+        replace_symbols: set[str] = set()
+        if is_partial_update and "symbol" in df_bucket.columns:
+            replace_symbols = {
+                str(symbol or "").strip().upper()
+                for symbol in df_bucket["symbol"].dropna().astype(str).tolist()
+                if str(symbol or "").strip()
+            }
+            df_bucket = _merge_preserved_alpha26_price_target_bucket_symbols(
+                bucket=bucket,
+                bucket_path=bucket_path,
+                df_bucket=df_bucket,
+                replace_symbols=replace_symbols,
+            )
+        if "symbol" in df_bucket.columns:
+            for symbol in df_bucket["symbol"].dropna().astype(str).tolist():
+                clean_symbol = str(symbol or "").strip().upper()
+                if clean_symbol:
+                    touched_symbol_to_bucket[clean_symbol] = bucket
         write_decision = prepare_delta_write_frame(
             df_bucket.reset_index(drop=True),
             container=cfg.AZURE_CONTAINER_SILVER,
@@ -617,6 +730,12 @@ def main():
     watermarks = load_watermarks("bronze_price_target_data")
     last_success = load_last_success("silver_price_target_data")
     watermarks_dirty = False
+    processed_state_active = processed_state_enabled() and getattr(mdc, "common_storage_client", None) is not None
+    processed_state = load_processed_state(_PRICE_TARGET_PROCESSED_STATE_DOMAIN) if processed_state_active else None
+    processed_state_index = build_processed_state_index(processed_state) if processed_state_active else None
+    processed_state_updates: list[dict] = []
+    processed_state_stats = new_processed_state_stats()
+    force_processed_state = force_rebuild or processed_state_force_rebuild()
 
     blob_list = bronze_bucketing.list_active_bucket_blob_infos("price-target", bronze_client)
     checkpoint_skipped = 0
@@ -660,13 +779,23 @@ def main():
         watermark_key = normalize_watermark_blob_name(blob_name)
         prior_signature = dict(watermarks[watermark_key]) if isinstance(watermarks.get(watermark_key), dict) else None
         alpha26_bucket_frames: dict[str, list[pd.DataFrame]] = {}
-        status = process_alpha26_bucket_blob(
-            blob,
-            watermarks=watermarks,
-            include_history=False,
-            persist=False,
-            alpha26_bucket_frames=alpha26_bucket_frames,
-        )
+        blob_state_updates: list[dict] = []
+        process_kwargs = {
+            "watermarks": watermarks,
+            "include_history": False,
+            "persist": False,
+            "alpha26_bucket_frames": alpha26_bucket_frames,
+        }
+        if processed_state_index is not None:
+            process_kwargs.update(
+                {
+                    "processed_state_index": processed_state_index,
+                    "processed_state_updates": blob_state_updates,
+                    "processed_state_stats": processed_state_stats,
+                    "force_processed_state": force_processed_state,
+                }
+            )
+        status = process_alpha26_bucket_blob(blob, **process_kwargs)
         if status == "ok":
             ok_or_skipped += 1
             staged_rows = layer_bucketing.count_staged_frame_rows(alpha26_bucket_frames)
@@ -691,6 +820,8 @@ def main():
                 )
                 alpha26_flush_count += 1
                 watermarks_dirty = True
+                processed_state_updates.extend(blob_state_updates)
+                processed_state_stats["processed_state_updates"] = len(processed_state_updates)
                 mdc.write_line(
                     "Silver price-target alpha26 buckets written: "
                     f"touched_buckets=1 symbols={alpha26_written_symbols} "
@@ -742,8 +873,24 @@ def main():
         f"reconciled_orphans={reconciliation_orphans} "
         f"reconciliation_deleted_blobs={reconciliation_deleted_blobs} failed={total_failed}"
     )
-    if watermarks_dirty:
+    mdc.write_line(
+        "silver_processed_state_summary layer=silver domain=price-target "
+        f"entities_seen={processed_state_stats['entities_seen']} "
+        f"entities_changed={processed_state_stats['entities_changed']} "
+        f"entities_skipped_state={processed_state_stats['entities_skipped_state']} "
+        f"entities_reprocessed_calendar={processed_state_stats['entities_reprocessed_calendar']} "
+        f"output_buckets_touched={alpha26_flush_count} "
+        f"processed_state_updates={len(processed_state_updates)}"
+    )
+    if total_failed == 0 and processed_state_updates and processed_state_active:
+        save_processed_state(
+            _PRICE_TARGET_PROCESSED_STATE_DOMAIN,
+            merge_processed_state_updates(processed_state, processed_state_updates),
+        )
+    if watermarks_dirty and total_failed == 0:
         save_watermarks("bronze_price_target_data", watermarks)
+    elif watermarks_dirty:
+        mdc.write_warning("Silver price-target watermarks not saved because the run did not pass final validation.")
     if total_failed == 0:
         save_last_success(
             "silver_price_target_data",
