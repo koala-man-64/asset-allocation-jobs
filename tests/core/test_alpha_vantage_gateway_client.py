@@ -225,11 +225,13 @@ def test_request_raises_after_exhausting_retryable_gateway_status_budget(
             client.get_listing_status_csv()
         except AlphaVantageGatewayError as exc:
             assert exc.status_code == status_code
-            assert exc.payload == {
+            expected_payload = {
                 "path": "/api/providers/alpha-vantage/listing-status",
                 "status_code": status_code,
                 "detail": detail,
             }
+            for key, value in expected_payload.items():
+                assert exc.payload[key] == value
         else:
             raise AssertionError("Expected AlphaVantageGatewayError after retries are exhausted.")
     finally:

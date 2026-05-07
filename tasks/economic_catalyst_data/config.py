@@ -28,6 +28,16 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = _strip(os.environ.get(name))
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
 def _csv_or_default(raw: str, default: tuple[str, ...]) -> tuple[str, ...]:
     text = _strip(raw)
     if not text:
@@ -122,6 +132,8 @@ class EconomicCatalystConfig:
     general_poll_minutes: int
     fred_api_key: str
     alpha_vantage_api_key: str
+    alpha_vantage_circuit_failure_threshold: int
+    alpha_vantage_circuit_open_seconds: float
     massive_api_key: str
     alpaca_key_id: str
     alpaca_secret_key: str
@@ -161,6 +173,8 @@ class EconomicCatalystConfig:
             general_poll_minutes=_env_int("ECONOMIC_CATALYST_GENERAL_POLL_MINUTES", 15),
             fred_api_key=_env_text("FRED_API_KEY"),
             alpha_vantage_api_key=_env_text("ALPHA_VANTAGE_API_KEY"),
+            alpha_vantage_circuit_failure_threshold=max(1, _env_int("ALPHA_VANTAGE_CIRCUIT_FAILURE_THRESHOLD", 3)),
+            alpha_vantage_circuit_open_seconds=max(0.0, _env_float("ALPHA_VANTAGE_CIRCUIT_OPEN_SECONDS", 300.0)),
             massive_api_key=_env_text("MASSIVE_API_KEY"),
             alpaca_key_id=_env_text("ALPACA_KEY_ID"),
             alpaca_secret_key=_env_text("ALPACA_SECRET_KEY"),

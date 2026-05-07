@@ -1,9 +1,17 @@
 import httpx
+import pytest
 
 from massive_provider import MassiveClient, MassiveConfig
+from massive_provider.errors import MassiveCircuitOpenError, MassiveError, MassiveServerError
 
 
-def _build_client(handler, *, float_endpoint: str = "/stocks/vX/float") -> MassiveClient:
+def _build_client(
+    handler,
+    *,
+    float_endpoint: str = "/stocks/vX/float",
+    circuit_failure_threshold: int = 3,
+    circuit_open_seconds: float = 300.0,
+) -> MassiveClient:
     transport = httpx.MockTransport(handler)
     http_client = httpx.Client(
         transport=transport,
@@ -14,6 +22,8 @@ def _build_client(handler, *, float_endpoint: str = "/stocks/vX/float") -> Massi
         api_key="test-key",
         base_url="https://api.massive.com",
         timeout_seconds=10.0,
+        circuit_breaker_failure_threshold=circuit_failure_threshold,
+        circuit_breaker_open_seconds=circuit_open_seconds,
         float_endpoint=float_endpoint,
     )
     return MassiveClient(cfg, http_client=http_client)
@@ -204,3 +214,43 @@ def test_unified_snapshot_strips_type_param_when_filtering_by_ticker() -> None:
     assert len(seen_params) == 1
     assert seen_params[0].get("ticker.any_of") == "AAPL"
     assert seen_params[0].get("type") is None
+
+
+def test_massive_timeout_circuit_opens_after_timeout() -> None:
+    calls = {"count": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise httpx.ReadTimeout("timeout apiKey=provider-secret")
+
+    client = _build_client(handler, circuit_failure_threshold=1, circuit_open_seconds=60.0)
+    try:
+        with pytest.raises(MassiveError):
+            client.get_short_interest(ticker="AAPL")
+        with pytest.raises(MassiveCircuitOpenError) as exc_info:
+            client.get_short_interest(ticker="AAPL")
+    finally:
+        client.close()
+
+    assert calls["count"] == 1
+    assert exc_info.value.retry_after_seconds > 0
+    assert "provider-secret" not in str(exc_info.value.payload)
+
+
+def test_massive_ordinary_5xx_does_not_open_timeout_circuit() -> None:
+    calls = {"count": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(503, json={"detail": "server unavailable"})
+
+    client = _build_client(handler, circuit_failure_threshold=1, circuit_open_seconds=60.0)
+    try:
+        with pytest.raises(MassiveServerError):
+            client.get_short_interest(ticker="AAPL")
+        with pytest.raises(MassiveServerError):
+            client.get_short_interest(ticker="AAPL")
+    finally:
+        client.close()
+
+    assert calls["count"] == 2

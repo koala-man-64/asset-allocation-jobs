@@ -88,6 +88,10 @@ properties:
         value: ${QUIVER_DATA_MAX_PAGES_PER_REQUEST}
       - name: QUIVER_DATA_SEC13F_TODAY_ONLY
         value: ${QUIVER_DATA_SEC13F_TODAY_ONLY}
+      - name: QUIVER_GATEWAY_CIRCUIT_FAILURE_THRESHOLD
+        value: ${QUIVER_GATEWAY_CIRCUIT_FAILURE_THRESHOLD}
+      - name: QUIVER_GATEWAY_CIRCUIT_OPEN_SECONDS
+        value: ${QUIVER_GATEWAY_CIRCUIT_OPEN_SECONDS}
       image: ${JOB_IMAGE}
       imageType: ContainerImage
       name: bronze-quiver-job

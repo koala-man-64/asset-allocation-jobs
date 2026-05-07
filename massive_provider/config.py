@@ -24,6 +24,16 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = _strip_or_none(os.environ.get(name))
+    if raw is None:
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
 @dataclass(frozen=True)
 class MassiveConfig:
     """Runtime configuration for Massive integration.
@@ -42,6 +52,8 @@ class MassiveConfig:
     api_key: str
     base_url: str = "https://api.massive.com"
     timeout_seconds: float = 30.0
+    circuit_breaker_failure_threshold: int = 3
+    circuit_breaker_open_seconds: float = 300.0
 
     # Fundamentals endpoint versioning can change over time in Massive docs.
     # Keep this configurable so runtime can adapt without code changes.
@@ -62,6 +74,8 @@ class MassiveConfig:
 
         base_url = _strip_or_none(os.environ.get("MASSIVE_BASE_URL")) or "https://api.massive.com"
         timeout_seconds = _env_float("MASSIVE_TIMEOUT_SECONDS", 30.0)
+        circuit_breaker_failure_threshold = max(1, _env_int("MASSIVE_CIRCUIT_FAILURE_THRESHOLD", 3))
+        circuit_breaker_open_seconds = max(0.0, _env_float("MASSIVE_CIRCUIT_OPEN_SECONDS", 300.0))
         float_endpoint = _strip_or_none(os.environ.get("MASSIVE_FLOAT_ENDPOINT")) or "/stocks/vX/float"
 
         flat_endpoint = _strip_or_none(os.environ.get("MASSIVE_FLATFILES_ENDPOINT_URL")) or "https://files.massive.com"
@@ -78,6 +92,8 @@ class MassiveConfig:
             api_key=str(api_key or ""),
             base_url=str(base_url),
             timeout_seconds=float(timeout_seconds),
+            circuit_breaker_failure_threshold=circuit_breaker_failure_threshold,
+            circuit_breaker_open_seconds=circuit_breaker_open_seconds,
             float_endpoint=str(float_endpoint),
             websocket_subscriptions_default=subs,
             flatfiles_endpoint_url=str(flat_endpoint),

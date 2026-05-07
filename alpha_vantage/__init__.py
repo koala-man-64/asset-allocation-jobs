@@ -39,6 +39,7 @@ See the individual classes and methods for more details.
 from .config import AlphaVantageConfig  # noqa: F401
 from .client import AlphaVantageClient  # noqa: F401
 from .errors import (  # noqa: F401
+    AlphaVantageCircuitOpenError,
     AlphaVantageError,
     AlphaVantageInvalidSymbolError,
     AlphaVantageThrottleError,
@@ -49,6 +50,7 @@ from .utils import parse_time_series, parse_financial_reports  # noqa: F401
 __all__ = [
     "AlphaVantageConfig",
     "AlphaVantageClient",
+    "AlphaVantageCircuitOpenError",
     "AlphaVantageError",
     "AlphaVantageInvalidSymbolError",
     "AlphaVantageThrottleError",

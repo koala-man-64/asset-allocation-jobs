@@ -97,3 +97,16 @@ def azure_client():
     mock_client = MagicMock(spec=BlobStorageClient)
     return mock_client
 
+
+@pytest.fixture(autouse=True)
+def reset_timeout_circuit_registry():
+    try:
+        from asset_allocation_runtime_common.shared_core.timeout_circuit_breaker import reset_timeout_circuit_registry
+    except Exception:
+        yield
+        return
+
+    reset_timeout_circuit_registry()
+    yield
+    reset_timeout_circuit_registry()
+

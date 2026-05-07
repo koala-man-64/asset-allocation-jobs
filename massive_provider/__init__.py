@@ -13,6 +13,7 @@ from massive_provider.client import MassiveClient
 from massive_provider.config import MassiveConfig
 from massive_provider.errors import (
     MassiveAuthError,
+    MassiveCircuitOpenError,
     MassiveError,
     MassiveNotConfiguredError,
     MassiveNotFoundError,
@@ -25,6 +26,7 @@ __all__ = [
     "MassiveConfig",
     "MassiveError",
     "MassiveNotConfiguredError",
+    "MassiveCircuitOpenError",
     "MassiveAuthError",
     "MassiveRateLimitError",
     "MassiveNotFoundError",

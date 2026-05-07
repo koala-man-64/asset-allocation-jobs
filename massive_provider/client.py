@@ -6,10 +6,16 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
+from asset_allocation_runtime_common.shared_core.timeout_circuit_breaker import (
+    TimeoutCircuitBreakerConfig,
+    TimeoutCircuitOpenState,
+    get_timeout_circuit,
+)
 
 from massive_provider.config import MassiveConfig
 from massive_provider.errors import (
     MassiveAuthError,
+    MassiveCircuitOpenError,
     MassiveError,
     MassiveNotConfiguredError,
     MassiveNotFoundError,
@@ -77,6 +83,14 @@ class MassiveClient:
             headers={"Authorization": f"Bearer {config.api_key}"},
             trust_env=False,
         )
+        self._timeout_circuit_config = TimeoutCircuitBreakerConfig(
+            failure_threshold=int(getattr(config, "circuit_breaker_failure_threshold", 3)),
+            open_seconds=float(getattr(config, "circuit_breaker_open_seconds", 300.0)),
+        )
+        self._timeout_circuit = get_timeout_circuit(
+            provider="massive-direct",
+            scope_key=str(config.base_url).rstrip("/"),
+        )
 
     def close(self) -> None:
         if self._owns_http:
@@ -114,6 +128,49 @@ class MassiveClient:
             return payload.strip()
         return response.reason_phrase
 
+    def _timeout_circuit_payload(
+        self,
+        *,
+        path_or_url: str,
+        state: Optional[TimeoutCircuitOpenState],
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "path": path_or_url,
+            "circuit_failure_threshold": int(self._timeout_circuit_config.failure_threshold),
+            "circuit_open_seconds": float(self._timeout_circuit_config.open_seconds),
+        }
+        if state is not None:
+            payload["retry_after_seconds"] = round(float(state.retry_after_seconds), 3)
+            payload["timeout_count"] = int(state.timeout_count)
+            if state.last_reason:
+                payload["last_timeout_reason"] = state.last_reason
+        return payload
+
+    def _raise_if_timeout_circuit_open(self, *, path_or_url: str) -> None:
+        state = self._timeout_circuit.before_call(self._timeout_circuit_config)
+        if state is None:
+            return
+        raise MassiveCircuitOpenError(
+            f"Massive timeout circuit breaker is open for {state.retry_after_seconds:.1f} seconds.",
+            retry_after_seconds=state.retry_after_seconds,
+            payload=self._timeout_circuit_payload(path_or_url=path_or_url, state=state),
+        )
+
+    def _record_timeout_circuit_response(self) -> None:
+        self._timeout_circuit.record_non_timeout_response()
+
+    def _record_timeout_circuit_timeout(
+        self,
+        *,
+        path_or_url: str,
+        reason: str,
+    ) -> Optional[TimeoutCircuitOpenState]:
+        return self._timeout_circuit.record_timeout(
+            self._timeout_circuit_config,
+            reason=reason,
+            path=path_or_url,
+        )
+
     def _request_json(self, path_or_url: str, *, params: Optional[dict[str, Any]] = None) -> MassiveHTTPResponse:
         """GET JSON from Massive.
 
@@ -122,6 +179,7 @@ class MassiveClient:
         """
 
         url = str(path_or_url)
+        self._raise_if_timeout_circuit_open(path_or_url=url)
         try:
             request_kwargs: dict[str, Any] = {}
             if params is not None:
@@ -130,7 +188,11 @@ class MassiveClient:
                 request_kwargs["params"] = params
             resp = self._http.get(url, **request_kwargs)
         except httpx.TimeoutException as exc:
-            raise MassiveError(f"Massive timeout calling {path_or_url}", payload={"path": path_or_url}) from exc
+            timeout_state = self._record_timeout_circuit_timeout(path_or_url=url, reason="timeout_exception")
+            raise MassiveError(
+                f"Massive timeout calling {path_or_url}",
+                payload=self._timeout_circuit_payload(path_or_url=url, state=timeout_state),
+            ) from exc
         except Exception as exc:
             raise MassiveError(
                 f"Massive call failed: {type(exc).__name__}: {exc}",
@@ -138,6 +200,7 @@ class MassiveClient:
             ) from exc
 
         if resp.status_code < 400:
+            self._record_timeout_circuit_response()
             try:
                 payload = resp.json()
             except Exception:
@@ -146,6 +209,28 @@ class MassiveClient:
 
         detail = self._extract_detail(resp)
         payload = {"path": path_or_url, "status_code": int(resp.status_code), "detail": detail}
+
+        if resp.status_code in {408, 504}:
+            timeout_state = self._record_timeout_circuit_timeout(
+                path_or_url=url,
+                reason=f"status_{resp.status_code}",
+            )
+            circuit_payload = {**payload, **self._timeout_circuit_payload(path_or_url=url, state=timeout_state)}
+            if resp.status_code == 504:
+                raise MassiveServerError(
+                    detail or "Massive server timeout.",
+                    status_code=resp.status_code,
+                    detail=detail,
+                    payload=circuit_payload,
+                )
+            raise MassiveError(
+                detail or "Massive request timeout.",
+                status_code=resp.status_code,
+                detail=detail,
+                payload=circuit_payload,
+            )
+
+        self._record_timeout_circuit_response()
 
         if resp.status_code in {401, 403}:
             raise MassiveAuthError("Massive auth failed.", status_code=resp.status_code, detail=detail, payload=payload)

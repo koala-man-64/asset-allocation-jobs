@@ -49,6 +49,17 @@ def test_jobs_ranking_service_module_is_runtime_common_compatibility_shim() -> N
     assert "def _load_source_date_bounds" not in text
 
 
+def test_jobs_gateway_client_modules_are_runtime_common_compatibility_shims() -> None:
+    root = Path(__file__).resolve().parents[1]
+    alpha_text = (root / "core" / "alpha_vantage_gateway_client.py").read_text(encoding="utf-8")
+    massive_text = (root / "core" / "massive_gateway_client.py").read_text(encoding="utf-8")
+
+    assert "from asset_allocation_runtime_common.providers.alpha_vantage_gateway_client import *" in alpha_text
+    assert "from asset_allocation_runtime_common.providers.massive_gateway_client import *" in massive_text
+    assert "class AlphaVantageGatewayClient" not in alpha_text
+    assert "class MassiveGatewayClient" not in massive_text
+
+
 def test_tests_do_not_use_stale_runtime_common_patch_prefixes() -> None:
     tests_root = Path(__file__).resolve().parent
     offenders: list[str] = []

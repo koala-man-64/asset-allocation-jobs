@@ -42,9 +42,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Union
 
 import httpx
+from asset_allocation_runtime_common.shared_core.timeout_circuit_breaker import (
+    TimeoutCircuitBreakerConfig,
+    TimeoutCircuitOpenState,
+    get_timeout_circuit,
+)
 
 from .config import AlphaVantageConfig
-from .errors import AlphaVantageError, AlphaVantageInvalidSymbolError, AlphaVantageThrottleError
+from .errors import (
+    AlphaVantageCircuitOpenError,
+    AlphaVantageError,
+    AlphaVantageInvalidSymbolError,
+    AlphaVantageThrottleError,
+)
 from .rate_limiter import RateLimiter
 from .utils import parse_time_series, parse_financial_reports
 
@@ -106,6 +116,14 @@ class AlphaVantageClient:
         self._last_summary_monotonic = self._started_monotonic
         self._throttle_cooldown_lock = threading.Lock()
         self._throttle_cooldown_until_monotonic = 0.0
+        self._timeout_circuit_config = TimeoutCircuitBreakerConfig(
+            failure_threshold=int(getattr(config, "circuit_breaker_failure_threshold", 3)),
+            open_seconds=float(getattr(config, "circuit_breaker_open_seconds", 300.0)),
+        )
+        self._timeout_circuit = get_timeout_circuit(
+            provider="alpha-vantage-direct",
+            scope_key=str(self._query_url),
+        )
 
         self._log(
             logging.INFO,
@@ -119,6 +137,8 @@ class AlphaVantageClient:
             av_max_retries=int(getattr(config, "max_retries", 0)),
             av_backoff_base_seconds=float(getattr(config, "backoff_base_seconds", 0.0)),
             av_throttle_cooldown_seconds=float(getattr(config, "throttle_cooldown_seconds", 60.0)),
+            av_circuit_failure_threshold=int(self._timeout_circuit_config.failure_threshold),
+            av_circuit_open_seconds=float(self._timeout_circuit_config.open_seconds),
             av_api_key_set=bool(getattr(config, "api_key", "")),
             av_caller_provider=bool(caller_provider),
         )
@@ -234,6 +254,55 @@ class AlphaVantageClient:
         with self._metrics_lock:
             current = self._metrics.get(key, 0)
             self._metrics[key] = current + inc  # type: ignore[operator]
+
+    def _timeout_circuit_payload(
+        self,
+        *,
+        function: Optional[str],
+        symbol: Optional[str],
+        state: Optional[TimeoutCircuitOpenState],
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "function": function,
+            "symbol": symbol,
+            "circuit_failure_threshold": int(self._timeout_circuit_config.failure_threshold),
+            "circuit_open_seconds": float(self._timeout_circuit_config.open_seconds),
+        }
+        if state is not None:
+            payload["retry_after_seconds"] = round(float(state.retry_after_seconds), 3)
+            payload["timeout_count"] = int(state.timeout_count)
+            if state.last_reason:
+                payload["last_timeout_reason"] = state.last_reason
+        return payload
+
+    def _raise_if_timeout_circuit_open(self, *, function: Optional[str], symbol: Optional[str]) -> None:
+        state = self._timeout_circuit.before_call(self._timeout_circuit_config)
+        if state is None:
+            return
+        raise AlphaVantageCircuitOpenError(
+            f"Alpha Vantage timeout circuit breaker is open for {state.retry_after_seconds:.1f} seconds.",
+            retry_after_seconds=state.retry_after_seconds,
+            payload=self._timeout_circuit_payload(function=function, symbol=symbol, state=state),
+        )
+
+    def _record_timeout_circuit_response(self) -> None:
+        self._timeout_circuit.record_non_timeout_response()
+
+    def _record_timeout_circuit_timeout(
+        self,
+        *,
+        function: Optional[str],
+        symbol: Optional[str],
+        reason: str,
+    ) -> Optional[TimeoutCircuitOpenState]:
+        path = str(function or "unknown")
+        if symbol:
+            path = f"{path}:{symbol}"
+        return self._timeout_circuit.record_timeout(
+            self._timeout_circuit_config,
+            reason=reason,
+            path=path,
+        )
 
     def _maybe_log_summary(self) -> None:
         if not logger.isEnabledFor(logging.INFO):
@@ -423,6 +492,10 @@ class AlphaVantageClient:
         )
 
         try:
+            self._raise_if_timeout_circuit_open(
+                function=function or None,
+                symbol=str(symbol) if symbol is not None else None,
+            )
             for attempt in range(max_retries + 1):
                 self._wait_for_throttle_cooldown(
                     req_id=req_id,
@@ -486,8 +559,9 @@ class AlphaVantageClient:
                 except httpx.HTTPStatusError as exc:
                     self._record_metric("http_status_errors", 1)
                     status = exc.response.status_code
-                    # Retry 429/5xx; fail fast on other 4xx.
-                    if status == 429 or status >= 500:
+                    timeout_status = status in {408, 504}
+                    # Retry timeout statuses, 429, and 5xx; fail fast on other 4xx.
+                    if status in {408, 429} or status >= 500:
                         if status == 429:
                             self._arm_throttle_cooldown(
                                 req_id=req_id,
@@ -506,6 +580,32 @@ class AlphaVantageClient:
                                 status_code=int(status),
                             )
                             continue
+                    if timeout_status:
+                        self._record_timeout_circuit_timeout(
+                            function=function or None,
+                            symbol=str(symbol) if symbol is not None else None,
+                            reason=f"status_{status}",
+                        )
+                    else:
+                        self._record_timeout_circuit_response()
+                    raise
+                except httpx.TimeoutException:
+                    self._record_metric("network_errors", 1)
+                    if attempt < max_retries:
+                        self._record_metric("retries", 1)
+                        self._sleep_backoff(
+                            attempt,
+                            req_id=req_id,
+                            function=function or None,
+                            symbol=str(symbol) if symbol is not None else None,
+                            reason="network_error",
+                        )
+                        continue
+                    self._record_timeout_circuit_timeout(
+                        function=function or None,
+                        symbol=str(symbol) if symbol is not None else None,
+                        reason="timeout_exception",
+                    )
                     raise
                 except httpx.RequestError:
                     self._record_metric("network_errors", 1)
@@ -562,8 +662,10 @@ class AlphaVantageClient:
                                     reason="throttle_payload",
                                 )
                                 continue
+                            self._record_timeout_circuit_response()
                             raise classified
                     elapsed_ms = (time.monotonic() - attempt_started) * 1000.0
+                    self._record_timeout_circuit_response()
                     self._record_metric("success", 1)
                     self._record_metric("total_success_ms", float(elapsed_ms))
                     self._log(
@@ -601,6 +703,7 @@ class AlphaVantageClient:
                     snippet = (response.text or "").strip().replace("\n", " ")
                     if len(snippet) > 200:
                         snippet = snippet[:200] + "..."
+                    self._record_timeout_circuit_response()
                     raise AlphaVantageError(
                         "Failed to parse JSON response from Alpha Vantage.",
                         code="invalid_json",
@@ -655,9 +758,11 @@ class AlphaVantageClient:
                                 av_attempt=attempt,
                                 av_message=str(classified),
                             )
+                        self._record_timeout_circuit_response()
                         raise classified
 
                 elapsed_ms = (time.monotonic() - attempt_started) * 1000.0
+                self._record_timeout_circuit_response()
                 self._record_metric("success", 1)
                 self._record_metric("total_success_ms", float(elapsed_ms))
                 payload_keys = []
@@ -689,6 +794,8 @@ class AlphaVantageClient:
             if isinstance(exc, AlphaVantageInvalidSymbolError):
                 level = logging.INFO
             elif isinstance(exc, AlphaVantageThrottleError):
+                level = logging.WARNING
+            elif isinstance(exc, AlphaVantageCircuitOpenError):
                 level = logging.WARNING
 
             # Best effort: include the attempt counter for the failure.

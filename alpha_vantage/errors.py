@@ -26,6 +26,18 @@ class AlphaVantageThrottleError(AlphaVantageError):
         super().__init__(message=message, code="throttle", payload=payload)
 
 
+class AlphaVantageCircuitOpenError(AlphaVantageError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float,
+        payload: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        super().__init__(message=message, code="circuit_open", payload=payload)
+        self.retry_after_seconds = float(retry_after_seconds)
+
+
 class AlphaVantageInvalidSymbolError(AlphaVantageError):
     def __init__(self, message: str, *, payload: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(message=message, code="invalid_symbol", payload=payload)

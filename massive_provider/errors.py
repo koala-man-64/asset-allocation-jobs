@@ -32,6 +32,20 @@ class MassiveRateLimitError(MassiveError):
     """Raised when Massive returns 429."""
 
 
+class MassiveCircuitOpenError(MassiveError):
+    """Raised when the Massive timeout circuit is open."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, status_code=503, detail=message, payload=payload)
+        self.retry_after_seconds = float(retry_after_seconds)
+
+
 class MassiveNotFoundError(MassiveError):
     """Raised when Massive returns 404."""
 
