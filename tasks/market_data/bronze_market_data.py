@@ -102,7 +102,6 @@ _PROVIDER = "massive"
 _NO_MARKET_HISTORY_REASON_CODE = "provider_no_market_history"
 _MARKET_HISTORY_FORBIDDEN_REASON_CODE = "provider_market_history_forbidden"
 _MASSIVE_MARKET_HISTORY_PATH = "/api/providers/massive/market-history"
-_ALPHA_VANTAGE_ENRICHMENT_ENV = "BRONZE_MARKET_ALPHA_VANTAGE_ENRICHMENT_ENABLED"
 _DEFAULT_DIVIDEND_AMOUNT = 0.0
 _DEFAULT_SPLIT_COEFFICIENT = 1.0
 _active_alpha_vantage_client_manager: "_ThreadLocalAlphaVantageClientManager | None" = None
