@@ -1452,7 +1452,7 @@ properties:
     triggerType: Schedule
     scheduleTriggerConfig:
       cronExpression: "*/30 * * * 1-5"
-    replicaRetryLimit: 0
+    replicaRetryLimit: 3
     replicaTimeout: 1800
     secrets:
     - name: pg-dsn
@@ -1480,7 +1480,7 @@ def _matching_live_runtime() -> dict:
             "configuration": {
                 "triggerType": "Schedule",
                 "scheduleTriggerConfig": {"cronExpression": "*/30 * * * 1-5"},
-                "replicaRetryLimit": 0,
+                "replicaRetryLimit": 3,
                 "replicaTimeout": 1800,
                 "secrets": [{"name": "pg-dsn"}],
             },
@@ -1560,6 +1560,27 @@ properties:
     errors = module._manifest_runtime_invariant_errors(rendered_jobs)
 
     assert any("cronExpression invariant mismatch" in error for error in errors)
+
+
+def test_verify_deployed_job_runtime_rejects_non_three_retry_limit() -> None:
+    module = load_module("scripts/workflows/verify_deployed_job_runtime.py", "verify_deployed_job_runtime_policy")
+    rendered_jobs = {
+        "example-job": yaml.safe_load(
+            """
+name: example-job
+properties:
+  configuration:
+    triggerType: Manual
+    replicaRetryLimit: 2
+  template:
+    containers:
+    - image: registry/image@sha256:expected
+"""
+        )
+    }
+
+    errors = module._manifest_runtime_invariant_errors(rendered_jobs)
+
     assert any("replicaRetryLimit invariant mismatch" in error for error in errors)
 
 
