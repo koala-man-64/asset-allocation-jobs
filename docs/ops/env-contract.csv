@@ -55,12 +55,20 @@ ALPHA_VANTAGE_EARNINGS_FRESH_DAYS,deploy_var,var,deploy_config,true,Alpha Vantag
 ALPHA_VANTAGE_FINANCE_FRESH_DAYS,deploy_var,var,deploy_config,true,Alpha Vantage finance freshness window.
 ALPHA_VANTAGE_MAX_WORKERS,deploy_var,var,deploy_config,true,Alpha Vantage worker concurrency.
 ALPHA_VANTAGE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Alpha Vantage timeout.
+ALPHA_VANTAGE_CIRCUIT_FAILURE_THRESHOLD,deploy_var,var,deploy_config,true,Alpha Vantage direct-client consecutive timeout threshold before opening the process-local circuit.
+ALPHA_VANTAGE_CIRCUIT_OPEN_SECONDS,deploy_var,var,deploy_config,true,Alpha Vantage direct-client timeout circuit cooldown window in seconds. Use 0 to disable.
 ALPHA_VANTAGE_GATEWAY_RETRY_ATTEMPTS,deploy_var,var,deploy_config,true,Alpha Vantage gateway client retry attempts for jobs HTTP calls.
 ALPHA_VANTAGE_GATEWAY_RETRY_BASE_SECONDS,deploy_var,var,deploy_config,true,Alpha Vantage gateway client retry base delay in seconds.
 ALPHA_VANTAGE_GATEWAY_RETRY_MAX_SECONDS,deploy_var,var,deploy_config,true,Alpha Vantage gateway client retry max delay in seconds.
+ALPHA_VANTAGE_GATEWAY_CIRCUIT_FAILURE_THRESHOLD,deploy_var,var,deploy_config,true,Alpha Vantage gateway timeout circuit consecutive failure threshold.
+ALPHA_VANTAGE_GATEWAY_CIRCUIT_OPEN_SECONDS,deploy_var,var,deploy_config,true,Alpha Vantage gateway timeout circuit cooldown window in seconds. Use 0 to disable.
 MASSIVE_FINANCE_FRESH_DAYS,deploy_var,var,deploy_config,true,Massive finance freshness window.
 MASSIVE_MAX_WORKERS,deploy_var,var,deploy_config,true,Massive worker concurrency.
 MASSIVE_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Massive timeout.
+MASSIVE_CIRCUIT_FAILURE_THRESHOLD,deploy_var,var,deploy_config,true,Massive direct-client consecutive timeout threshold before opening the process-local circuit.
+MASSIVE_CIRCUIT_OPEN_SECONDS,deploy_var,var,deploy_config,true,Massive direct-client timeout circuit cooldown window in seconds. Use 0 to disable.
+MASSIVE_GATEWAY_CIRCUIT_FAILURE_THRESHOLD,deploy_var,var,deploy_config,true,Massive gateway timeout circuit consecutive failure threshold.
+MASSIVE_GATEWAY_CIRCUIT_OPEN_SECONDS,deploy_var,var,deploy_config,true,Massive gateway timeout circuit cooldown window in seconds. Use 0 to disable.
 ECONOMIC_CATALYST_STRUCTURED_CORRECTION_LOOKBACK_DAYS,deploy_var,var,deploy_config,true,Rolling structured-event replay window for economic catalyst ingestion.
 ECONOMIC_CATALYST_HEADLINE_CORRECTION_LOOKBACK_DAYS,deploy_var,var,deploy_config,true,Rolling headline replay window for economic catalyst ingestion.
 ECONOMIC_CATALYST_FUTURE_SCHEDULE_DAYS,deploy_var,var,deploy_config,true,Forward schedule horizon in days for economic catalyst event pulls.
@@ -82,6 +90,8 @@ QUIVER_DATA_SYMBOL_LIMIT,deploy_var,var,deploy_config,true,Cap on the resolved Q
 QUIVER_DATA_PAGE_SIZE,deploy_var,var,deploy_config,true,Quiver page size for paginated live and historical pulls.
 QUIVER_DATA_MAX_PAGES_PER_REQUEST,deploy_var,var,deploy_config,true,Maximum pages to fetch per paginated Quiver request. Use 0 to exhaust pages until an empty or short page.
 QUIVER_DATA_SEC13F_TODAY_ONLY,deploy_var,var,deploy_config,true,Whether Quiver sec13f incremental pulls should restrict to the current day.
+QUIVER_GATEWAY_CIRCUIT_FAILURE_THRESHOLD,deploy_var,var,deploy_config,true,Quiver gateway timeout circuit consecutive failure threshold.
+QUIVER_GATEWAY_CIRCUIT_OPEN_SECONDS,deploy_var,var,deploy_config,true,Quiver gateway timeout circuit cooldown window in seconds. Use 0 to disable.
 ASSET_ALLOCATION_API_BASE_URL,deploy_var,var,deploy_config,true,Control-plane base URL used by jobs HTTP clients. Approved same-environment repair target is http://asset-allocation-api with jobs deployed into asset-allocation-env alongside the API and UI. Do not use a public ACA ingress FQDN in prod.
 ASSET_ALLOCATION_API_SCOPE,secret,secret,secret_store,true,Managed-identity scope used for jobs to control-plane auth. Auto-discovered from the asset-allocation-api Entra app when available.
 ASSET_ALLOCATION_API_TIMEOUT_SECONDS,deploy_var,var,deploy_config,true,Control-plane API HTTP timeout in seconds for jobs gateway clients.

@@ -357,6 +357,8 @@ def _alpha_vantage_news_batches(config: EconomicCatalystConfig, *, now: datetime
             rate_limit_per_min=5,
             max_workers=1,
             timeout=config.http_timeout_seconds,
+            circuit_breaker_failure_threshold=config.alpha_vantage_circuit_failure_threshold,
+            circuit_breaker_open_seconds=config.alpha_vantage_circuit_open_seconds,
         )
     )
     try:

@@ -39,7 +39,7 @@ def test_sqlalchemy_declared_in_pyproject_runtime_dependencies() -> None:
 def test_shared_package_pins_match_intraday_remediation_compatibility_set() -> None:
     expected = {
         "asset-allocation-contracts": "3.18.0",
-        "asset-allocation-runtime-common": "3.7.2",
+        "asset-allocation-runtime-common": "3.7.3",
     }
 
     for package_name, expected_version in expected.items():

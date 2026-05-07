@@ -54,6 +54,13 @@ class AlphaVantageConfig:
         Cooldown window (seconds) enforced after provider throttle signals
         (payload Note/Information or HTTP 429). During this window the client
         suppresses additional outbound calls.
+
+    circuit_breaker_failure_threshold:
+        Consecutive logical request timeouts required to open the timeout
+        circuit.
+
+    circuit_breaker_open_seconds:
+        Timeout circuit cooldown window in seconds. Set to ``0`` to disable.
     """
 
     api_key: str
@@ -65,6 +72,8 @@ class AlphaVantageConfig:
     backoff_base_seconds: float = 0.5
     rate_wait_timeout_seconds: float | None = 120.0
     throttle_cooldown_seconds: float = 60.0
+    circuit_breaker_failure_threshold: int = 3
+    circuit_breaker_open_seconds: float = 300.0
 
     def get_query_url(self) -> str:
         """Return the full query endpoint for the API."""

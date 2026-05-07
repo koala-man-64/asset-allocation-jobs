@@ -708,6 +708,8 @@ def get_active_tickers_massive() -> pd.DataFrame:
             base_url=cfg.MASSIVE_BASE_URL,
             timeout_seconds=cfg.MASSIVE_TIMEOUT_SECONDS,
             page_limit=cfg.MASSIVE_TICKERS_PAGE_LIMIT,
+            circuit_breaker_failure_threshold=cfg.MASSIVE_CIRCUIT_FAILURE_THRESHOLD,
+            circuit_breaker_open_seconds=cfg.MASSIVE_CIRCUIT_OPEN_SECONDS,
             active=True
         )
         return df
