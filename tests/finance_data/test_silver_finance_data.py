@@ -381,7 +381,7 @@ def test_process_alpha26_bucket_blob_accepts_string_last_modified(monkeypatch) -
     assert watermarks[blob_name]["last_modified"] == "2026-03-04T01:00:00+00:00"
 
 
-def test_silver_finance_main_parallel_aggregates_failures_and_updates_watermarks(monkeypatch):
+def test_silver_finance_main_parallel_aggregates_failures_and_blocks_watermarks(monkeypatch):
     blobs = [
         {
             "name": "finance-data/buckets/O.parquet",
@@ -477,10 +477,7 @@ def test_silver_finance_main_parallel_aggregates_failures_and_updates_watermarks
     exit_code = silver.main()
 
     assert exit_code == 1
-    assert saved["key"] == "bronze_finance_data"
-    assert saved["items"]["preexisting"] == {"etag": "keep"}
-    assert saved["items"]["finance-data/buckets/O.parquet"]["etag"] == "etag-ok"
-    assert "finance-data/buckets/F.parquet" not in saved["items"]
+    assert saved == {}
 
 
 def test_silver_finance_main_succeeds_with_no_data_skips_and_records_skipped_no_data(monkeypatch):

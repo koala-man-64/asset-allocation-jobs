@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime, timezone
 
+import pandas as pd
 from asset_allocation_runtime_common.market_data import core as mdc
 
 from tasks.common.job_status import resolve_job_run_status
+from tasks.common.silver_processed_state import (
+    build_processed_state_index,
+    build_processed_state_record,
+    load_processed_state,
+    make_entity_key,
+    merge_processed_state_updates,
+    new_stats as new_processed_state_stats,
+    processed_state_enabled,
+    processed_state_force_rebuild,
+    record_decision as record_processed_state_decision,
+    save_processed_state,
+    should_process_entity,
+)
 from tasks.common.watermarks import (
     load_last_success,
     load_watermarks,
@@ -25,6 +40,8 @@ from tasks.economic_catalyst_data.transform import (
 
 
 _WATERMARK_KEY = "economic_catalyst_bronze_raw"
+_PROCESSED_STATE_DOMAIN = "economic-catalyst"
+_PROCESSED_STATE_PROCESSOR_VERSION = "silver-economic-catalyst-v1"
 
 
 def _candidate_blob_infos(*, client, watermarks: dict[str, object], last_success) -> tuple[list[dict], int]:
@@ -59,8 +76,105 @@ def main() -> int:
         mdc.write_line("Economic catalyst silver skipped: no changed bronze raw blobs.")
         return 0
 
+    processed_state_active = processed_state_enabled() and getattr(mdc, "common_storage_client", None) is not None
+    processed_state = load_processed_state(_PROCESSED_STATE_DOMAIN) if processed_state_active else None
+    processed_state_index = build_processed_state_index(processed_state) if processed_state_active else None
+    processed_state_updates: list[dict] = []
+    processed_state_stats = new_processed_state_stats()
+    force_processed_state = processed_state_force_rebuild()
+
     batches = read_json_batches(client=bronze_client, blob_infos=candidate_blobs)
-    new_source_events, new_source_headlines, new_quarantine = parse_raw_batches_to_source_frames(batches)
+    successful_blob_names = {
+        str(batch.get("__source_blob_name") or "").strip()
+        for batch in batches
+        if str(batch.get("__source_blob_name") or "").strip()
+    }
+    changed_batches: list[dict] = []
+    output_paths = [
+        constants.silver_state_table_path("source_events_raw"),
+        constants.silver_state_table_path("source_headlines_raw"),
+        constants.silver_state_table_path("quarantine"),
+        constants.silver_table_path("events"),
+        constants.silver_table_path("event_versions"),
+        constants.silver_table_path("headlines"),
+        constants.silver_table_path("headline_versions"),
+        constants.silver_table_path("mentions"),
+    ]
+    for batch in batches:
+        source_name = str(batch.get("source_name") or "unknown").strip()
+        dataset_name = str(batch.get("dataset_name") or "unknown").strip()
+        source_blob_name = str(batch.get("__source_blob_name") or "").strip()
+        entity_key = make_entity_key(
+            domain=_PROCESSED_STATE_DOMAIN,
+            bucket=source_name,
+            entity_id=f"{source_name}:{dataset_name}",
+        )
+        payload = {
+            key: value
+            for key, value in batch.items()
+            if key not in {"__source_blob_name", "fetched_at", "ingested_at", "run_id"}
+        }
+        current_state = build_processed_state_record(
+            domain=_PROCESSED_STATE_DOMAIN,
+            bucket=source_name,
+            entity_key=entity_key,
+            sub_domain=dataset_name,
+            processor_version=_PROCESSED_STATE_PROCESSOR_VERSION,
+            source_frame=pd.DataFrame(
+                [{"payload_json": json.dumps(payload, sort_keys=True, default=str)}]
+            ),
+            source_blob={"name": source_blob_name},
+            output_paths=output_paths,
+        )
+        if processed_state_index is not None:
+            should_process, reason = should_process_entity(
+                current_state,
+                processed_state_index.get(entity_key),
+                force_reprocess=force_processed_state,
+            )
+            record_processed_state_decision(
+                processed_state_stats,
+                should_process=should_process,
+                reason=reason,
+            )
+            if not should_process:
+                continue
+        changed_batches.append(batch)
+        processed_state_updates.append(current_state)
+
+    if not changed_batches:
+        for blob in candidate_blobs:
+            blob_name = str(blob.get("name") or "")
+            if blob_name not in successful_blob_names:
+                continue
+            watermarks[normalize_watermark_blob_name(blob_name)] = {
+                "etag": blob.get("etag"),
+                "last_modified": str(blob.get("last_modified") or ""),
+            }
+        save_watermarks(_WATERMARK_KEY, watermarks)
+        status, exit_code = resolve_job_run_status(failed_count=0, warning_count=0)
+        mdc.write_line(
+            "silver_processed_state_summary layer=silver domain=economic-catalyst "
+            f"entities_seen={processed_state_stats['entities_seen']} "
+            f"entities_changed={processed_state_stats['entities_changed']} "
+            f"entities_skipped_state={processed_state_stats['entities_skipped_state']} "
+            f"entities_reprocessed_calendar={processed_state_stats['entities_reprocessed_calendar']} "
+            "output_buckets_touched=0 processed_state_updates=0"
+        )
+        save_last_success(
+            "silver_economic_catalyst_data",
+            when=datetime.now(timezone.utc),
+            metadata={
+                "status": status,
+                "candidate_blob_count": len(candidate_blobs),
+                "parsed_blob_count": len(successful_blob_names),
+                "skipped_blob_count": skipped,
+                "changed_source_count": 0,
+            },
+        )
+        return exit_code
+
+    new_source_events, new_source_headlines, new_quarantine = parse_raw_batches_to_source_frames(changed_batches)
 
     existing_source_events = load_parquet_snapshot(
         client=silver_client,
@@ -113,11 +227,13 @@ def main() -> int:
         write_parquet_snapshot(client=silver_client, path=constants.silver_table_path(table_name), frame=frame)
 
     for blob in candidate_blobs:
-        watermarks[normalize_watermark_blob_name(str(blob.get("name") or ""))] = {
+        blob_name = str(blob.get("name") or "")
+        if blob_name not in successful_blob_names:
+            continue
+        watermarks[normalize_watermark_blob_name(blob_name)] = {
             "etag": blob.get("etag"),
             "last_modified": str(blob.get("last_modified") or ""),
         }
-    save_watermarks(_WATERMARK_KEY, watermarks)
     write_domain_artifact(
         client=silver_client,
         layer="silver",
@@ -138,14 +254,31 @@ def main() -> int:
             "skippedBlobCount": skipped,
         },
     )
+    if processed_state_updates and processed_state_active:
+        save_processed_state(
+            _PROCESSED_STATE_DOMAIN,
+            merge_processed_state_updates(processed_state, processed_state_updates),
+        )
+    save_watermarks(_WATERMARK_KEY, watermarks)
     status, exit_code = resolve_job_run_status(failed_count=0, warning_count=0 if quarantine.empty else len(quarantine))
+    mdc.write_line(
+        "silver_processed_state_summary layer=silver domain=economic-catalyst "
+        f"entities_seen={processed_state_stats['entities_seen']} "
+        f"entities_changed={processed_state_stats['entities_changed']} "
+        f"entities_skipped_state={processed_state_stats['entities_skipped_state']} "
+        f"entities_reprocessed_calendar={processed_state_stats['entities_reprocessed_calendar']} "
+        "output_buckets_touched=1 "
+        f"processed_state_updates={len(processed_state_updates)}"
+    )
     save_last_success(
         "silver_economic_catalyst_data",
         when=datetime.now(timezone.utc),
         metadata={
             "status": status,
             "candidate_blob_count": len(candidate_blobs),
+            "parsed_blob_count": len(successful_blob_names),
             "skipped_blob_count": skipped,
+            "changed_source_count": len(changed_batches),
             "source_event_rows": int(len(source_events)),
             "source_headline_rows": int(len(source_headlines)),
             "event_rows": int(len(canonical["events"])),
