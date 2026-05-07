@@ -4,7 +4,14 @@ import pytest
 
 from tasks.quiver_data import bronze_quiver_data as bronze
 from tasks.quiver_data import constants
-from tasks.quiver_data.bronze_quiver_data import PaginationLimitExceeded, QuiverSourceRequest, _build_requests, plan_symbol_batch
+from tasks.quiver_data.bronze_quiver_data import (
+    PaginationLimitExceeded,
+    QuiverRequestFetchError,
+    QuiverSourceRequest,
+    RequestFetchResult,
+    _build_requests,
+    plan_symbol_batch,
+)
 from tasks.quiver_data.config import QuiverDataConfig
 
 
@@ -264,3 +271,152 @@ def test_main_fails_when_quiver_gateway_client_is_unavailable(monkeypatch: pytes
 
     with pytest.raises(RuntimeError, match="QuiverGatewayClient is unavailable"):
         bronze.main(_config())
+
+
+class _FakeGateway:
+    @classmethod
+    def from_env(cls):
+        return cls()
+
+    def close(self) -> None:
+        return None
+
+
+def _request_metadata(dataset: str, symbol: str | None, *, failed: bool = False) -> dict[str, object]:
+    return {
+        "sourceDataset": dataset,
+        "requestedSymbol": symbol,
+        "pagesFetched": 1,
+        "rowsFetched": 0 if failed else 1,
+        "stopReason": "failed" if failed else "single_request",
+    }
+
+
+def _success_request(dataset: str, symbol: str | None = None) -> QuiverSourceRequest:
+    return QuiverSourceRequest(
+        source_dataset=dataset,
+        dataset_family="test_family",
+        requested_symbol=symbol,
+        paginated=False,
+        fetch=lambda: RequestFetchResult(
+            rows=[{"Ticker": symbol or "AAPL", "value": 1}],
+            metadata=_request_metadata(dataset, symbol),
+        ),
+    )
+
+
+def _failure_request(dataset: str, symbol: str | None = None) -> QuiverSourceRequest:
+    def fetch() -> RequestFetchResult:
+        raise QuiverRequestFetchError("provider failed", metadata=_request_metadata(dataset, symbol, failed=True))
+
+    return QuiverSourceRequest(
+        source_dataset=dataset,
+        dataset_family="test_family",
+        requested_symbol=symbol,
+        paginated=False,
+        fetch=fetch,
+    )
+
+
+def _run_quiver_main_with_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    requests: list[QuiverSourceRequest],
+    *,
+    domain_artifact_error: BaseException | None = None,
+) -> dict[str, object]:
+    saved_json: list[tuple[object, str]] = []
+    saved_success: list[dict[str, object]] = []
+    saved_watermarks: list[tuple[str, dict[str, object]]] = []
+    warnings: list[str] = []
+
+    plan = bronze.SymbolBatchPlan(
+        universe_symbols=("AAPL", "MSFT"),
+        selected_symbols=("AAPL",),
+        batch_size=1,
+        cursor_key=bronze._cursor_watermark_key("incremental"),
+        cursor_start=0,
+        cursor_end=0,
+        cursor_next=1,
+    )
+
+    def save_json(payload: object, path: str, **_kwargs: object) -> None:
+        saved_json.append((payload, path))
+
+    def save_success(_key: str, *, metadata: dict[str, object]) -> None:
+        saved_success.append(metadata)
+
+    def save_cursor(key: str, payload: dict[str, object]) -> None:
+        saved_watermarks.append((key, payload))
+
+    def write_domain(**_kwargs: object) -> None:
+        if domain_artifact_error is not None:
+            raise domain_artifact_error
+
+    monkeypatch.setattr(bronze.mdc, "log_environment_diagnostics", lambda: None)
+    monkeypatch.setattr(bronze.mdc, "get_storage_client", lambda _container: object())
+    monkeypatch.setattr(bronze, "QuiverGatewayClient", _FakeGateway)
+    monkeypatch.setattr(bronze, "_load_symbol_batch_plan", lambda _config: plan)
+    monkeypatch.setattr(bronze, "_build_requests", lambda *_args, **_kwargs: requests)
+    monkeypatch.setattr(bronze, "_run_id", lambda: "run-1")
+    monkeypatch.setattr(bronze, "bucket_rows", lambda *_args, **_kwargs: {"A": [{"value": 1}]})
+    monkeypatch.setattr(bronze.mdc, "save_json_content", save_json)
+    monkeypatch.setattr(bronze, "write_domain_artifact", write_domain)
+    monkeypatch.setattr(bronze, "save_last_success", save_success)
+    monkeypatch.setattr(bronze, "save_watermarks", save_cursor)
+    monkeypatch.setattr(bronze.mdc, "write_warning", lambda message: warnings.append(str(message)))
+    monkeypatch.setattr(bronze.mdc, "write_line", lambda _message: None)
+    monkeypatch.setattr(bronze.mdc, "write_error", lambda _message: None)
+
+    exit_code = bronze.main(_config())
+    return {
+        "exit_code": exit_code,
+        "saved_json": saved_json,
+        "saved_success": saved_success,
+        "saved_watermarks": saved_watermarks,
+        "warnings": warnings,
+    }
+
+
+def test_main_one_global_request_failure_one_success_exits_zero_and_saves_last_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run_quiver_main_with_requests(
+        monkeypatch,
+        [_failure_request("global_feed"), _success_request("ticker_feed", "AAPL")],
+    )
+
+    assert result["exit_code"] == 0
+    assert len(result["saved_success"]) == 1
+    assert len(result["saved_watermarks"]) == 1
+
+
+def test_main_all_requests_fail_exits_one_and_does_not_save_last_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run_quiver_main_with_requests(
+        monkeypatch,
+        [_failure_request("global_feed"), _failure_request("ticker_feed", "AAPL")],
+    )
+
+    assert result["exit_code"] == 1
+    assert result["saved_success"] == []
+    assert result["saved_watermarks"] == []
+
+
+def test_main_ticker_scoped_request_failure_does_not_advance_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run_quiver_main_with_requests(
+        monkeypatch,
+        [_success_request("global_feed"), _failure_request("ticker_feed", "AAPL")],
+    )
+
+    assert result["exit_code"] == 0
+    assert len(result["saved_success"]) == 1
+    assert result["saved_watermarks"] == []
+    assert any("symbol cursor not advanced" in message for message in result["warnings"])
+
+
+def test_main_domain_artifact_write_failure_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(RuntimeError, match="artifact failed"):
+        _run_quiver_main_with_requests(
+            monkeypatch,
+            [_success_request("global_feed")],
+            domain_artifact_error=RuntimeError("artifact failed"),
+        )

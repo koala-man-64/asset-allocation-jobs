@@ -963,7 +963,7 @@ def test_main_async_promoted_reprobe_still_invalid_updates_marker(unique_ticker)
     asyncio.run(run_test())
 
 
-def test_main_async_promoted_reprobe_transient_failure_counts_as_warning(unique_ticker):
+def test_main_async_promoted_reprobe_transient_failure_fails_all_provider_gate(unique_ticker):
     symbol = unique_ticker
     client_manager = MagicMock()
     coverage_summary = bronze._empty_coverage_summary()
@@ -1030,11 +1030,7 @@ def test_main_async_promoted_reprobe_transient_failure_counts_as_warning(unique_
             ),
             patch("tasks.finance_data.bronze_finance_data.bronze_client") as mock_bronze_client,
             patch("tasks.finance_data.bronze_finance_data.list_manager") as mock_list_manager,
-            patch(
-                "tasks.finance_data.bronze_finance_data.resolve_job_run_status",
-                return_value=("succeededWithWarnings", 0),
-            ) as mock_resolve_status,
-            patch("tasks.finance_data.bronze_finance_data.mdc.write_line"),
+            patch("tasks.finance_data.bronze_finance_data.mdc.write_line") as mock_write_line,
             patch("tasks.finance_data.bronze_finance_data.mdc.write_warning"),
         ):
             mock_bronze_client.list_blob_infos.return_value = []
@@ -1043,11 +1039,12 @@ def test_main_async_promoted_reprobe_transient_failure_counts_as_warning(unique_
 
             exit_code = await bronze.main_async()
 
-        assert exit_code == 0
+        assert exit_code == 1
         mock_record.assert_called_once()
         assert mock_record.call_args.kwargs["outcome"] == "failed_massivegatewayerror"
         mock_clear.assert_not_called()
-        mock_resolve_status.assert_called_once_with(failed_count=0, warning_count=1)
+        line_messages = [str(call.args[0]) for call in mock_write_line.call_args_list if call.args]
+        assert any("all_provider_calls_failed=true" in message for message in line_messages)
 
     asyncio.run(run_test())
 
@@ -1125,6 +1122,182 @@ def test_main_async_logs_symbol_success(unique_ticker):
         assert any("Bronze finance success: operation=list_flush" in message for message in messages)
 
     asyncio.run(run_test())
+
+
+async def _run_finance_main_with_outcomes(
+    symbols: list[str],
+    outcomes: dict[str, bronze._FinanceSymbolOutcome],
+    *,
+    record_invalid_return: dict[str, object] | None = None,
+    write_alpha26_side_effect: BaseException | None = None,
+):
+    client_manager = MagicMock()
+
+    def _process_symbol(symbol: str, *_args, **_kwargs) -> bronze._FinanceSymbolOutcome:
+        return outcomes[str(symbol).strip().upper()]
+
+    with (
+        patch("tasks.finance_data.bronze_finance_data._validate_environment"),
+        patch("tasks.finance_data.bronze_finance_data.mdc.log_environment_diagnostics"),
+        patch(
+            "tasks.finance_data.bronze_finance_data.symbol_availability.sync_domain_availability",
+            return_value=_sync_result(),
+        ),
+        patch(
+            "tasks.finance_data.bronze_finance_data.symbol_availability.get_domain_symbols",
+            return_value=pd.DataFrame({"Symbol": symbols}),
+        ),
+        patch(
+            "tasks.finance_data.bronze_finance_data.bronze_bucketing.is_alpha26_mode",
+            return_value=True,
+        ),
+        patch(
+            "tasks.finance_data.bronze_finance_data._load_alpha26_finance_row_map",
+            return_value={},
+        ),
+        patch(
+            "tasks.finance_data.bronze_finance_data.resolve_backfill_start_date",
+            return_value=None,
+        ),
+        patch(
+            "tasks.finance_data.bronze_finance_data._ThreadLocalMassiveClientManager",
+            return_value=client_manager,
+        ),
+        patch(
+            "tasks.finance_data.bronze_finance_data._process_symbol_with_recovery",
+            side_effect=_process_symbol,
+        ),
+        patch(
+            "tasks.finance_data.bronze_finance_data.record_invalid_symbol_candidate",
+            return_value=record_invalid_return or {"promoted": False, "observedRunCount": 1, "blacklistPath": None},
+        ) as mock_record_invalid,
+        patch("tasks.finance_data.bronze_finance_data.clear_invalid_candidate_marker"),
+        patch(
+            "tasks.finance_data.bronze_finance_data._write_alpha26_finance_buckets",
+            side_effect=write_alpha26_side_effect,
+            return_value=(len(outcomes), "index", len(bronze._BUCKET_COLUMNS)),
+        ) as mock_write,
+        patch(
+            "tasks.finance_data.bronze_finance_data._delete_flat_finance_symbol_blobs",
+            return_value=0,
+        ),
+        patch("tasks.finance_data.bronze_finance_data.bronze_client") as mock_bronze_client,
+        patch("tasks.finance_data.bronze_finance_data.list_manager") as mock_list_manager,
+        patch("tasks.finance_data.bronze_finance_data.mdc.write_line") as mock_write_line,
+        patch("tasks.finance_data.bronze_finance_data.mdc.write_warning"),
+        patch("tasks.finance_data.bronze_finance_data.mdc.write_error") as mock_write_error,
+    ):
+        mock_bronze_client.list_blob_infos.return_value = []
+        mock_list_manager.is_blacklisted.return_value = False
+        mock_list_manager.blacklist = set()
+
+        exit_code = await bronze.main_async()
+
+    return {
+        "exit_code": exit_code,
+        "record_invalid": mock_record_invalid,
+        "write": mock_write,
+        "line": mock_write_line,
+        "error": mock_write_error,
+    }
+
+
+def _finance_success_outcome() -> bronze._FinanceSymbolOutcome:
+    return bronze._FinanceSymbolOutcome(
+        wrote=1,
+        valid_symbol=True,
+        invalid_candidate=False,
+        coverage_unavailable=False,
+        invalid_evidence=[],
+        failures=[],
+        coverage_summary=bronze._empty_coverage_summary(),
+    )
+
+
+def _finance_retryable_failure_outcome(exc: BaseException) -> bronze._FinanceSymbolOutcome:
+    return bronze._FinanceSymbolOutcome(
+        wrote=0,
+        valid_symbol=False,
+        invalid_candidate=False,
+        coverage_unavailable=False,
+        invalid_evidence=[],
+        failures=[("balance_sheet", exc)],
+        coverage_summary=bronze._empty_coverage_summary(),
+    )
+
+
+def test_main_async_one_success_one_retryable_provider_failure_exits_zero_with_warning():
+    exc = bronze.MassiveGatewayError("gateway unavailable", status_code=503)
+    result = asyncio.run(
+        _run_finance_main_with_outcomes(
+            ["AAA", "BBB"],
+            {
+                "AAA": _finance_success_outcome(),
+                "BBB": _finance_retryable_failure_outcome(exc),
+            },
+        )
+    )
+
+    assert result["exit_code"] == 0
+    line_messages = [str(call.args[0]) for call in result["line"].call_args_list if call.args]
+    assert any("job_status=succeededWithWarnings" in message for message in line_messages)
+    assert any("all_provider_calls_failed=false" in message for message in line_messages)
+
+
+def test_main_async_all_retryable_provider_failures_exits_one():
+    exc = bronze.MassiveGatewayError("gateway unavailable", status_code=503)
+    result = asyncio.run(
+        _run_finance_main_with_outcomes(
+            ["AAA", "BBB"],
+            {
+                "AAA": _finance_retryable_failure_outcome(exc),
+                "BBB": _finance_retryable_failure_outcome(exc),
+            },
+        )
+    )
+
+    assert result["exit_code"] == 1
+    line_messages = [str(call.args[0]) for call in result["line"].call_args_list if call.args]
+    assert any("all_provider_calls_failed=true" in message for message in line_messages)
+
+
+def test_main_async_blacklist_promotion_exits_zero_with_warning():
+    invalid_error = bronze.MassiveGatewayNotFoundError("invalid", status_code=404)
+    outcome = bronze._FinanceSymbolOutcome(
+        wrote=0,
+        valid_symbol=False,
+        invalid_candidate=True,
+        coverage_unavailable=False,
+        invalid_evidence=[("balance_sheet", invalid_error)],
+        failures=[],
+        coverage_summary=bronze._empty_coverage_summary(),
+    )
+    result = asyncio.run(
+        _run_finance_main_with_outcomes(
+            ["AAA"],
+            {"AAA": outcome},
+            record_invalid_return={"promoted": True, "observedRunCount": 2, "blacklistPath": "finance-data/blacklist.csv"},
+        )
+    )
+
+    assert result["exit_code"] == 0
+    result["record_invalid"].assert_called_once()
+    line_messages = [str(call.args[0]) for call in result["line"].call_args_list if call.args]
+    assert any("job_status=succeededWithWarnings" in message for message in line_messages)
+
+
+def test_main_async_alpha26_publish_failure_exits_one():
+    result = asyncio.run(
+        _run_finance_main_with_outcomes(
+            ["AAA"],
+            {"AAA": _finance_success_outcome()},
+            write_alpha26_side_effect=RuntimeError("publish failed"),
+        )
+    )
+
+    assert result["exit_code"] == 1
+    error_messages = [str(call.args[0]) for call in result["error"].call_args_list if call.args]
+    assert any("alpha26 bucket write failed" in message for message in error_messages)
 
 
 def test_run_bronze_finance_job_entrypoint_skips_downstream_after_nonzero_exit() -> None:

@@ -12,7 +12,7 @@ try:
 except Exception:  # pragma: no cover - runtime package pin can lag during local multi-repo work
     QuiverGatewayClient = None  # type: ignore[assignment]
 
-from tasks.common.job_status import resolve_job_run_status
+from tasks.common.job_status import resolve_provider_gated_job_run_status
 from tasks.common.watermarks import load_watermarks, save_last_success, save_watermarks
 from tasks.quiver_data import constants
 from tasks.quiver_data.config import QuiverDataConfig
@@ -530,6 +530,10 @@ def main(config: QuiverDataConfig | None = None) -> int:
     request_fetches: list[dict[str, Any]] = []
     warnings: list[str] = []
     failures: list[str] = []
+    provider_requests_attempted = 0
+    provider_request_failures = 0
+    fatal_failures = 0
+    failed_requested_symbols: set[str] = set()
 
     try:
         for request in _build_requests(
@@ -537,27 +541,23 @@ def main(config: QuiverDataConfig | None = None) -> int:
             config,
             selected_symbols=symbol_batch_plan.selected_symbols,
         ):
+            provider_requests_attempted += 1
             try:
                 result = request.fetch()
                 request_fetches.append(result.metadata)
                 _log_request_fetch(result.metadata)
-                batches = bucket_rows(
-                    request.source_dataset,
-                    request.dataset_family,
-                    result.rows,
-                    requested_symbol=request.requested_symbol,
-                )
-                for bucket, batch in batches.items():
-                    path = constants.bronze_raw_path(run_id, request.source_dataset, bucket)
-                    mdc.save_json_content(batch, path, client=bronze_client)
-                    batch_paths.append(path)
             except QuiverRequestFetchError as exc:
+                provider_request_failures += 1
                 request_fetches.append(dict(exc.metadata))
                 _log_request_fetch(exc.metadata)
                 message = f"{request.source_dataset} ({request.requested_symbol or 'all'}) failed: {type(exc).__name__}: {exc}"
                 mdc.write_warning(message)
                 failures.append(message)
+                if request.requested_symbol:
+                    failed_requested_symbols.add(str(request.requested_symbol).strip().upper())
+                continue
             except Exception as exc:
+                provider_request_failures += 1
                 metadata = _request_metadata_with_config(
                     request,
                     config,
@@ -572,8 +572,42 @@ def main(config: QuiverDataConfig | None = None) -> int:
                 message = f"{request.source_dataset} ({request.requested_symbol or 'all'}) failed: {type(exc).__name__}: {exc}"
                 mdc.write_warning(message)
                 failures.append(message)
+                if request.requested_symbol:
+                    failed_requested_symbols.add(str(request.requested_symbol).strip().upper())
+                continue
+
+            try:
+                batches = bucket_rows(
+                    request.source_dataset,
+                    request.dataset_family,
+                    result.rows,
+                    requested_symbol=request.requested_symbol,
+                )
+                for bucket, batch in batches.items():
+                    path = constants.bronze_raw_path(run_id, request.source_dataset, bucket)
+                    mdc.save_json_content(batch, path, client=bronze_client)
+                    batch_paths.append(path)
+            except Exception as exc:
+                fatal_failures += 1
+                message = (
+                    f"{request.source_dataset} ({request.requested_symbol or 'all'}) persist failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                mdc.write_error(message)
+                failures.append(message)
+                if request.requested_symbol:
+                    failed_requested_symbols.add(str(request.requested_symbol).strip().upper())
     finally:
         gateway_client.close()
+
+    status_decision = resolve_provider_gated_job_run_status(
+        fatal_failure_count=fatal_failures,
+        provider_call_count=provider_requests_attempted,
+        retryable_provider_failure_count=provider_request_failures,
+        warning_count=len(warnings),
+    )
+    status = status_decision.job_status
+    exit_code = status_decision.exit_code
 
     manifest = {
         "version": 1,
@@ -604,22 +638,38 @@ def main(config: QuiverDataConfig | None = None) -> int:
         tables={},
         extra_metadata=manifest,
     )
-    _persist_symbol_batch_plan(symbol_batch_plan, job_mode=config.job_mode)
 
-    status, exit_code = resolve_job_run_status(failed_count=len(failures), warning_count=len(warnings))
-    save_last_success(
-        _last_success_key(config.job_mode),
-        metadata={
-            "run_id": run_id,
-            "status": status,
-            "job_mode": config.job_mode,
-            "universe_source": _UNIVERSE_SOURCE,
-            "batch_count": len(batch_paths),
-            "selected_symbols": list(symbol_batch_plan.selected_symbols),
-            "universe_symbol_count": len(symbol_batch_plan.universe_symbols),
-            "failures": failures,
-        },
+    if exit_code == 0 and not failed_requested_symbols:
+        _persist_symbol_batch_plan(symbol_batch_plan, job_mode=config.job_mode)
+    elif failed_requested_symbols:
+        mdc.write_warning(
+            "Bronze Quiver symbol cursor not advanced: "
+            f"failed_requested_symbols={','.join(sorted(failed_requested_symbols))}"
+        )
+
+    mdc.write_line(
+        "Bronze Quiver ingest complete: "
+        f"provider_calls_attempted={provider_requests_attempted} "
+        f"provider_retryable_failures={provider_request_failures} "
+        f"fatal_failures={fatal_failures} "
+        f"all_provider_calls_failed={str(status_decision.all_provider_calls_failed).lower()} "
+        f"warning_count={status_decision.warning_count} "
+        f"job_status={status}"
     )
+    if exit_code == 0:
+        save_last_success(
+            _last_success_key(config.job_mode),
+            metadata={
+                "run_id": run_id,
+                "status": status,
+                "job_mode": config.job_mode,
+                "universe_source": _UNIVERSE_SOURCE,
+                "batch_count": len(batch_paths),
+                "selected_symbols": list(symbol_batch_plan.selected_symbols),
+                "universe_symbol_count": len(symbol_batch_plan.universe_symbols),
+                "failures": failures,
+            },
+        )
     return exit_code
 
 

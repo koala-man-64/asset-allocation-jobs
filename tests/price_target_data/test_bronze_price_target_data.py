@@ -556,3 +556,132 @@ def test_main_async_returns_success_when_only_filtered_missing_symbols_are_detec
         mock_list_manager.flush.assert_called_once()
 
     asyncio.run(run_test())
+
+
+def _price_target_batch_summary(*, api_error: bool = False, saved: int = 0) -> dict[str, object]:
+    return {
+        "requested": 1,
+        "stale": 1,
+        "api_rows": 1 if saved else 0,
+        "saved": saved,
+        "deleted": 0,
+        "save_failed": 0,
+        "filtered_missing": 0,
+        "provider_batch_attempted": 1,
+        "api_error": api_error,
+        "coverage_checked": 0,
+        "coverage_forced_refetch": 0,
+        "coverage_marked_covered": 0,
+        "coverage_marked_limited": 0,
+        "coverage_skipped_limited_marker": 0,
+    }
+
+
+async def _run_price_target_main_with_batch_summaries(
+    batch_summaries: list[dict[str, object]],
+    *,
+    alpha26_mode: bool = False,
+    alpha26_publish_side_effect: BaseException | None = None,
+):
+    symbols = [f"SYM{idx}" for idx, _summary in enumerate(batch_summaries)]
+
+    with patch(
+        "tasks.price_target_data.bronze_price_target_data._validate_environment"
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data.mdc.log_environment_diagnostics"
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data.resolve_backfill_start_date",
+        return_value=None,
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data.symbol_availability.sync_domain_availability",
+        return_value=_sync_result(),
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data.symbol_availability.get_domain_symbols",
+        return_value=pd.DataFrame({"Symbol": symbols}),
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data.bronze_bucketing.is_alpha26_mode",
+        return_value=alpha26_mode,
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data.BATCH_SIZE",
+        1,
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data._list_flat_price_target_blob_infos",
+        return_value={},
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data._load_alpha26_existing_price_target_frames",
+        return_value={},
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data.process_batch_bronze",
+        new=AsyncMock(side_effect=batch_summaries),
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data._write_alpha26_price_target_buckets",
+        side_effect=alpha26_publish_side_effect,
+        return_value=(len(symbols), "price-target-data/buckets/index.parquet"),
+    ) as mock_publish, patch(
+        "tasks.price_target_data.bronze_price_target_data._delete_flat_symbol_blobs",
+        return_value=0,
+    ), patch(
+        "tasks.price_target_data.bronze_price_target_data.list_manager"
+    ) as mock_list_manager, patch(
+        "tasks.price_target_data.bronze_price_target_data.mdc.write_line"
+    ) as mock_write_line, patch(
+        "tasks.price_target_data.bronze_price_target_data.mdc.write_error"
+    ) as mock_write_error:
+        mock_list_manager.is_blacklisted.return_value = False
+
+        exit_code = await bronze.main_async()
+
+    return {
+        "exit_code": exit_code,
+        "publish": mock_publish,
+        "line": mock_write_line,
+        "error": mock_write_error,
+        "list_manager": mock_list_manager,
+    }
+
+
+def test_main_async_one_failed_nasdaq_batch_one_successful_batch_exits_zero():
+    result = asyncio.run(
+        _run_price_target_main_with_batch_summaries(
+            [
+                _price_target_batch_summary(api_error=True),
+                _price_target_batch_summary(saved=1),
+            ]
+        )
+    )
+
+    assert result["exit_code"] == 0
+    result["list_manager"].flush.assert_called_once()
+    line_messages = [str(call.args[0]) for call in result["line"].call_args_list if call.args]
+    assert any("job_status=succeededWithWarnings" in message for message in line_messages)
+    assert any("all_provider_calls_failed=false" in message for message in line_messages)
+
+
+def test_main_async_all_nasdaq_batches_fail_exits_one():
+    result = asyncio.run(
+        _run_price_target_main_with_batch_summaries(
+            [
+                _price_target_batch_summary(api_error=True),
+                _price_target_batch_summary(api_error=True),
+            ]
+        )
+    )
+
+    assert result["exit_code"] == 1
+    line_messages = [str(call.args[0]) for call in result["line"].call_args_list if call.args]
+    assert any("all_provider_calls_failed=true" in message for message in line_messages)
+
+
+def test_main_async_final_alpha26_publish_exception_exits_one():
+    result = asyncio.run(
+        _run_price_target_main_with_batch_summaries(
+            [_price_target_batch_summary(saved=1)],
+            alpha26_mode=True,
+            alpha26_publish_side_effect=RuntimeError("publish failed"),
+        )
+    )
+
+    assert result["exit_code"] == 1
+    result["publish"].assert_called_once()
+    error_messages = [str(call.args[0]) for call in result["error"].call_args_list if call.args]
+    assert any("alpha26 bucket write failed" in message for message in error_messages)
