@@ -1,0 +1,4 @@
+interface:
+  display_name: "Provisioning, Configuration, and Disaster Recovery Expert"
+  short_description: "Audit provisioning, config, and recovery readiness"
+  default_prompt: "Use $provisioning-configuration-and-disaster-recovery-expert to audit whether this repository can be provisioned, configured, deployed, and recovered from disaster."
