@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codebase Transition Sleuth"
+  short_description: "Find stale flags and unfinished migrations."
+  default_prompt: "Use $codebase-transition-sleuth to inspect this repository for stale feature flags, transitional leftovers, incomplete migrations, and safe cleanup candidates."
